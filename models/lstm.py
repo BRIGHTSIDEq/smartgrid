@@ -160,8 +160,11 @@ class TemporalAttentionBlock(tf.keras.layers.Layer):
             training=training,
         )  # (B, 1, d)
 
-        # Residual к исходным hidden_states, затем avg pool
-        context = self.pool(attn_out + hidden_states)   # (B, d)
+        # Важно: query имеет длину 1, поэтому attn_out.shape == (B, 1, d).
+        # Ранее тут использовалось сложение с hidden_states (B, T, d), что
+        # приводило к неявному broadcasting и «размыванию» внимания по всем T.
+        # Для прогноза по последнему состоянию берём именно целевой контекст.
+        context = tf.squeeze(attn_out, axis=1)  # (B, d)
         context = self.drop(self.ln(context), training=training)
         return context
 
@@ -234,18 +237,23 @@ def build_lstm_model(
     )(inp)
 
     # ── LSTM Блок 1 ────────────────────────────────────────────────────────────
-    x = tf.keras.layers.LSTM(
+    x = tf.keras.layers.Bidirectional(
+        tf.keras.layers.LSTM(
         lstm_units_1, return_sequences=True,
-        recurrent_dropout=0.05,
+        recurrent_dropout=0.0,
         name="lstm_1",
+        ),
+        merge_mode="concat",
+        name="bilstm_1",
     )(x)
+    x = tf.keras.layers.Dense(lstm_units_1, name="bilstm_1_proj")(x)
     x = tf.keras.layers.LayerNormalization(epsilon=1e-6, name="ln_1")(x)
     x = tf.keras.layers.Dropout(dropout_rate, name="drop_1")(x, training=training_flag)
 
     # ── LSTM Блок 2 ────────────────────────────────────────────────────────────
     x = tf.keras.layers.LSTM(
         lstm_units_2, return_sequences=True,
-        recurrent_dropout=0.05,
+        recurrent_dropout=0.0,
         name="lstm_2",
     )(x)
     x = tf.keras.layers.LayerNormalization(epsilon=1e-6, name="ln_2")(x)
@@ -254,7 +262,7 @@ def build_lstm_model(
     # ── LSTM Блок 3 (return_sequences=True — нужны ВСЕ hidden для Attention) ──
     x = tf.keras.layers.LSTM(
         lstm_units_3, return_sequences=True,   # ← КЛЮЧЕВОЕ ОТЛИЧИЕ от v3
-        recurrent_dropout=0.05,
+        recurrent_dropout=0.0,
         name="lstm_3",
     )(x)
     x = tf.keras.layers.LayerNormalization(epsilon=1e-6, name="ln_3")(x)
@@ -271,16 +279,17 @@ def build_lstm_model(
     context = attn_block(x, training=training_flag)   # (B, lstm_units_3)
 
     last_token = x[:, -1, :]   # (B, lstm_units_3)
+    global_token = tf.keras.layers.GlobalAveragePooling1D(name="global_avg")(x)
     last_token = tf.keras.layers.Dropout(
         dropout_rate, name="drop_last"
     )(last_token, training=training_flag)
 
     # Конкатенация: актуальное состояние + контекст внимания
-    agg = tf.keras.layers.Concatenate(name="agg")([last_token, context])
-    # agg: (B, lstm_units_3 * 2)
+    agg = tf.keras.layers.Concatenate(name="agg")([last_token, context, global_token])
+    # agg: (B, lstm_units_3 * 3)
 
     # ── Dense-голова с GELU + Residual ─────────────────────────────────────────
-    head_dim = lstm_units_3 * 4   # 256 при units_3=64, 128 при units_3=32
+    head_dim = lstm_units_3 * 5
 
     h = tf.keras.layers.Dense(
         head_dim, activation="gelu",

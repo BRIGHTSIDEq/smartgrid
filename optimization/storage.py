@@ -109,6 +109,8 @@ class StorageResult:
     n_discharge_hours: int = 0
     annual_savings_est: float = 0.0
     payback_years: float = 0.0
+    demand_charge_savings: float = 0.0
+    om_cost: float = 0.0
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -130,6 +132,8 @@ def simulate_storage(
     start_hour: int = 0,
     start_weekday: int = 0,
     battery_cost_rub: float = 3_000_000.0,
+    demand_charge_rub_per_kw_month: float = 950.0,
+    annual_om_share: float = 0.015,
     strategy_name: str = "",
 ) -> StorageResult:
     """
@@ -201,12 +205,23 @@ def simulate_storage(
         energy_from_grid.append(grid_energy)
         hourly_costs.append(grid_energy * price)
 
-    # ── Экономика ─────────────────────────────────────────────────────────────
+    # ── Экономика: energy + demand charge + O&M ─────────────────────────────
     baseline_cost = float(np.dot(forecast, prices))
     optimized_cost = float(sum(hourly_costs))
-    gross_savings = baseline_cost - optimized_cost
+
+    horizon_days = max(n / 24.0, 1e-9)
+    months_in_horizon = horizon_days / 30.4375
+    baseline_peak_kw = float(np.max(forecast))
+    optimized_peak_kw = float(np.max(np.asarray(energy_from_grid, dtype=np.float64)))
+    demand_charge_savings = max(
+        0.0,
+        (baseline_peak_kw - optimized_peak_kw) * demand_charge_rub_per_kw_month * months_in_horizon,
+    )
+
+    gross_savings = (baseline_cost - optimized_cost) + demand_charge_savings
     degradation_cost = total_cycled * cycle_cost_per_kwh
-    net_savings = gross_savings - degradation_cost
+    om_cost = battery_cost_rub * annual_om_share * (horizon_days / 365.25)
+    net_savings = gross_savings - degradation_cost - om_cost
     net_savings_pct = (net_savings / baseline_cost * 100) if baseline_cost > 0 else 0.0
 
     n_ch = actions.count("charge")
@@ -222,7 +237,10 @@ def simulate_storage(
     logger.info("Базовая стоимость:         %10.2f руб", baseline_cost)
     logger.info("Оптимизированная (грязная):%10.2f руб", optimized_cost)
     logger.info("Валовая экономия:          %10.2f руб", gross_savings)
+    logger.info("  ├─ Energy arbitrage:     %10.2f руб", baseline_cost - optimized_cost)
+    logger.info("  └─ Demand-charge эффект: %10.2f руб", demand_charge_savings)
     logger.info("Стоимость деградации:      %10.2f руб", degradation_cost)
+    logger.info("O&M за горизонт:           %10.2f руб", om_cost)
     logger.info("ЧИСТАЯ экономия:           %10.2f руб (%.2f%%)", net_savings, net_savings_pct)
     logger.info("Прокачано:                 %10.2f кВт·ч", total_cycled)
     logger.info("Часов заряд/разряд:        %d / %d из %d", n_ch, n_dis, n)
@@ -249,6 +267,8 @@ def simulate_storage(
         n_discharge_hours=n_dis,
         annual_savings_est=annual_est,
         payback_years=payback,
+        demand_charge_savings=demand_charge_savings,
+        om_cost=om_cost,
     )
 
 
@@ -266,6 +286,8 @@ def compare_strategies(
     tariff_night: float = 1.80,       # руб/кВт·ч — ночная зона (23–07)
     tariff_half_peak: float = 4.20,   # руб/кВт·ч — дневная зона
     tariff_peak: float = 6.50,        # руб/кВт·ч — пиковая зона (10–17, 21–23 будни)
+    demand_charge_rub_per_kw_month: float = 950.0,
+    annual_om_share: float = 0.015,
 ) -> Dict[str, StorageResult]:
     """
     Три стратегии с разным целевым SOC.
@@ -298,6 +320,8 @@ def compare_strategies(
             tariff_night=tariff_night,
             tariff_half_peak=tariff_half_peak,
             tariff_peak=tariff_peak,
+            demand_charge_rub_per_kw_month=demand_charge_rub_per_kw_month,
+            annual_om_share=annual_om_share,
             strategy_name=label,
         )
 

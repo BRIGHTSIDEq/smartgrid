@@ -230,7 +230,6 @@ def simulate_storage(
     payback = battery_cost_rub / annual_est if annual_est > 0 else float("inf")
 
     # ── Лог ───────────────────────────────────────────────────────────────────
-    soc_range_pct = (max_soc - min_soc) * 100
     logger.info("─" * 50)
     logger.info("Горизонт: %d ч (%.1f сут) | SOC %.0f%%→%.0f%% (ΔE=%.0f кВт·ч)",
                 n, n / 24, min_soc * 100, max_soc * 100, (max_soc - min_soc) * capacity)

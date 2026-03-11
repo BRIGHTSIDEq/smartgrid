@@ -132,7 +132,6 @@ class TemporalAttentionBlock(tf.keras.layers.Layer):
             key_dim=key_dim,
             dropout=dropout,
         )
-        self.pool = tf.keras.layers.GlobalAveragePooling1D()
         self.ln   = tf.keras.layers.LayerNormalization(epsilon=1e-6)
         self.drop = tf.keras.layers.Dropout(dropout)
 

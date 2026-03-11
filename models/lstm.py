@@ -96,6 +96,8 @@ import tensorflow as tf
 
 logger = logging.getLogger("smart_grid.models.lstm")
 
+__all__ = ["TemporalAttentionBlock", "build_lstm_model"]
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # ВСПОМОГАТЕЛЬНЫЙ БЛОК: TEMPORAL ATTENTION

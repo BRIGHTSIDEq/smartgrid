@@ -183,7 +183,6 @@ def visualize_attention_weights(
             )
             fig.savefig(fn, dpi=150, bbox_inches="tight")
             logger.info("Attention heatmap: %s", fn)
-        plt.show()
         plt.close(fig)
 
 
@@ -274,7 +273,6 @@ def visualize_attention_summary(
         fn = os.path.join(plots_dir, f"attention_summary_{model_name.replace(' ', '_')}.png")
         fig.savefig(fn, dpi=150, bbox_inches="tight")
         logger.info("Summary attention: %s", fn)
-    plt.show()
     plt.close(fig)
 
     return importance
@@ -347,5 +345,4 @@ def compare_head_specialization(
         fn = os.path.join(plots_dir, f"head_specialization_{model_name.replace(' ', '_')}.png")
         fig.savefig(fn, dpi=150, bbox_inches="tight")
         logger.info("Head specialization: %s", fn)
-    plt.show()
     plt.close(fig)

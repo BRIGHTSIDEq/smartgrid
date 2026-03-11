@@ -236,18 +236,15 @@ def build_lstm_model(
     )(inp)
 
     # ── LSTM Блок 1 ────────────────────────────────────────────────────────────
-    x = tf.keras.layers.Bidirectional(
-        tf.keras.layers.LSTM(
+    effective_dropout = min(dropout_rate, 0.15)
+
+    x = tf.keras.layers.LSTM(
         lstm_units_1, return_sequences=True,
         recurrent_dropout=0.0,
         name="lstm_1",
-        ),
-        merge_mode="concat",
-        name="bilstm_1",
     )(x)
-    x = tf.keras.layers.Dense(lstm_units_1, name="bilstm_1_proj")(x)
     x = tf.keras.layers.LayerNormalization(epsilon=1e-6, name="ln_1")(x)
-    x = tf.keras.layers.Dropout(dropout_rate, name="drop_1")(x, training=training_flag)
+    x = tf.keras.layers.Dropout(effective_dropout, name="drop_1")(x, training=training_flag)
 
     # ── LSTM Блок 2 ────────────────────────────────────────────────────────────
     x = tf.keras.layers.LSTM(
@@ -256,7 +253,7 @@ def build_lstm_model(
         name="lstm_2",
     )(x)
     x = tf.keras.layers.LayerNormalization(epsilon=1e-6, name="ln_2")(x)
-    x = tf.keras.layers.Dropout(dropout_rate, name="drop_2")(x, training=training_flag)
+    x = tf.keras.layers.Dropout(effective_dropout, name="drop_2")(x, training=training_flag)
 
     # ── LSTM Блок 3 (return_sequences=True — нужны ВСЕ hidden для Attention) ──
     x = tf.keras.layers.LSTM(
@@ -277,10 +274,27 @@ def build_lstm_model(
     )
     context = attn_block(x, training=training_flag)   # (B, lstm_units_3)
 
+    # Persistence-бейзлайн: последний и предыдущий 24-часовые профили.
+    cons_hist = inp[:, :, 0]
+    recent_profile = cons_hist[:, -forecast_horizon:]
+    if history_length >= 2 * forecast_horizon:
+        prev_day_profile = cons_hist[:, -2 * forecast_horizon:-forecast_horizon]
+    else:
+        prev_day_profile = recent_profile
+
+    recent_expanded = tf.keras.layers.Reshape((forecast_horizon, 1), name="recent_expand")(recent_profile)
+    prev_expanded = tf.keras.layers.Reshape((forecast_horizon, 1), name="prev_expand")(prev_day_profile)
+    pers_stack = tf.keras.layers.Concatenate(axis=-1, name="pers_stack")([
+        recent_expanded,
+        prev_expanded,
+    ])
+    persistence = tf.keras.layers.Dense(1, use_bias=True, name="persistence_blend")(pers_stack)
+    persistence = tf.keras.layers.Flatten(name="persistence_flat")(persistence)
+
     last_token = x[:, -1, :]   # (B, lstm_units_3)
     global_token = tf.keras.layers.GlobalAveragePooling1D(name="global_avg")(x)
     last_token = tf.keras.layers.Dropout(
-        dropout_rate, name="drop_last"
+        effective_dropout, name="drop_last"
     )(last_token, training=training_flag)
 
     # Конкатенация: актуальное состояние + контекст внимания
@@ -308,7 +322,8 @@ def build_lstm_model(
     )(h)
     h = tf.keras.layers.Dropout(0.10, name="head_drop2")(h, training=training_flag)
 
-    out = tf.keras.layers.Dense(forecast_horizon, name="output")(h)
+    residual = tf.keras.layers.Dense(forecast_horizon, name="residual_head")(h)
+    out = tf.keras.layers.Add(name="output")([persistence, residual])
 
     model = tf.keras.Model(inputs=inp, outputs=out, name="AttentionLSTM_v4")
     model.compile(

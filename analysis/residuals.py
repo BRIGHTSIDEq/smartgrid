@@ -116,7 +116,6 @@ def analyze_residuals(
         path = os.path.join(plots_dir, f"residuals_{model_name.replace(' ', '_')}.png")
         fig.savefig(path, dpi=150, bbox_inches="tight")
         logger.info("График остатков: %s", path)
-    plt.show()
     plt.close(fig)
 
     return {

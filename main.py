@@ -295,6 +295,8 @@ def main() -> None:
         tariff_night=Config.TARIFF_NIGHT,
         tariff_half_peak=Config.TARIFF_HALF_PEAK,
         tariff_peak=Config.TARIFF_PEAK,
+        demand_charge_rub_per_kw_month=Config.DEMAND_CHARGE_RUB_PER_KW_MONTH,
+        annual_om_share=Config.BATTERY_OM_SHARE,
     )
     plot_storage_result(storage_result, sample_forecast, plots_dir=Config.PLOTS_DIR)
     compare_strategies(
@@ -307,6 +309,8 @@ def main() -> None:
         tariff_night=Config.TARIFF_NIGHT,
         tariff_half_peak=Config.TARIFF_HALF_PEAK,
         tariff_peak=Config.TARIFF_PEAK,
+        demand_charge_rub_per_kw_month=Config.DEMAND_CHARGE_RUB_PER_KW_MONTH,
+        annual_om_share=Config.BATTERY_OM_SHARE,
     )
 
     # ── 12. Экспорт лучшей Keras-модели ──────────────────────────────────────

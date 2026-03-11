@@ -67,6 +67,8 @@ class Config:
     BATTERY_EFFICIENCY: float = 0.95
     BATTERY_CYCLE_COST: float = 0.06
     BATTERY_COST_RUB: float = 45_000_000.0  # 10 000 руб/кВт·ч × 4500
+    BATTERY_OM_SHARE: float = 0.015          # O&M ~1.5% CAPEX/год
+    DEMAND_CHARGE_RUB_PER_KW_MONTH: float = 950.0
     # Стратегия по умолчанию: умеренная
     BATTERY_MIN_SOC: float = 0.25
     BATTERY_MAX_SOC: float = 0.75

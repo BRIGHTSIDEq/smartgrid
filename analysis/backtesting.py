@@ -41,9 +41,9 @@ def run_backtesting(
     Y_test = data["Y_test"]
     scaler = data["scaler"]
     total = len(X_test)
-
+    N_WINDOWS = 10 
     if total < n_windows:
-        n_windows = max(1, total)
+        n_windows = max(1, min(N_WINDOWS, total // 20))
         logger.warning("n_windows → %d (размер теста)", n_windows)
 
     window_size = total // n_windows

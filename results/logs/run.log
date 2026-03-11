@@ -203,3 +203,1121 @@ max      22925.427734
 2026-03-08 23:25:02 | INFO     | smart_grid | ✅ Пайплайн завершён успешно!
 2026-03-08 23:25:02 | INFO     | smart_grid | 📁 Результаты в: c:\Users\Admin\Downloads\smart_grid_project_v2 (5)\smart_grid_project\results
 2026-03-08 23:25:02 | INFO     | smart_grid | ======================================================================
+2026-03-10 22:04:30 | INFO     | smart_grid | ======================================================================
+2026-03-10 22:04:30 | INFO     | smart_grid |   СИСТЕМА ПРОГНОЗИРОВАНИЯ ЭНЕРГОПОТРЕБЛЕНИЯ — SMART GRID
+2026-03-10 22:04:30 | INFO     | smart_grid | ======================================================================
+2026-03-10 22:04:30 | INFO     | smart_grid | ⚡ Fast mode: DAYS=180, EPOCHS=50, HISTORY=24
+2026-03-10 22:04:30 | INFO     | smart_grid | 
+[1/10] Генерация данных...
+2026-03-10 22:04:30 | INFO     | smart_grid.data.generator | Генерация данных Smart Grid: 180 дней, 250 домохозяйств
+2026-03-10 22:04:30 | INFO     | smart_grid.data.generator | Сгенерировано 4320 записей. Потребление: min=259.8, mean=4051.6, max=9561.3 кВт·ч
+2026-03-10 22:04:30 | INFO     | smart_grid.data.generator | Валидация данных...
+2026-03-10 22:04:30 | INFO     | smart_grid.data.generator |   ✅ NaN/Inf: нет
+2026-03-10 22:04:30 | INFO     | smart_grid.data.generator |   ✅ Отрицательных значений: нет
+2026-03-10 22:04:31 | INFO     | smart_grid.data.generator |   ✅ Утренний пик: 8:00
+2026-03-10 22:04:31 | INFO     | smart_grid.data.generator |   ✅ Вечерний пик: 19:00
+2026-03-10 22:04:31 | INFO     | smart_grid.data.generator |   ✅ Выходные/будни: 0.87
+2026-03-10 22:04:31 | INFO     | smart_grid.data.generator |   ✅ Сезонность: зима=5064.7 > лето=3325.3 кВт·ч
+2026-03-10 22:04:31 | INFO     | smart_grid.data.generator |   ✅ Диапазон температур: -23.4..40.4°C
+2026-03-10 22:04:31 | INFO     | smart_grid.data.generator | Валидация ПРОЙДЕНА
+2026-03-10 22:04:31 | INFO     | smart_grid | ──────────────────────────────────────────────────
+2026-03-10 22:04:31 | INFO     | smart_grid | КОНФИГУРАЦИЯ:
+2026-03-10 22:04:31 | INFO     | smart_grid |   Данные:      180 дней, 250 домохозяйств
+2026-03-10 22:04:31 | INFO     | smart_grid |   Признаки:    9 ковариат на шаг (мультивариантный вход)
+2026-03-10 22:04:31 | INFO     | smart_grid |   История:     24 ч → прогноз 24 ч
+2026-03-10 22:04:31 | INFO     | smart_grid |   Обучение:    50 эпох, batch=32
+2026-03-10 22:04:31 | INFO     | smart_grid |   LSTM:        units=256/128/64, drop=0.20, lr=0.0001, input=(24,9)
+2026-03-10 22:04:31 | INFO     | smart_grid |   Transformer: d=64 h=4 L=2 dff=128 drop=0.20, lr=0.0001, input=(24,9)
+2026-03-10 22:04:31 | INFO     | smart_grid |   XGBoost:     n_est=200, depth=5, col=0.40
+2026-03-10 22:04:31 | INFO     | smart_grid |   Тарифы:      пик=6.50 день=4.20 ночь=1.80 руб/кВт·ч
+2026-03-10 22:04:31 | INFO     | smart_grid |   Батарея:     300 кВт·ч, SOC 25%→75% (ΔE=150 кВт·ч)
+2026-03-10 22:04:31 | INFO     | smart_grid | ──────────────────────────────────────────────────
+2026-03-10 22:04:31 | INFO     | smart_grid | 
+[2/10] Исследовательский анализ данных...
+2026-03-10 22:04:31 | INFO     | smart_grid.analysis.eda | Запуск EDA...
+2026-03-10 22:04:31 | INFO     | smart_grid.analysis.eda | 
+count    4320.000000
+mean     4051.582764
+std      1321.016602
+min       259.803070
+25%      3045.983215
+50%      3852.893555
+75%      4782.906494
+max      9561.336914
+2026-03-10 22:04:31 | INFO     | smart_grid.analysis.eda | CV=0.326  Skew=0.705  Kurt=0.303
+2026-03-10 22:04:32 | INFO     | smart_grid.analysis.eda | Декомпозиция временного ряда...
+2026-03-10 22:04:32 | INFO     | smart_grid.analysis.eda | EDA завершён. Графики сохранены в: c:\Users\Admin\Downloads\smart_grid_project_v2 (5)\smart_grid_project\results\plots
+2026-03-10 22:04:32 | INFO     | smart_grid | 
+[3/10] Подготовка данных (scaler fit только на train)...
+2026-03-10 22:04:32 | INFO     | smart_grid.data.preprocessing | Данные подготовлены | train=2977 val=601 test=601
+2026-03-10 22:04:32 | INFO     | smart_grid.data.preprocessing | ✅ X_train.shape: (2977, 24, 9)  Y_train.shape: (2977, 24)  (n_features=9)
+2026-03-10 22:04:32 | INFO     | smart_grid | ✅ ЧЕКЛИСТ X_train.shape=(2977, 24, 9) | 9 ковариат подтверждено
+2026-03-10 22:04:32 | INFO     | smart_grid.data.preprocessing | ✅ validate_data_integrity ПРОЙДЕНА | train=2977 val=601 test=601 | Y∈[0.000, 1.000]
+2026-03-10 22:04:32 | INFO     | smart_grid | 
+[4/10] Инициализация моделей...
+2026-03-10 22:04:33 | INFO     | smart_grid.models.lstm | LSTM модель построена: 537048 параметров | input=(24, 9) | lr=1e-04 | Huber δ=0.1
+2026-03-10 22:04:33 | WARNING  | tensorflow | From C:\Users\Admin\AppData\Local\Programs\Python\Python312\Lib\site-packages\keras\src\backend\tensorflow\core.py:204: The name tf.placeholder is deprecated. Please use tf.compat.v1.placeholder instead.
+
+2026-03-10 22:04:34 | INFO     | smart_grid.models.transformer | VanillaTransformer[sinusoidal] d=64 h=4 L=2 | 77656 params
+2026-03-10 22:04:34 | INFO     | smart_grid.models.transformer | PatchTST: history=24 patch=6 stride=3 → 7 patches
+2026-03-10 22:04:34 | INFO     | smart_grid.models.transformer | PatchTST patch=6 stride=3 n_p=7 d=64 h=4 L=2 | 101784 params
+2026-03-10 22:04:34 | INFO     | smart_grid | Параметры: LSTM=537048 | VanillaTrans=77656 | PatchTST=101784
+2026-03-10 22:04:34 | INFO     | smart_grid | 
+[5/10] Обучение моделей...
+2026-03-10 22:04:34 | INFO     | smart_grid.models.trainer | ============================================================
+2026-03-10 22:04:34 | INFO     | smart_grid.models.trainer | Обучение модели: LSTM
+2026-03-10 22:04:34 | INFO     | smart_grid.models.trainer | ============================================================
+2026-03-10 22:07:19 | INFO     | smart_grid.models.trainer | LSTM: обучение завершено за 50 эпох
+2026-03-10 22:07:19 | INFO     | smart_grid.models.trainer | LSTM обучена за 165.5 сек
+2026-03-10 22:07:20 | INFO     | smart_grid.models.trainer | ============================================================
+2026-03-10 22:07:20 | INFO     | smart_grid.models.trainer | Обучение модели: VanillaTransformer
+2026-03-10 22:07:20 | INFO     | smart_grid.models.trainer | ============================================================
+2026-03-10 22:08:26 | INFO     | smart_grid.models.trainer | VanillaTransformer: обучение завершено за 49 эпох
+2026-03-10 22:08:26 | INFO     | smart_grid.models.trainer | VanillaTransformer обучена за 66.9 сек
+2026-03-10 22:08:27 | INFO     | smart_grid.models.trainer | ============================================================
+2026-03-10 22:08:27 | INFO     | smart_grid.models.trainer | Обучение модели: PatchTST
+2026-03-10 22:08:27 | INFO     | smart_grid.models.trainer | ============================================================
+2026-03-10 22:09:10 | INFO     | smart_grid.models.trainer | PatchTST: обучение завершено за 47 эпох
+2026-03-10 22:09:10 | INFO     | smart_grid.models.trainer | PatchTST обучена за 43.7 сек
+2026-03-10 22:09:11 | INFO     | smart_grid.models.trainer | ============================================================
+2026-03-10 22:09:11 | INFO     | smart_grid.models.trainer | Обучение модели: LinearRegression
+2026-03-10 22:09:11 | INFO     | smart_grid.models.trainer | ============================================================
+2026-03-10 22:09:11 | INFO     | smart_grid.models.baseline | LinearRegression обучен | X_flat: 216 фич
+2026-03-10 22:09:11 | INFO     | smart_grid.models.trainer | LinearRegression обучена за 0.0 сек
+2026-03-10 22:09:11 | INFO     | smart_grid.models.trainer | ============================================================
+2026-03-10 22:09:11 | INFO     | smart_grid.models.trainer | Обучение модели: XGBoost
+2026-03-10 22:09:11 | INFO     | smart_grid.models.trainer | ============================================================
+2026-03-10 22:09:16 | INFO     | smart_grid.models.trainer | XGBoost обучен
+2026-03-10 22:09:16 | INFO     | smart_grid.models.trainer | XGBoost обучена за 5.9 сек
+2026-03-10 22:09:16 | INFO     | smart_grid | 
+[6/10] Сравнение моделей на тестовой выборке...
+2026-03-10 22:09:16 | INFO     | smart_grid.models.trainer | 
+============================================================
+2026-03-10 22:09:16 | INFO     | smart_grid.models.trainer | СРАВНЕНИЕ МОДЕЛЕЙ (split=TEST)
+2026-03-10 22:09:16 | INFO     | smart_grid.models.trainer | ============================================================
+2026-03-10 22:09:16 | INFO     | smart_grid.models.trainer | Модель                      MAE     RMSE    MAPE%      R²
+2026-03-10 22:09:16 | INFO     | smart_grid.models.trainer | ----------------------------------------------------------
+2026-03-10 22:09:17 | INFO     | smart_grid.utils.metrics | LSTM            | MAE=  831.18 | RMSE= 1071.98 | MAPE= 21.87% | R²=-0.5302
+2026-03-10 22:09:17 | INFO     | smart_grid.models.trainer | LSTM                     831.18  1071.98   21.87% -0.5302
+2026-03-10 22:09:18 | INFO     | smart_grid.utils.metrics | VanillaTransformer | MAE=  629.55 | RMSE=  919.48 | MAPE= 16.87% | R²=-0.1258
+2026-03-10 22:09:18 | INFO     | smart_grid.models.trainer | VanillaTransformer       629.55   919.48   16.87% -0.1258
+2026-03-10 22:09:18 | INFO     | smart_grid.utils.metrics | PatchTST        | MAE=  622.64 | RMSE=  906.58 | MAPE= 16.03% | R²=-0.0944
+2026-03-10 22:09:18 | INFO     | smart_grid.models.trainer | PatchTST                 622.64   906.58   16.03% -0.0944
+2026-03-10 22:09:18 | INFO     | smart_grid.utils.metrics | LinearRegression | MAE=  438.25 | RMSE=  637.11 | MAPE= 12.38% | R²=0.4595
+2026-03-10 22:09:18 | INFO     | smart_grid.models.trainer | LinearRegression         438.25   637.11   12.38% 0.4595
+2026-03-10 22:09:18 | INFO     | smart_grid.utils.metrics | XGBoost         | MAE=  374.70 | RMSE=  582.57 | MAPE= 10.27% | R²=0.5481
+2026-03-10 22:09:18 | INFO     | smart_grid.models.trainer | XGBoost                  374.70   582.57   10.27% 0.5481
+2026-03-10 22:09:18 | INFO     | smart_grid.models.trainer | ----------------------------------------------------------
+2026-03-10 22:09:18 | INFO     | smart_grid.models.trainer | 🏆 Лучшая модель по MAE: XGBoost
+2026-03-10 22:09:19 | INFO     | smart_grid | 🏆 Лучшая модель: XGBoost (MAE=374.70)
+2026-03-10 22:09:19 | INFO     | smart_grid | 
+[7/10] Визуализация весов внимания...
+2026-03-10 22:09:20 | INFO     | smart_grid.utils.attention_viz | Attention heatmap: c:\Users\Admin\Downloads\smart_grid_project_v2 (5)\smart_grid_project\results\plots\attention_VanillaTransformer_block_0.png
+2026-03-10 22:09:20 | INFO     | smart_grid.utils.attention_viz | Attention heatmap: c:\Users\Admin\Downloads\smart_grid_project_v2 (5)\smart_grid_project\results\plots\attention_VanillaTransformer_block_1.png
+2026-03-10 22:09:20 | INFO     | smart_grid.utils.attention_viz | Summary attention: c:\Users\Admin\Downloads\smart_grid_project_v2 (5)\smart_grid_project\results\plots\attention_summary_VanillaTransformer.png
+2026-03-10 22:09:20 | INFO     | smart_grid.utils.attention_viz | Head specialization: c:\Users\Admin\Downloads\smart_grid_project_v2 (5)\smart_grid_project\results\plots\head_specialization_VanillaTransformer.png
+2026-03-10 22:09:21 | INFO     | smart_grid.utils.attention_viz | Attention heatmap: c:\Users\Admin\Downloads\smart_grid_project_v2 (5)\smart_grid_project\results\plots\attention_PatchTST_block_0.png
+2026-03-10 22:09:21 | INFO     | smart_grid.utils.attention_viz | Attention heatmap: c:\Users\Admin\Downloads\smart_grid_project_v2 (5)\smart_grid_project\results\plots\attention_PatchTST_block_1.png
+2026-03-10 22:09:22 | INFO     | smart_grid.utils.attention_viz | Summary attention: c:\Users\Admin\Downloads\smart_grid_project_v2 (5)\smart_grid_project\results\plots\attention_summary_PatchTST.png
+2026-03-10 22:09:22 | INFO     | smart_grid.utils.attention_viz | Head specialization: c:\Users\Admin\Downloads\smart_grid_project_v2 (5)\smart_grid_project\results\plots\head_specialization_PatchTST.png
+2026-03-10 22:09:22 | INFO     | smart_grid | 
+[8/10] Анализ остатков лучшей модели: XGBoost
+2026-03-10 22:09:22 | INFO     | smart_grid.analysis.residuals | Анализ остатков модели: XGBoost (n=14424)
+2026-03-10 22:09:22 | INFO     | smart_grid.analysis.residuals | ADF тест: stat=-2.9287 p=0.0421 (стационарны)
+2026-03-10 22:09:22 | INFO     | smart_grid.analysis.residuals | KPSS тест: stat=0.9480 p=0.0100
+2026-03-10 22:09:23 | INFO     | smart_grid.analysis.residuals | Ljung-Box lag=10: p=0.0000  lag=20: p=0.0000
+2026-03-10 22:09:23 | INFO     | smart_grid.analysis.residuals | Durbin-Watson: 0.2185 (2.0=нет автокорреляции)
+2026-03-10 22:09:23 | INFO     | smart_grid.analysis.residuals | Jarque-Bera: stat=41364.1640 p=0.0000
+2026-03-10 22:09:23 | INFO     | smart_grid.analysis.residuals | График остатков: c:\Users\Admin\Downloads\smart_grid_project_v2 (5)\smart_grid_project\results\plots\residuals_XGBoost.png
+2026-03-10 22:09:23 | INFO     | smart_grid | 
+[9/10] Скользящий бэктестинг...
+2026-03-10 22:09:23 | INFO     | smart_grid.analysis.backtesting | Бэктестинг XGBoost: 8 окон по ~75 шагов
+2026-03-10 22:09:23 | INFO     | smart_grid.analysis.backtesting |   Окно  1/8 | MAE=208.26 MAPE=6.27%
+2026-03-10 22:09:23 | INFO     | smart_grid.analysis.backtesting |   Окно  2/8 | MAE=452.07 MAPE=12.59%
+2026-03-10 22:09:23 | INFO     | smart_grid.analysis.backtesting |   Окно  3/8 | MAE=368.45 MAPE=9.82%
+2026-03-10 22:09:23 | INFO     | smart_grid.analysis.backtesting |   Окно  4/8 | MAE=773.20 MAPE=17.12%
+2026-03-10 22:09:23 | INFO     | smart_grid.analysis.backtesting |   Окно  5/8 | MAE=405.73 MAPE=11.95%
+2026-03-10 22:09:23 | INFO     | smart_grid.analysis.backtesting |   Окно  6/8 | MAE=251.89 MAPE=7.72%
+2026-03-10 22:09:23 | INFO     | smart_grid.analysis.backtesting |   Окно  7/8 | MAE=261.53 MAPE=8.51%
+2026-03-10 22:09:23 | INFO     | smart_grid.analysis.backtesting |   Окно  8/8 | MAE=277.80 MAPE=8.22%
+2026-03-10 22:09:24 | INFO     | smart_grid.analysis.backtesting | График бэктестинга: c:\Users\Admin\Downloads\smart_grid_project_v2 (5)\smart_grid_project\results\plots\backtesting_XGBoost.png
+2026-03-10 22:09:24 | INFO     | smart_grid.analysis.backtesting | Итого по бэктестингу XGBoost: MAE=374.87±169.84  MAPE=10.27±3.26%
+2026-03-10 22:09:24 | INFO     | smart_grid | 
+[10/10] Оптимизация накопителя энергии...
+2026-03-10 22:09:24 | INFO     | smart_grid.optimization.storage | ──────────────────────────────────────────────────
+2026-03-10 22:09:24 | INFO     | smart_grid.optimization.storage | Горизонт: 48 ч (2.0 сут) | SOC 25%→75% (ΔE=150 кВт·ч)
+2026-03-10 22:09:24 | INFO     | smart_grid.optimization.storage | Базовая стоимость:          624740.11 руб
+2026-03-10 22:09:24 | INFO     | smart_grid.optimization.storage | Оптимизированная (грязная): 623532.02 руб
+2026-03-10 22:09:24 | INFO     | smart_grid.optimization.storage | Валовая экономия:             1208.09 руб
+2026-03-10 22:09:24 | INFO     | smart_grid.optimization.storage | Стоимость деградации:           40.50 руб
+2026-03-10 22:09:24 | INFO     | smart_grid.optimization.storage | ЧИСТАЯ экономия:              1167.59 руб (0.19%)
+2026-03-10 22:09:24 | INFO     | smart_grid.optimization.storage | Прокачано:                     675.00 кВт·ч
+2026-03-10 22:09:24 | INFO     | smart_grid.optimization.storage | Часов заряд/разряд:        3 / 2 из 48
+2026-03-10 22:09:24 | INFO     | smart_grid.optimization.storage | Экономия/год (оценка):      213085.09 руб/год
+2026-03-10 22:09:24 | INFO     | smart_grid.optimization.storage | Срок окупаемости:                14.1 лет
+2026-03-10 22:09:24 | INFO     | smart_grid.optimization.storage | ──────────────────────────────────────────────────
+2026-03-10 22:09:24 | INFO     | smart_grid.optimization.storage | Горизонт: 48 ч (2.0 сут) | SOC 40%→60% (ΔE=60 кВт·ч)
+2026-03-10 22:09:24 | INFO     | smart_grid.optimization.storage | Базовая стоимость:          624740.11 руб
+2026-03-10 22:09:24 | INFO     | smart_grid.optimization.storage | Оптимизированная (грязная): 624256.87 руб
+2026-03-10 22:09:24 | INFO     | smart_grid.optimization.storage | Валовая экономия:              483.24 руб
+2026-03-10 22:09:24 | INFO     | smart_grid.optimization.storage | Стоимость деградации:           16.20 руб
+2026-03-10 22:09:24 | INFO     | smart_grid.optimization.storage | ЧИСТАЯ экономия:               467.04 руб (0.07%)
+2026-03-10 22:09:24 | INFO     | smart_grid.optimization.storage | Прокачано:                     270.00 кВт·ч
+2026-03-10 22:09:24 | INFO     | smart_grid.optimization.storage | Часов заряд/разряд:        3 / 2 из 48
+2026-03-10 22:09:24 | INFO     | smart_grid.optimization.storage | Экономия/год (оценка):       85234.03 руб/год
+2026-03-10 22:09:24 | INFO     | smart_grid.optimization.storage | Срок окупаемости:                35.2 лет
+2026-03-10 22:09:24 | INFO     | smart_grid.optimization.storage | Стратегия: Консервативная (SOC 40%→60%, ΔE=60 кВт·ч)
+2026-03-10 22:09:24 | INFO     | smart_grid.optimization.storage | ──────────────────────────────────────────────────
+2026-03-10 22:09:24 | INFO     | smart_grid.optimization.storage | Горизонт: 48 ч (2.0 сут) | SOC 25%→75% (ΔE=150 кВт·ч)
+2026-03-10 22:09:24 | INFO     | smart_grid.optimization.storage | Базовая стоимость:          624740.11 руб
+2026-03-10 22:09:24 | INFO     | smart_grid.optimization.storage | Оптимизированная (грязная): 623532.02 руб
+2026-03-10 22:09:24 | INFO     | smart_grid.optimization.storage | Валовая экономия:             1208.09 руб
+2026-03-10 22:09:24 | INFO     | smart_grid.optimization.storage | Стоимость деградации:           40.50 руб
+2026-03-10 22:09:24 | INFO     | smart_grid.optimization.storage | ЧИСТАЯ экономия:              1167.59 руб (0.19%)
+2026-03-10 22:09:24 | INFO     | smart_grid.optimization.storage | Прокачано:                     675.00 кВт·ч
+2026-03-10 22:09:24 | INFO     | smart_grid.optimization.storage | Часов заряд/разряд:        3 / 2 из 48
+2026-03-10 22:09:24 | INFO     | smart_grid.optimization.storage | Экономия/год (оценка):      213085.09 руб/год
+2026-03-10 22:09:24 | INFO     | smart_grid.optimization.storage | Срок окупаемости:                14.1 лет
+2026-03-10 22:09:24 | INFO     | smart_grid.optimization.storage | Стратегия: Умеренная (SOC 25%→75%, ΔE=150 кВт·ч)
+2026-03-10 22:09:24 | INFO     | smart_grid.optimization.storage | ──────────────────────────────────────────────────
+2026-03-10 22:09:24 | INFO     | smart_grid.optimization.storage | Горизонт: 48 ч (2.0 сут) | SOC 8%→92% (ΔE=252 кВт·ч)
+2026-03-10 22:09:24 | INFO     | smart_grid.optimization.storage | Базовая стоимость:          624740.11 руб
+2026-03-10 22:09:24 | INFO     | smart_grid.optimization.storage | Оптимизированная (грязная): 622522.15 руб
+2026-03-10 22:09:24 | INFO     | smart_grid.optimization.storage | Валовая экономия:             2217.96 руб
+2026-03-10 22:09:24 | INFO     | smart_grid.optimization.storage | Стоимость деградации:           61.92 руб
+2026-03-10 22:09:24 | INFO     | smart_grid.optimization.storage | ЧИСТАЯ экономия:              2156.04 руб (0.35%)
+2026-03-10 22:09:24 | INFO     | smart_grid.optimization.storage | Прокачано:                    1032.00 кВт·ч
+2026-03-10 22:09:24 | INFO     | smart_grid.optimization.storage | Часов заряд/разряд:        4 / 4 из 48
+2026-03-10 22:09:24 | INFO     | smart_grid.optimization.storage | Экономия/год (оценка):      393477.30 руб/год
+2026-03-10 22:09:24 | INFO     | smart_grid.optimization.storage | Срок окупаемости:                 7.6 лет
+2026-03-10 22:09:24 | INFO     | smart_grid.optimization.storage | Стратегия: Агрессивная (SOC 8%→92%, ΔE=252 кВт·ч)
+2026-03-10 22:09:24 | INFO     | smart_grid.optimization.storage | ═════════════════════════════════════════════════════════════════
+2026-03-10 22:09:24 | INFO     | smart_grid.optimization.storage | Стратегия            ΔE кВт·ч   Чистая экон.     Экон.%    Окупаем.
+2026-03-10 22:09:24 | INFO     | smart_grid.optimization.storage | ─────────────────────────────────────────────────────────────────
+2026-03-10 22:09:24 | INFO     | smart_grid.optimization.storage | Консервативная             60          467 руб     0.07%    35.2 лет
+2026-03-10 22:09:24 | INFO     | smart_grid.optimization.storage | Умеренная                 150         1168 руб     0.19%    14.1 лет
+2026-03-10 22:09:24 | INFO     | smart_grid.optimization.storage | Агрессивная               252         2156 руб     0.35%     7.6 лет
+2026-03-10 22:09:24 | INFO     | smart_grid.optimization.storage | ═════════════════════════════════════════════════════════════════
+2026-03-10 22:09:24 | INFO     | smart_grid.optimization.storage | 🏆 Лучшая: Агрессивная | 0.35% | окупаемость 7.6 лет
+2026-03-10 22:09:24 | INFO     | smart_grid | 
+======================================================================
+2026-03-10 22:09:24 | INFO     | smart_grid | ✅ Пайплайн завершён успешно!
+2026-03-10 22:09:24 | INFO     | smart_grid | 📁 Результаты в: c:\Users\Admin\Downloads\smart_grid_project_v2 (5)\smart_grid_project\results
+2026-03-10 22:09:24 | INFO     | smart_grid | ======================================================================
+2026-03-10 22:13:26 | INFO     | smart_grid | ======================================================================
+2026-03-10 22:13:26 | INFO     | smart_grid |   СИСТЕМА ПРОГНОЗИРОВАНИЯ ЭНЕРГОПОТРЕБЛЕНИЯ — SMART GRID
+2026-03-10 22:13:26 | INFO     | smart_grid | ======================================================================
+2026-03-10 22:13:26 | INFO     | smart_grid | ⚡ Fast mode: DAYS=180, EPOCHS=80, HISTORY=48 | LSTM=96/48/24 drop=0.35 | STORAGE=720h
+2026-03-10 22:13:26 | INFO     | smart_grid | 
+[1/10] Генерация данных...
+2026-03-10 22:13:26 | INFO     | smart_grid.data.generator | Генерация данных Smart Grid: 180 дней, 250 домохозяйств
+2026-03-10 22:13:26 | INFO     | smart_grid.data.generator | Сгенерировано 4320 записей. Потребление: min=259.8, mean=4051.6, max=9561.3 кВт·ч
+2026-03-10 22:13:26 | INFO     | smart_grid.data.generator | Валидация данных...
+2026-03-10 22:13:26 | INFO     | smart_grid.data.generator |   ✅ NaN/Inf: нет
+2026-03-10 22:13:26 | INFO     | smart_grid.data.generator |   ✅ Отрицательных значений: нет
+2026-03-10 22:13:26 | INFO     | smart_grid.data.generator |   ✅ Утренний пик: 8:00
+2026-03-10 22:13:26 | INFO     | smart_grid.data.generator |   ✅ Вечерний пик: 19:00
+2026-03-10 22:13:26 | INFO     | smart_grid.data.generator |   ✅ Выходные/будни: 0.87
+2026-03-10 22:13:26 | INFO     | smart_grid.data.generator |   ✅ Сезонность: зима=5064.7 > лето=3325.3 кВт·ч
+2026-03-10 22:13:26 | INFO     | smart_grid.data.generator |   ✅ Диапазон температур: -23.4..40.4°C
+2026-03-10 22:13:26 | INFO     | smart_grid.data.generator | Валидация ПРОЙДЕНА
+2026-03-10 22:13:26 | INFO     | smart_grid | ──────────────────────────────────────────────────
+2026-03-10 22:13:26 | INFO     | smart_grid | КОНФИГУРАЦИЯ:
+2026-03-10 22:13:26 | INFO     | smart_grid |   Данные:      180 дней, 250 домохозяйств
+2026-03-10 22:13:26 | INFO     | smart_grid |   Признаки:    9 ковариат на шаг (мультивариантный вход)
+2026-03-10 22:13:26 | INFO     | smart_grid |   История:     48 ч → прогноз 24 ч
+2026-03-10 22:13:26 | INFO     | smart_grid |   Обучение:    80 эпох, batch=32
+2026-03-10 22:13:26 | INFO     | smart_grid |   LSTM:        units=96/48/24, drop=0.35, lr=0.0001, input=(48,9)
+2026-03-10 22:13:26 | INFO     | smart_grid |   Transformer: d=64 h=4 L=2 dff=128 drop=0.25, lr=0.0001, input=(48,9)
+2026-03-10 22:13:26 | INFO     | smart_grid |   XGBoost:     n_est=200, depth=5, col=0.40
+2026-03-10 22:13:26 | INFO     | smart_grid |   Тарифы:      пик=6.50 день=4.20 ночь=1.80 руб/кВт·ч
+2026-03-10 22:13:26 | INFO     | smart_grid |   Батарея:     300 кВт·ч, SOC 25%→75% (ΔE=150 кВт·ч)
+2026-03-10 22:13:26 | INFO     | smart_grid | ──────────────────────────────────────────────────
+2026-03-10 22:13:26 | INFO     | smart_grid | 
+[2/10] Исследовательский анализ данных...
+2026-03-10 22:13:26 | INFO     | smart_grid.analysis.eda | Запуск EDA...
+2026-03-10 22:13:26 | INFO     | smart_grid.analysis.eda | 
+count    4320.000000
+mean     4051.582764
+std      1321.016602
+min       259.803070
+25%      3045.983215
+50%      3852.893555
+75%      4782.906494
+max      9561.336914
+2026-03-10 22:13:26 | INFO     | smart_grid.analysis.eda | CV=0.326  Skew=0.705  Kurt=0.303
+2026-03-10 22:13:27 | INFO     | smart_grid.analysis.eda | Декомпозиция временного ряда...
+2026-03-10 22:13:28 | INFO     | smart_grid.analysis.eda | EDA завершён. Графики сохранены в: c:\Users\Admin\Downloads\smart_grid_project_v2 (5)\smart_grid_project\results\plots
+2026-03-10 22:13:28 | INFO     | smart_grid | 
+[3/10] Подготовка данных (scaler fit только на train)...
+2026-03-10 22:13:28 | INFO     | smart_grid.data.preprocessing | Данные подготовлены | train=2953 val=577 test=577
+2026-03-10 22:13:28 | INFO     | smart_grid.data.preprocessing | ✅ X_train.shape: (2953, 48, 9)  Y_train.shape: (2953, 24)  (n_features=9)
+2026-03-10 22:13:28 | INFO     | smart_grid | ✅ ЧЕКЛИСТ X_train.shape=(2953, 48, 9) | 9 ковариат подтверждено
+2026-03-10 22:13:28 | INFO     | smart_grid.data.preprocessing | ✅ validate_data_integrity ПРОЙДЕНА | train=2953 val=577 test=577 | Y∈[0.000, 1.000]
+2026-03-10 22:13:28 | INFO     | smart_grid | 
+[4/10] Инициализация моделей...
+2026-03-10 22:13:28 | INFO     | smart_grid.models.lstm | LSTM модель построена: 88568 параметров | input=(48, 9) | lr=1e-04 | Huber δ=0.1
+2026-03-10 22:13:29 | WARNING  | tensorflow | From C:\Users\Admin\AppData\Local\Programs\Python\Python312\Lib\site-packages\keras\src\backend\tensorflow\core.py:204: The name tf.placeholder is deprecated. Please use tf.compat.v1.placeholder instead.
+
+2026-03-10 22:13:29 | INFO     | smart_grid.models.transformer | VanillaTransformer[sinusoidal] d=64 h=4 L=2 | 77656 params
+2026-03-10 22:13:29 | INFO     | smart_grid.models.transformer | PatchTST: history=48 patch=8 stride=4 → 11 patches
+2026-03-10 22:13:29 | INFO     | smart_grid.models.transformer | PatchTST patch=8 stride=4 n_p=11 d=64 h=4 L=2 | 119832 params
+2026-03-10 22:13:29 | INFO     | smart_grid | Параметры: LSTM=88568 | VanillaTrans=77656 | PatchTST=119832
+2026-03-10 22:13:29 | INFO     | smart_grid | 
+[5/10] Обучение моделей...
+2026-03-10 22:13:29 | INFO     | smart_grid.models.trainer | ============================================================
+2026-03-10 22:13:29 | INFO     | smart_grid.models.trainer | Обучение модели: LSTM
+2026-03-10 22:13:29 | INFO     | smart_grid.models.trainer | ============================================================
+2026-03-10 22:16:40 | INFO     | smart_grid.models.trainer | LSTM: обучение завершено за 80 эпох
+2026-03-10 22:16:40 | INFO     | smart_grid.models.trainer | LSTM обучена за 190.7 сек
+2026-03-10 22:16:40 | INFO     | smart_grid.models.trainer | ============================================================
+2026-03-10 22:16:40 | INFO     | smart_grid.models.trainer | Обучение модели: VanillaTransformer
+2026-03-10 22:16:40 | INFO     | smart_grid.models.trainer | ============================================================
+2026-03-10 22:19:07 | INFO     | smart_grid.models.trainer | VanillaTransformer: обучение завершено за 80 эпох
+2026-03-10 22:19:07 | INFO     | smart_grid.models.trainer | VanillaTransformer обучена за 147.0 сек
+2026-03-10 22:19:07 | INFO     | smart_grid.models.trainer | ============================================================
+2026-03-10 22:19:07 | INFO     | smart_grid.models.trainer | Обучение модели: PatchTST
+2026-03-10 22:19:07 | INFO     | smart_grid.models.trainer | ============================================================
+2026-03-10 22:20:26 | INFO     | smart_grid.models.trainer | PatchTST: обучение завершено за 80 эпох
+2026-03-10 22:20:26 | INFO     | smart_grid.models.trainer | PatchTST обучена за 78.6 сек
+2026-03-10 22:20:26 | INFO     | smart_grid.models.trainer | ============================================================
+2026-03-10 22:20:26 | INFO     | smart_grid.models.trainer | Обучение модели: LinearRegression
+2026-03-10 22:20:26 | INFO     | smart_grid.models.trainer | ============================================================
+2026-03-10 22:20:26 | INFO     | smart_grid.models.baseline | LinearRegression обучен | X_flat: 432 фич
+2026-03-10 22:20:26 | INFO     | smart_grid.models.trainer | LinearRegression обучена за 0.0 сек
+2026-03-10 22:20:26 | INFO     | smart_grid.models.trainer | ============================================================
+2026-03-10 22:20:26 | INFO     | smart_grid.models.trainer | Обучение модели: XGBoost
+2026-03-10 22:20:26 | INFO     | smart_grid.models.trainer | ============================================================
+2026-03-10 22:20:34 | INFO     | smart_grid.models.trainer | XGBoost обучен
+2026-03-10 22:20:34 | INFO     | smart_grid.models.trainer | XGBoost обучена за 8.2 сек
+2026-03-10 22:20:34 | INFO     | smart_grid | 
+[6/10] Сравнение моделей на тестовой выборке...
+2026-03-10 22:20:34 | INFO     | smart_grid.models.trainer | 
+============================================================
+2026-03-10 22:20:34 | INFO     | smart_grid.models.trainer | СРАВНЕНИЕ МОДЕЛЕЙ (split=TEST)
+2026-03-10 22:20:34 | INFO     | smart_grid.models.trainer | ============================================================
+2026-03-10 22:20:34 | INFO     | smart_grid.models.trainer | Модель                      MAE     RMSE    MAPE%      R²
+2026-03-10 22:20:34 | INFO     | smart_grid.models.trainer | ----------------------------------------------------------
+2026-03-10 22:20:35 | INFO     | smart_grid.utils.metrics | LSTM            | MAE=  740.76 | RMSE= 1017.11 | MAPE= 19.45% | R²=-0.3537
+2026-03-10 22:20:35 | INFO     | smart_grid.models.trainer | LSTM                     740.76  1017.11   19.45% -0.3537
+2026-03-10 22:20:36 | INFO     | smart_grid.utils.metrics | VanillaTransformer | MAE=  693.39 | RMSE=  953.88 | MAPE= 19.12% | R²=-0.1906
+2026-03-10 22:20:36 | INFO     | smart_grid.models.trainer | VanillaTransformer       693.39   953.88   19.12% -0.1906
+2026-03-10 22:20:36 | INFO     | smart_grid.utils.metrics | PatchTST        | MAE=  646.24 | RMSE=  932.62 | MAPE= 16.40% | R²=-0.1381
+2026-03-10 22:20:36 | INFO     | smart_grid.models.trainer | PatchTST                 646.24   932.62   16.40% -0.1381
+2026-03-10 22:20:36 | INFO     | smart_grid.utils.metrics | LinearRegression | MAE=  463.95 | RMSE=  666.79 | MAPE= 13.08% | R²=0.4182
+2026-03-10 22:20:36 | INFO     | smart_grid.models.trainer | LinearRegression         463.95   666.79   13.08% 0.4182
+2026-03-10 22:20:36 | INFO     | smart_grid.utils.metrics | XGBoost         | MAE=  405.90 | RMSE=  624.55 | MAPE= 10.97% | R²=0.4896
+2026-03-10 22:20:36 | INFO     | smart_grid.models.trainer | XGBoost                  405.90   624.55   10.97% 0.4896
+2026-03-10 22:20:36 | INFO     | smart_grid.models.trainer | ----------------------------------------------------------
+2026-03-10 22:20:36 | INFO     | smart_grid.models.trainer | 🏆 Лучшая модель по MAE: XGBoost
+2026-03-10 22:20:37 | INFO     | smart_grid | 🏆 Лучшая модель: XGBoost (MAE=405.90)
+2026-03-10 22:20:37 | INFO     | smart_grid | 
+[7/10] Визуализация весов внимания...
+2026-03-10 22:20:37 | INFO     | smart_grid.utils.attention_viz | Attention heatmap: c:\Users\Admin\Downloads\smart_grid_project_v2 (5)\smart_grid_project\results\plots\attention_VanillaTransformer_block_0.png
+2026-03-10 22:20:38 | INFO     | smart_grid.utils.attention_viz | Attention heatmap: c:\Users\Admin\Downloads\smart_grid_project_v2 (5)\smart_grid_project\results\plots\attention_VanillaTransformer_block_1.png
+2026-03-10 22:20:38 | INFO     | smart_grid.utils.attention_viz | Summary attention: c:\Users\Admin\Downloads\smart_grid_project_v2 (5)\smart_grid_project\results\plots\attention_summary_VanillaTransformer.png
+2026-03-10 22:20:38 | INFO     | smart_grid.utils.attention_viz | Head specialization: c:\Users\Admin\Downloads\smart_grid_project_v2 (5)\smart_grid_project\results\plots\head_specialization_VanillaTransformer.png
+2026-03-10 22:20:39 | INFO     | smart_grid.utils.attention_viz | Attention heatmap: c:\Users\Admin\Downloads\smart_grid_project_v2 (5)\smart_grid_project\results\plots\attention_PatchTST_block_0.png
+2026-03-10 22:20:39 | INFO     | smart_grid.utils.attention_viz | Attention heatmap: c:\Users\Admin\Downloads\smart_grid_project_v2 (5)\smart_grid_project\results\plots\attention_PatchTST_block_1.png
+2026-03-10 22:20:39 | INFO     | smart_grid.utils.attention_viz | Summary attention: c:\Users\Admin\Downloads\smart_grid_project_v2 (5)\smart_grid_project\results\plots\attention_summary_PatchTST.png
+2026-03-10 22:20:40 | INFO     | smart_grid.utils.attention_viz | Head specialization: c:\Users\Admin\Downloads\smart_grid_project_v2 (5)\smart_grid_project\results\plots\head_specialization_PatchTST.png
+2026-03-10 22:20:40 | INFO     | smart_grid | 
+[8/10] Анализ остатков лучшей модели: XGBoost
+2026-03-10 22:20:40 | INFO     | smart_grid.analysis.residuals | Анализ остатков модели: XGBoost (n=13848)
+2026-03-10 22:20:40 | INFO     | smart_grid.analysis.residuals | ADF тест: stat=-2.4096 p=0.1391 (не стационарны)
+2026-03-10 22:20:40 | INFO     | smart_grid.analysis.residuals | KPSS тест: stat=0.9607 p=0.0100
+2026-03-10 22:20:41 | INFO     | smart_grid.analysis.residuals | Ljung-Box lag=10: p=0.0000  lag=20: p=0.0000
+2026-03-10 22:20:41 | INFO     | smart_grid.analysis.residuals | Durbin-Watson: 0.2076 (2.0=нет автокорреляции)
+2026-03-10 22:20:41 | INFO     | smart_grid.analysis.residuals | Jarque-Bera: stat=39368.5909 p=0.0000
+2026-03-10 22:20:41 | INFO     | smart_grid.analysis.residuals | График остатков: c:\Users\Admin\Downloads\smart_grid_project_v2 (5)\smart_grid_project\results\plots\residuals_XGBoost.png
+2026-03-10 22:20:41 | INFO     | smart_grid | 
+[9/10] Скользящий бэктестинг...
+2026-03-10 22:20:41 | INFO     | smart_grid.analysis.backtesting | Бэктестинг XGBoost: 8 окон по ~72 шагов
+2026-03-10 22:20:41 | INFO     | smart_grid.analysis.backtesting |   Окно  1/8 | MAE=276.11 MAPE=8.19%
+2026-03-10 22:20:41 | INFO     | smart_grid.analysis.backtesting |   Окно  2/8 | MAE=559.45 MAPE=14.90%
+2026-03-10 22:20:41 | INFO     | smart_grid.analysis.backtesting |   Окно  3/8 | MAE=601.84 MAPE=13.50%
+2026-03-10 22:20:41 | INFO     | smart_grid.analysis.backtesting |   Окно  4/8 | MAE=569.25 MAPE=13.51%
+2026-03-10 22:20:41 | INFO     | smart_grid.analysis.backtesting |   Окно  5/8 | MAE=375.82 MAPE=11.45%
+2026-03-10 22:20:41 | INFO     | smart_grid.analysis.backtesting |   Окно  6/8 | MAE=298.37 MAPE=9.11%
+2026-03-10 22:20:41 | INFO     | smart_grid.analysis.backtesting |   Окно  7/8 | MAE=262.75 MAPE=8.04%
+2026-03-10 22:20:41 | INFO     | smart_grid.analysis.backtesting |   Окно  8/8 | MAE=305.01 MAPE=9.09%
+2026-03-10 22:20:41 | INFO     | smart_grid.analysis.backtesting | График бэктестинга: c:\Users\Admin\Downloads\smart_grid_project_v2 (5)\smart_grid_project\results\plots\backtesting_XGBoost.png
+2026-03-10 22:20:41 | INFO     | smart_grid.analysis.backtesting | Итого по бэктестингу XGBoost: MAE=406.08±136.31  MAPE=10.97±2.54%
+2026-03-10 22:20:41 | INFO     | smart_grid | 
+[10/10] Оптимизация накопителя энергии...
+2026-03-10 22:20:41 | INFO     | smart_grid.optimization.storage | ──────────────────────────────────────────────────
+2026-03-10 22:20:41 | INFO     | smart_grid.optimization.storage | Горизонт: 720 ч (30.0 сут) | SOC 25%→75% (ΔE=150 кВт·ч)
+2026-03-10 22:20:41 | INFO     | smart_grid.optimization.storage | Базовая стоимость:         8779795.97 руб
+2026-03-10 22:20:41 | INFO     | smart_grid.optimization.storage | Оптимизированная (грязная):8765121.91 руб
+2026-03-10 22:20:41 | INFO     | smart_grid.optimization.storage | Валовая экономия:            14674.06 руб
+2026-03-10 22:20:41 | INFO     | smart_grid.optimization.storage | Стоимость деградации:          400.50 руб
+2026-03-10 22:20:41 | INFO     | smart_grid.optimization.storage | ЧИСТАЯ экономия:             14273.56 руб (0.16%)
+2026-03-10 22:20:41 | INFO     | smart_grid.optimization.storage | Прокачано:                    6675.00 кВт·ч
+2026-03-10 22:20:41 | INFO     | smart_grid.optimization.storage | Часов заряд/разряд:        23 / 22 из 720
+2026-03-10 22:20:41 | INFO     | smart_grid.optimization.storage | Экономия/год (оценка):      173661.59 руб/год
+2026-03-10 22:20:41 | INFO     | smart_grid.optimization.storage | Срок окупаемости:                17.3 лет
+2026-03-10 22:20:43 | INFO     | smart_grid.optimization.storage | ──────────────────────────────────────────────────
+2026-03-10 22:20:43 | INFO     | smart_grid.optimization.storage | Горизонт: 720 ч (30.0 сут) | SOC 40%→60% (ΔE=60 кВт·ч)
+2026-03-10 22:20:43 | INFO     | smart_grid.optimization.storage | Базовая стоимость:         8779795.97 руб
+2026-03-10 22:20:43 | INFO     | smart_grid.optimization.storage | Оптимизированная (грязная):8773926.35 руб
+2026-03-10 22:20:43 | INFO     | smart_grid.optimization.storage | Валовая экономия:             5869.62 руб
+2026-03-10 22:20:43 | INFO     | smart_grid.optimization.storage | Стоимость деградации:          160.20 руб
+2026-03-10 22:20:43 | INFO     | smart_grid.optimization.storage | ЧИСТАЯ экономия:              5709.42 руб (0.07%)
+2026-03-10 22:20:43 | INFO     | smart_grid.optimization.storage | Прокачано:                    2670.00 кВт·ч
+2026-03-10 22:20:43 | INFO     | smart_grid.optimization.storage | Часов заряд/разряд:        23 / 22 из 720
+2026-03-10 22:20:43 | INFO     | smart_grid.optimization.storage | Экономия/год (оценка):       69464.64 руб/год
+2026-03-10 22:20:43 | INFO     | smart_grid.optimization.storage | Срок окупаемости:                43.2 лет
+2026-03-10 22:20:43 | INFO     | smart_grid.optimization.storage | Стратегия: Консервативная (SOC 40%→60%, ΔE=60 кВт·ч)
+2026-03-10 22:20:43 | INFO     | smart_grid.optimization.storage | ──────────────────────────────────────────────────
+2026-03-10 22:20:43 | INFO     | smart_grid.optimization.storage | Горизонт: 720 ч (30.0 сут) | SOC 25%→75% (ΔE=150 кВт·ч)
+2026-03-10 22:20:43 | INFO     | smart_grid.optimization.storage | Базовая стоимость:         8779795.97 руб
+2026-03-10 22:20:43 | INFO     | smart_grid.optimization.storage | Оптимизированная (грязная):8765121.91 руб
+2026-03-10 22:20:43 | INFO     | smart_grid.optimization.storage | Валовая экономия:            14674.06 руб
+2026-03-10 22:20:43 | INFO     | smart_grid.optimization.storage | Стоимость деградации:          400.50 руб
+2026-03-10 22:20:43 | INFO     | smart_grid.optimization.storage | ЧИСТАЯ экономия:             14273.56 руб (0.16%)
+2026-03-10 22:20:43 | INFO     | smart_grid.optimization.storage | Прокачано:                    6675.00 кВт·ч
+2026-03-10 22:20:43 | INFO     | smart_grid.optimization.storage | Часов заряд/разряд:        23 / 22 из 720
+2026-03-10 22:20:43 | INFO     | smart_grid.optimization.storage | Экономия/год (оценка):      173661.59 руб/год
+2026-03-10 22:20:43 | INFO     | smart_grid.optimization.storage | Срок окупаемости:                17.3 лет
+2026-03-10 22:20:43 | INFO     | smart_grid.optimization.storage | Стратегия: Умеренная (SOC 25%→75%, ΔE=150 кВт·ч)
+2026-03-10 22:20:43 | INFO     | smart_grid.optimization.storage | ──────────────────────────────────────────────────
+2026-03-10 22:20:43 | INFO     | smart_grid.optimization.storage | Горизонт: 720 ч (30.0 сут) | SOC 8%→92% (ΔE=252 кВт·ч)
+2026-03-10 22:20:43 | INFO     | smart_grid.optimization.storage | Базовая стоимость:         8779795.97 руб
+2026-03-10 22:20:43 | INFO     | smart_grid.optimization.storage | Оптимизированная (грязная):8754955.19 руб
+2026-03-10 22:20:43 | INFO     | smart_grid.optimization.storage | Валовая экономия:            24840.78 руб
+2026-03-10 22:20:43 | INFO     | smart_grid.optimization.storage | Стоимость деградации:          666.72 руб
+2026-03-10 22:20:43 | INFO     | smart_grid.optimization.storage | ЧИСТАЯ экономия:             24174.06 руб (0.28%)
+2026-03-10 22:20:43 | INFO     | smart_grid.optimization.storage | Прокачано:                   11112.00 кВт·ч
+2026-03-10 22:20:43 | INFO     | smart_grid.optimization.storage | Часов заряд/разряд:        44 / 44 из 720
+2026-03-10 22:20:43 | INFO     | smart_grid.optimization.storage | Экономия/год (оценка):      294117.76 руб/год
+2026-03-10 22:20:43 | INFO     | smart_grid.optimization.storage | Срок окупаемости:                10.2 лет
+2026-03-10 22:20:43 | INFO     | smart_grid.optimization.storage | Стратегия: Агрессивная (SOC 8%→92%, ΔE=252 кВт·ч)
+2026-03-10 22:20:43 | INFO     | smart_grid.optimization.storage | ═════════════════════════════════════════════════════════════════
+2026-03-10 22:20:43 | INFO     | smart_grid.optimization.storage | Стратегия            ΔE кВт·ч   Чистая экон.     Экон.%    Окупаем.
+2026-03-10 22:20:43 | INFO     | smart_grid.optimization.storage | ─────────────────────────────────────────────────────────────────
+2026-03-10 22:20:43 | INFO     | smart_grid.optimization.storage | Консервативная             60         5709 руб     0.07%    43.2 лет
+2026-03-10 22:20:43 | INFO     | smart_grid.optimization.storage | Умеренная                 150        14274 руб     0.16%    17.3 лет
+2026-03-10 22:20:43 | INFO     | smart_grid.optimization.storage | Агрессивная               252        24174 руб     0.28%    10.2 лет
+2026-03-10 22:20:43 | INFO     | smart_grid.optimization.storage | ═════════════════════════════════════════════════════════════════
+2026-03-10 22:20:43 | INFO     | smart_grid.optimization.storage | 🏆 Лучшая: Агрессивная | 0.28% | окупаемость 10.2 лет
+2026-03-10 22:20:43 | INFO     | smart_grid | 
+======================================================================
+2026-03-10 22:20:43 | INFO     | smart_grid | ✅ Пайплайн завершён успешно!
+2026-03-10 22:20:43 | INFO     | smart_grid | 📁 Результаты в: c:\Users\Admin\Downloads\smart_grid_project_v2 (5)\smart_grid_project\results
+2026-03-10 22:20:43 | INFO     | smart_grid | ======================================================================
+2026-03-10 22:53:43 | INFO     | smart_grid | ======================================================================
+2026-03-10 22:53:43 | INFO     | smart_grid |   СИСТЕМА ПРОГНОЗИРОВАНИЯ ЭНЕРГОПОТРЕБЛЕНИЯ — SMART GRID
+2026-03-10 22:53:43 | INFO     | smart_grid | ======================================================================
+2026-03-10 22:53:43 | INFO     | smart_grid | 🎯 Optimal mode: DAYS=365, EPOCHS=200, HISTORY=48 | LSTM=256/128/64 lr=3e-04 | Trans d=128 h=8 L=4 lr=3e-04 | STORAGE=720h | BAT=4500 кВт·ч
+2026-03-10 22:53:43 | INFO     | smart_grid | 
+[1/10] Генерация данных...
+2026-03-10 22:53:43 | INFO     | smart_grid.data.generator | Генерация данных Smart Grid: 365 дней, 500 домохозяйств
+2026-03-10 22:53:43 | INFO     | smart_grid.data.generator | Сгенерировано 8760 записей. Потребление: min=749.5, mean=8347.2, max=22925.4 кВт·ч
+2026-03-10 22:53:43 | INFO     | smart_grid.data.generator | Валидация данных...
+2026-03-10 22:53:43 | INFO     | smart_grid.data.generator |   ✅ NaN/Inf: нет
+2026-03-10 22:53:43 | INFO     | smart_grid.data.generator |   ✅ Отрицательных значений: нет
+2026-03-10 22:53:43 | INFO     | smart_grid.data.generator |   ✅ Утренний пик: 8:00
+2026-03-10 22:53:43 | INFO     | smart_grid.data.generator |   ✅ Вечерний пик: 19:00
+2026-03-10 22:53:43 | INFO     | smart_grid.data.generator |   ✅ Выходные/будни: 0.85
+2026-03-10 22:53:43 | INFO     | smart_grid.data.generator |   ✅ Сезонность: зима=10913.5 > лето=6628.0 кВт·ч
+2026-03-10 22:53:43 | INFO     | smart_grid.data.generator |   ✅ Диапазон температур: -30.0..36.4°C
+2026-03-10 22:53:43 | INFO     | smart_grid.data.generator | Валидация ПРОЙДЕНА
+2026-03-10 22:53:43 | INFO     | smart_grid | ──────────────────────────────────────────────────
+2026-03-10 22:53:43 | INFO     | smart_grid | КОНФИГУРАЦИЯ:
+2026-03-10 22:53:43 | INFO     | smart_grid |   Данные:      365 дней, 500 домохозяйств
+2026-03-10 22:53:43 | INFO     | smart_grid |   Признаки:    11 ковариат на шаг (мультивариантный вход)
+2026-03-10 22:53:43 | INFO     | smart_grid |   История:     48 ч → прогноз 24 ч
+2026-03-10 22:53:43 | INFO     | smart_grid |   Обучение:    200 эпох, batch=32
+2026-03-10 22:53:43 | INFO     | smart_grid |   LSTM:        units=256/128/64, drop=0.20, lr=0.0003, input=(48,11)
+2026-03-10 22:53:43 | INFO     | smart_grid |   Transformer: d=128 h=8 L=4 dff=256 drop=0.20, lr=0.0003, input=(48,11)
+2026-03-10 22:53:43 | INFO     | smart_grid |   XGBoost:     n_est=500, depth=5, col=0.40
+2026-03-10 22:53:43 | INFO     | smart_grid |   Тарифы:      пик=6.50 день=4.20 ночь=1.80 руб/кВт·ч
+2026-03-10 22:53:43 | INFO     | smart_grid |   Батарея:     4500 кВт·ч, SOC 25%→75% (ΔE=2250 кВт·ч)
+2026-03-10 22:53:43 | INFO     | smart_grid | ──────────────────────────────────────────────────
+2026-03-10 22:53:43 | INFO     | smart_grid | 
+[2/10] Исследовательский анализ данных...
+2026-03-10 22:53:43 | INFO     | smart_grid.analysis.eda | Запуск EDA...
+2026-03-10 22:53:43 | INFO     | smart_grid.analysis.eda | 
+count     8760.000000
+mean      8347.165039
+std       2915.488770
+min        749.494873
+25%       6223.188354
+50%       7855.132812
+75%       9894.481201
+max      22925.427734
+2026-03-10 22:53:43 | INFO     | smart_grid.analysis.eda | CV=0.349  Skew=1.019  Kurt=1.531
+2026-03-10 22:53:44 | INFO     | smart_grid.analysis.eda | Декомпозиция временного ряда...
+2026-03-10 22:53:45 | INFO     | smart_grid.analysis.eda | EDA завершён. Графики сохранены в: c:\Users\Admin\Downloads\smart_grid_project_v2 (5)\smart_grid_project\results\plots
+2026-03-10 22:53:45 | INFO     | smart_grid | 
+[3/10] Подготовка данных (scaler fit только на train)...
+2026-03-10 22:53:45 | INFO     | smart_grid.data.preprocessing | Данные подготовлены | train=6061 val=1243 test=1243
+2026-03-10 22:53:45 | INFO     | smart_grid.data.preprocessing | ✅ X_train.shape: (6061, 48, 11)  Y_train.shape: (6061, 24)  (n_features=11, v3: +hour_sin/cos +temp_sq)
+2026-03-10 22:53:45 | INFO     | smart_grid | ✅ ЧЕКЛИСТ X_train.shape=(6061, 48, 11) | 11 ковариат подтверждено
+2026-03-10 22:53:45 | INFO     | smart_grid.data.preprocessing | ✅ validate_data_integrity ПРОЙДЕНА | train=6061 val=1243 test=1243 | Y∈[0.000, 1.000]
+2026-03-10 22:53:45 | INFO     | smart_grid | 
+[4/10] Инициализация моделей...
+2026-03-10 22:53:45 | INFO     | smart_grid.models.lstm | LSTM модель построена: 539096 параметров | input=(48, 11) | units=256/128/64 | lr=3e-04 | Huber δ=0.1
+2026-03-10 22:53:46 | WARNING  | tensorflow | From C:\Users\Admin\AppData\Local\Programs\Python\Python312\Lib\site-packages\keras\src\backend\tensorflow\core.py:204: The name tf.placeholder is deprecated. Please use tf.compat.v1.placeholder instead.
+
+2026-03-10 22:53:46 | INFO     | smart_grid.models.transformer | VanillaTransformer[sinusoidal] d=128 h=8 L=4 | 567960 params
+2026-03-10 22:53:46 | INFO     | smart_grid.models.transformer | PatchTST: history=48 patch=8 stride=4 → 11 patches
+2026-03-10 22:53:46 | INFO     | smart_grid.models.transformer | PatchTST patch=8 stride=4 n_p=11 d=128 h=8 L=4 | 727832 params
+2026-03-10 22:53:46 | INFO     | smart_grid | Параметры: LSTM=539096 | VanillaTrans=567960 | PatchTST=727832
+2026-03-10 22:53:46 | INFO     | smart_grid | 
+[5/10] Обучение моделей...
+2026-03-10 22:53:46 | INFO     | smart_grid.models.trainer | ============================================================
+2026-03-10 22:53:46 | INFO     | smart_grid.models.trainer | Обучение модели: LSTM
+2026-03-10 22:53:46 | INFO     | smart_grid.models.trainer | ============================================================
+2026-03-10 23:04:42 | INFO     | smart_grid.models.trainer | LSTM: обучение завершено за 38 эпох
+2026-03-10 23:04:42 | INFO     | smart_grid.models.trainer | LSTM обучена за 655.7 сек
+2026-03-10 23:04:42 | INFO     | smart_grid.models.trainer | ============================================================
+2026-03-10 23:04:42 | INFO     | smart_grid.models.trainer | Обучение модели: VanillaTransformer
+2026-03-10 23:04:42 | INFO     | smart_grid.models.trainer | ============================================================
+2026-03-10 23:13:12 | INFO     | smart_grid.models.trainer | VanillaTransformer: обучение завершено за 41 эпох
+2026-03-10 23:13:12 | INFO     | smart_grid.models.trainer | VanillaTransformer обучена за 509.7 сек
+2026-03-10 23:13:12 | INFO     | smart_grid.models.trainer | ============================================================
+2026-03-10 23:13:12 | INFO     | smart_grid.models.trainer | Обучение модели: PatchTST
+2026-03-10 23:13:12 | INFO     | smart_grid.models.trainer | ============================================================
+2026-03-10 23:16:07 | INFO     | smart_grid.models.trainer | PatchTST: обучение завершено за 30 эпох
+2026-03-10 23:16:07 | INFO     | smart_grid.models.trainer | PatchTST обучена за 175.0 сек
+2026-03-10 23:16:07 | INFO     | smart_grid.models.trainer | ============================================================
+2026-03-10 23:16:07 | INFO     | smart_grid.models.trainer | Обучение модели: LinearRegression
+2026-03-10 23:16:07 | INFO     | smart_grid.models.trainer | ============================================================
+2026-03-10 23:16:08 | INFO     | smart_grid.models.baseline | LinearRegression обучен | X_flat: 528 фич
+2026-03-10 23:16:08 | INFO     | smart_grid.models.trainer | LinearRegression обучена за 0.1 сек
+2026-03-10 23:16:08 | INFO     | smart_grid.models.trainer | ============================================================
+2026-03-10 23:16:08 | INFO     | smart_grid.models.trainer | Обучение модели: XGBoost
+2026-03-10 23:16:08 | INFO     | smart_grid.models.trainer | ============================================================
+2026-03-10 23:16:30 | INFO     | smart_grid.models.trainer | XGBoost обучен
+2026-03-10 23:16:30 | INFO     | smart_grid.models.trainer | XGBoost обучена за 22.3 сек
+2026-03-10 23:16:30 | INFO     | smart_grid | 
+[6/10] Сравнение моделей на тестовой выборке...
+2026-03-10 23:16:30 | INFO     | smart_grid.models.trainer | 
+============================================================
+2026-03-10 23:16:30 | INFO     | smart_grid.models.trainer | СРАВНЕНИЕ МОДЕЛЕЙ (split=TEST)
+2026-03-10 23:16:30 | INFO     | smart_grid.models.trainer | ============================================================
+2026-03-10 23:16:30 | INFO     | smart_grid.models.trainer | Модель                      MAE     RMSE    MAPE%      R²
+2026-03-10 23:16:30 | INFO     | smart_grid.models.trainer | ----------------------------------------------------------
+2026-03-10 23:16:31 | INFO     | smart_grid.utils.metrics | LSTM            | MAE= 1275.46 | RMSE= 1721.57 | MAPE= 13.01% | R²=0.6440
+2026-03-10 23:16:31 | INFO     | smart_grid.models.trainer | LSTM                    1275.46  1721.57   13.01% 0.6440
+2026-03-10 23:16:32 | INFO     | smart_grid.utils.metrics | VanillaTransformer | MAE= 1042.32 | RMSE= 1476.53 | MAPE= 11.67% | R²=0.7381
+2026-03-10 23:16:32 | INFO     | smart_grid.models.trainer | VanillaTransformer      1042.32  1476.53   11.67% 0.7381
+2026-03-10 23:16:33 | INFO     | smart_grid.utils.metrics | PatchTST        | MAE= 1098.01 | RMSE= 1617.56 | MAPE= 11.74% | R²=0.6857
+2026-03-10 23:16:33 | INFO     | smart_grid.models.trainer | PatchTST                1098.01  1617.56   11.74% 0.6857
+2026-03-10 23:16:33 | INFO     | smart_grid.utils.metrics | LinearRegression | MAE=  849.95 | RMSE= 1312.37 | MAPE=  9.72% | R²=0.7931
+2026-03-10 23:16:33 | INFO     | smart_grid.models.trainer | LinearRegression         849.95  1312.37    9.72% 0.7931
+2026-03-10 23:16:33 | INFO     | smart_grid.utils.metrics | XGBoost         | MAE= 1465.05 | RMSE= 2066.67 | MAPE= 14.11% | R²=0.4870
+2026-03-10 23:16:33 | INFO     | smart_grid.models.trainer | XGBoost                 1465.05  2066.67   14.11% 0.4870
+2026-03-10 23:16:33 | INFO     | smart_grid.models.trainer | ----------------------------------------------------------
+2026-03-10 23:16:33 | INFO     | smart_grid.models.trainer | 🏆 Лучшая модель по MAE: LinearRegression
+2026-03-10 23:16:36 | INFO     | smart_grid | 🏆 Лучшая модель: LinearRegression (MAE=849.95)
+2026-03-10 23:16:36 | INFO     | smart_grid | 
+[7/10] Визуализация весов внимания...
+2026-03-10 23:16:37 | INFO     | smart_grid.utils.attention_viz | Attention heatmap: c:\Users\Admin\Downloads\smart_grid_project_v2 (5)\smart_grid_project\results\plots\attention_VanillaTransformer_block_0.png
+2026-03-10 23:16:37 | INFO     | smart_grid.utils.attention_viz | Attention heatmap: c:\Users\Admin\Downloads\smart_grid_project_v2 (5)\smart_grid_project\results\plots\attention_VanillaTransformer_block_1.png
+2026-03-10 23:16:38 | INFO     | smart_grid.utils.attention_viz | Attention heatmap: c:\Users\Admin\Downloads\smart_grid_project_v2 (5)\smart_grid_project\results\plots\attention_VanillaTransformer_block_2.png
+2026-03-10 23:16:39 | INFO     | smart_grid.utils.attention_viz | Attention heatmap: c:\Users\Admin\Downloads\smart_grid_project_v2 (5)\smart_grid_project\results\plots\attention_VanillaTransformer_block_3.png
+2026-03-10 23:16:39 | INFO     | smart_grid.utils.attention_viz | Summary attention: c:\Users\Admin\Downloads\smart_grid_project_v2 (5)\smart_grid_project\results\plots\attention_summary_VanillaTransformer.png
+2026-03-10 23:16:40 | INFO     | smart_grid.utils.attention_viz | Head specialization: c:\Users\Admin\Downloads\smart_grid_project_v2 (5)\smart_grid_project\results\plots\head_specialization_VanillaTransformer.png
+2026-03-10 23:16:40 | INFO     | smart_grid.utils.attention_viz | Attention heatmap: c:\Users\Admin\Downloads\smart_grid_project_v2 (5)\smart_grid_project\results\plots\attention_PatchTST_block_0.png
+2026-03-10 23:16:41 | INFO     | smart_grid.utils.attention_viz | Attention heatmap: c:\Users\Admin\Downloads\smart_grid_project_v2 (5)\smart_grid_project\results\plots\attention_PatchTST_block_1.png
+2026-03-10 23:16:42 | INFO     | smart_grid.utils.attention_viz | Attention heatmap: c:\Users\Admin\Downloads\smart_grid_project_v2 (5)\smart_grid_project\results\plots\attention_PatchTST_block_2.png
+2026-03-10 23:16:43 | INFO     | smart_grid.utils.attention_viz | Attention heatmap: c:\Users\Admin\Downloads\smart_grid_project_v2 (5)\smart_grid_project\results\plots\attention_PatchTST_block_3.png
+2026-03-10 23:16:43 | INFO     | smart_grid.utils.attention_viz | Summary attention: c:\Users\Admin\Downloads\smart_grid_project_v2 (5)\smart_grid_project\results\plots\attention_summary_PatchTST.png
+2026-03-10 23:16:44 | INFO     | smart_grid.utils.attention_viz | Head specialization: c:\Users\Admin\Downloads\smart_grid_project_v2 (5)\smart_grid_project\results\plots\head_specialization_PatchTST.png
+2026-03-10 23:16:44 | INFO     | smart_grid | 
+[8/10] Анализ остатков лучшей модели: LinearRegression
+2026-03-10 23:16:44 | INFO     | smart_grid.analysis.residuals | Анализ остатков модели: LinearRegression (n=29832)
+2026-03-10 23:16:45 | INFO     | smart_grid.analysis.residuals | ADF тест: stat=-5.5666 p=0.0000 (стационарны)
+2026-03-10 23:16:45 | INFO     | smart_grid.analysis.residuals | KPSS тест: stat=0.8990 p=0.0100
+2026-03-10 23:16:48 | INFO     | smart_grid.analysis.residuals | Ljung-Box lag=10: p=0.0000  lag=20: p=0.0000
+2026-03-10 23:16:48 | INFO     | smart_grid.analysis.residuals | Durbin-Watson: 0.3584 (2.0=нет автокорреляции)
+2026-03-10 23:16:48 | INFO     | smart_grid.analysis.residuals | Jarque-Bera: stat=543178.0092 p=0.0000
+2026-03-10 23:16:48 | INFO     | smart_grid.analysis.residuals | График остатков: c:\Users\Admin\Downloads\smart_grid_project_v2 (5)\smart_grid_project\results\plots\residuals_LinearRegression.png
+2026-03-10 23:16:48 | INFO     | smart_grid | 
+[9/10] Скользящий бэктестинг...
+2026-03-10 23:16:48 | INFO     | smart_grid.analysis.backtesting | Бэктестинг LinearRegression: 8 окон по ~155 шагов
+2026-03-10 23:16:48 | INFO     | smart_grid.analysis.backtesting |   Окно  1/8 | MAE=783.11 MAPE=7.58%
+2026-03-10 23:16:48 | INFO     | smart_grid.analysis.backtesting |   Окно  2/8 | MAE=554.40 MAPE=4.95%
+2026-03-10 23:16:48 | INFO     | smart_grid.analysis.backtesting |   Окно  3/8 | MAE=546.89 MAPE=5.00%
+2026-03-10 23:16:48 | INFO     | smart_grid.analysis.backtesting |   Окно  4/8 | MAE=1165.14 MAPE=30.72%
+2026-03-10 23:16:48 | INFO     | smart_grid.analysis.backtesting |   Окно  5/8 | MAE=634.50 MAPE=5.55%
+2026-03-10 23:16:48 | INFO     | smart_grid.analysis.backtesting |   Окно  6/8 | MAE=618.94 MAPE=5.54%
+2026-03-10 23:16:48 | INFO     | smart_grid.analysis.backtesting |   Окно  7/8 | MAE=1085.11 MAPE=9.35%
+2026-03-10 23:16:48 | INFO     | smart_grid.analysis.backtesting |   Окно  8/8 | MAE=1400.87 MAPE=9.07%
+2026-03-10 23:16:49 | INFO     | smart_grid.analysis.backtesting | График бэктестинга: c:\Users\Admin\Downloads\smart_grid_project_v2 (5)\smart_grid_project\results\plots\backtesting_LinearRegression.png
+2026-03-10 23:16:49 | INFO     | smart_grid.analysis.backtesting | Итого по бэктестингу LinearRegression: MAE=848.62±304.46  MAPE=9.72±8.11%
+2026-03-10 23:16:49 | INFO     | smart_grid | 
+[10/10] Оптимизация накопителя энергии...
+2026-03-10 23:16:49 | INFO     | smart_grid.optimization.storage | ──────────────────────────────────────────────────
+2026-03-10 23:16:49 | INFO     | smart_grid.optimization.storage | Горизонт: 720 ч (30.0 сут) | SOC 25%→75% (ΔE=2250 кВт·ч)
+2026-03-10 23:16:49 | INFO     | smart_grid.optimization.storage | Базовая стоимость:         30483383.32 руб
+2026-03-10 23:16:49 | INFO     | smart_grid.optimization.storage | Оптимизированная (грязная):30263272.49 руб
+2026-03-10 23:16:49 | INFO     | smart_grid.optimization.storage | Валовая экономия:           220110.83 руб
+2026-03-10 23:16:49 | INFO     | smart_grid.optimization.storage | Стоимость деградации:         6007.50 руб
+2026-03-10 23:16:49 | INFO     | smart_grid.optimization.storage | ЧИСТАЯ экономия:            214103.33 руб (0.70%)
+2026-03-10 23:16:49 | INFO     | smart_grid.optimization.storage | Прокачано:                  100125.00 кВт·ч
+2026-03-10 23:16:49 | INFO     | smart_grid.optimization.storage | Часов заряд/разряд:        23 / 22 из 720
+2026-03-10 23:16:49 | INFO     | smart_grid.optimization.storage | Экономия/год (оценка):     2604923.86 руб/год
+2026-03-10 23:16:49 | INFO     | smart_grid.optimization.storage | Срок окупаемости:                 1.2 лет
+2026-03-10 23:16:50 | INFO     | smart_grid.optimization.storage | ──────────────────────────────────────────────────
+2026-03-10 23:16:50 | INFO     | smart_grid.optimization.storage | Горизонт: 720 ч (30.0 сут) | SOC 40%→60% (ΔE=900 кВт·ч)
+2026-03-10 23:16:50 | INFO     | smart_grid.optimization.storage | Базовая стоимость:         30483383.32 руб
+2026-03-10 23:16:50 | INFO     | smart_grid.optimization.storage | Оптимизированная (грязная):30395338.99 руб
+2026-03-10 23:16:50 | INFO     | smart_grid.optimization.storage | Валовая экономия:            88044.33 руб
+2026-03-10 23:16:50 | INFO     | smart_grid.optimization.storage | Стоимость деградации:         2403.00 руб
+2026-03-10 23:16:50 | INFO     | smart_grid.optimization.storage | ЧИСТАЯ экономия:             85641.33 руб (0.28%)
+2026-03-10 23:16:50 | INFO     | smart_grid.optimization.storage | Прокачано:                   40050.00 кВт·ч
+2026-03-10 23:16:50 | INFO     | smart_grid.optimization.storage | Часов заряд/разряд:        23 / 22 из 720
+2026-03-10 23:16:50 | INFO     | smart_grid.optimization.storage | Экономия/год (оценка):     1041969.54 руб/год
+2026-03-10 23:16:50 | INFO     | smart_grid.optimization.storage | Срок окупаемости:                 2.9 лет
+2026-03-10 23:16:50 | INFO     | smart_grid.optimization.storage | Стратегия: Консервативная (SOC 40%→60%, ΔE=900 кВт·ч)
+2026-03-10 23:16:50 | INFO     | smart_grid.optimization.storage | ──────────────────────────────────────────────────
+2026-03-10 23:16:50 | INFO     | smart_grid.optimization.storage | Горизонт: 720 ч (30.0 сут) | SOC 25%→75% (ΔE=2250 кВт·ч)
+2026-03-10 23:16:50 | INFO     | smart_grid.optimization.storage | Базовая стоимость:         30483383.32 руб
+2026-03-10 23:16:50 | INFO     | smart_grid.optimization.storage | Оптимизированная (грязная):30263272.49 руб
+2026-03-10 23:16:50 | INFO     | smart_grid.optimization.storage | Валовая экономия:           220110.83 руб
+2026-03-10 23:16:50 | INFO     | smart_grid.optimization.storage | Стоимость деградации:         6007.50 руб
+2026-03-10 23:16:50 | INFO     | smart_grid.optimization.storage | ЧИСТАЯ экономия:            214103.33 руб (0.70%)
+2026-03-10 23:16:50 | INFO     | smart_grid.optimization.storage | Прокачано:                  100125.00 кВт·ч
+2026-03-10 23:16:50 | INFO     | smart_grid.optimization.storage | Часов заряд/разряд:        23 / 22 из 720
+2026-03-10 23:16:50 | INFO     | smart_grid.optimization.storage | Экономия/год (оценка):     2604923.86 руб/год
+2026-03-10 23:16:50 | INFO     | smart_grid.optimization.storage | Срок окупаемости:                 1.2 лет
+2026-03-10 23:16:50 | INFO     | smart_grid.optimization.storage | Стратегия: Умеренная (SOC 25%→75%, ΔE=2250 кВт·ч)
+2026-03-10 23:16:50 | INFO     | smart_grid.optimization.storage | ──────────────────────────────────────────────────
+2026-03-10 23:16:50 | INFO     | smart_grid.optimization.storage | Горизонт: 720 ч (30.0 сут) | SOC 8%→92% (ΔE=3780 кВт·ч)
+2026-03-10 23:16:50 | INFO     | smart_grid.optimization.storage | Базовая стоимость:         30483383.32 руб
+2026-03-10 23:16:50 | INFO     | smart_grid.optimization.storage | Оптимизированная (грязная):30110771.58 руб
+2026-03-10 23:16:50 | INFO     | smart_grid.optimization.storage | Валовая экономия:           372611.74 руб
+2026-03-10 23:16:50 | INFO     | smart_grid.optimization.storage | Стоимость деградации:        10000.80 руб
+2026-03-10 23:16:50 | INFO     | smart_grid.optimization.storage | ЧИСТАЯ экономия:            362610.94 руб (1.19%)
+2026-03-10 23:16:50 | INFO     | smart_grid.optimization.storage | Прокачано:                  166680.00 кВт·ч
+2026-03-10 23:16:50 | INFO     | smart_grid.optimization.storage | Часов заряд/разряд:        44 / 44 из 720
+2026-03-10 23:16:50 | INFO     | smart_grid.optimization.storage | Экономия/год (оценка):     4411766.44 руб/год
+2026-03-10 23:16:50 | INFO     | smart_grid.optimization.storage | Срок окупаемости:                 0.7 лет
+2026-03-10 23:16:50 | INFO     | smart_grid.optimization.storage | Стратегия: Агрессивная (SOC 8%→92%, ΔE=3780 кВт·ч)
+2026-03-10 23:16:50 | INFO     | smart_grid.optimization.storage | ═════════════════════════════════════════════════════════════════
+2026-03-10 23:16:50 | INFO     | smart_grid.optimization.storage | Стратегия            ΔE кВт·ч   Чистая экон.     Экон.%    Окупаем.
+2026-03-10 23:16:50 | INFO     | smart_grid.optimization.storage | ─────────────────────────────────────────────────────────────────
+2026-03-10 23:16:50 | INFO     | smart_grid.optimization.storage | Консервативная            900        85641 руб     0.28%     2.9 лет
+2026-03-10 23:16:50 | INFO     | smart_grid.optimization.storage | Умеренная                2250       214103 руб     0.70%     1.2 лет
+2026-03-10 23:16:50 | INFO     | smart_grid.optimization.storage | Агрессивная              3780       362611 руб     1.19%     0.7 лет
+2026-03-10 23:16:50 | INFO     | smart_grid.optimization.storage | ═════════════════════════════════════════════════════════════════
+2026-03-10 23:16:50 | INFO     | smart_grid.optimization.storage | 🏆 Лучшая: Агрессивная | 1.19% | окупаемость 0.7 лет
+2026-03-10 23:16:50 | INFO     | smart_grid | 
+======================================================================
+2026-03-10 23:16:50 | INFO     | smart_grid | ✅ Пайплайн завершён успешно!
+2026-03-10 23:16:50 | INFO     | smart_grid | 📁 Результаты в: c:\Users\Admin\Downloads\smart_grid_project_v2 (5)\smart_grid_project\results
+2026-03-10 23:16:50 | INFO     | smart_grid | ======================================================================
+2026-03-11 08:25:10 | INFO     | smart_grid | ======================================================================
+2026-03-11 08:25:10 | INFO     | smart_grid |   СИСТЕМА ПРОГНОЗИРОВАНИЯ ЭНЕРГОПОТРЕБЛЕНИЯ — SMART GRID
+2026-03-11 08:25:10 | INFO     | smart_grid | ======================================================================
+2026-03-11 08:25:10 | INFO     | smart_grid | 🚀 Full mode v4: DAYS=730, EPOCHS=300, HISTORY=72 | LSTM=384/192/96 | Trans d=128 h=8 L=4 dff=512 | RevIN=True
+2026-03-11 08:25:10 | INFO     | smart_grid | 
+[1/10] Генерация данных...
+2026-03-11 08:25:10 | INFO     | smart_grid.data.generator | Генерация данных Smart Grid: 730 дней, 500 домохозяйств
+2026-03-11 08:25:11 | INFO     | smart_grid.data.generator | Сгенерировано 17520 записей. Потребление: min=393.9, mean=8520.1, max=23692.5 кВт·ч
+2026-03-11 08:25:11 | INFO     | smart_grid.data.generator | Валидация данных...
+2026-03-11 08:25:11 | INFO     | smart_grid.data.generator |   ✅ NaN/Inf: нет
+2026-03-11 08:25:11 | INFO     | smart_grid.data.generator |   ✅ Отрицательных значений: нет
+2026-03-11 08:25:11 | INFO     | smart_grid.data.generator |   ✅ Утренний пик: 8:00
+2026-03-11 08:25:11 | INFO     | smart_grid.data.generator |   ✅ Вечерний пик: 19:00
+2026-03-11 08:25:11 | INFO     | smart_grid.data.generator |   ✅ Выходные/будни: 0.85
+2026-03-11 08:25:11 | INFO     | smart_grid.data.generator |   ✅ Сезонность: зима=11017.2 > лето=6726.3 кВт·ч
+2026-03-11 08:25:11 | INFO     | smart_grid.data.generator |   ✅ Диапазон температур: -30.1..40.5°C
+2026-03-11 08:25:11 | INFO     | smart_grid.data.generator | Валидация ПРОЙДЕНА
+2026-03-11 08:25:11 | INFO     | smart_grid | ──────────────────────────────────────────────────
+2026-03-11 08:25:11 | INFO     | smart_grid | КОНФИГУРАЦИЯ:
+2026-03-11 08:25:11 | INFO     | smart_grid |   Данные:      730 дней, 500 домохозяйств
+2026-03-11 08:25:11 | INFO     | smart_grid |   Признаки:    9 ковариат на шаг (мультивариантный вход)
+2026-03-11 08:25:11 | INFO     | smart_grid |   История:     72 ч → прогноз 24 ч
+2026-03-11 08:25:11 | INFO     | smart_grid |   Обучение:    300 эпох, batch=32
+2026-03-11 08:25:11 | INFO     | smart_grid |   LSTM:        units=384/192/96, drop=0.20, lr=0.0003, input=(72,9)
+2026-03-11 08:25:11 | INFO     | smart_grid |   Transformer: d=128 h=8 L=4 dff=512 drop=0.20, lr=0.0003, input=(72,9)
+2026-03-11 08:25:11 | INFO     | smart_grid |   XGBoost:     n_est=800, depth=5, col=0.35
+2026-03-11 08:25:11 | INFO     | smart_grid |   Тарифы:      пик=6.50 день=4.20 ночь=1.80 руб/кВт·ч
+2026-03-11 08:25:11 | INFO     | smart_grid |   Батарея:     300 кВт·ч, SOC 25%→75% (ΔE=150 кВт·ч)
+2026-03-11 08:25:11 | INFO     | smart_grid | ──────────────────────────────────────────────────
+2026-03-11 08:25:11 | INFO     | smart_grid | 
+[2/10] Исследовательский анализ данных...
+2026-03-11 08:25:11 | INFO     | smart_grid.analysis.eda | Запуск EDA...
+2026-03-11 08:25:11 | INFO     | smart_grid.analysis.eda | 
+count    17520.000000
+mean      8520.109375
+std       2927.222168
+min        393.874878
+25%       6373.599731
+50%       8030.789307
+75%      10101.645752
+max      23692.501953
+2026-03-11 08:25:11 | INFO     | smart_grid.analysis.eda | CV=0.344  Skew=0.927  Kurt=1.318
+2026-03-11 08:25:11 | INFO     | smart_grid.analysis.eda | Декомпозиция временного ряда...
+2026-03-11 08:25:12 | INFO     | smart_grid.analysis.eda | EDA завершён. Графики сохранены в: c:\Users\Admin\Downloads\smart_grid_project_v2 (5)\smart_grid_project\results\plots
+2026-03-11 08:25:12 | INFO     | smart_grid | 
+[3/10] Подготовка данных (scaler fit только на train)...
+2026-03-11 08:25:12 | INFO     | smart_grid.data.preprocessing | Данные подготовлены | train=12169 val=2533 test=2533
+2026-03-11 08:25:12 | INFO     | smart_grid.data.preprocessing | ✅ X_train.shape: (12169, 72, 11)  Y_train.shape: (12169, 24)  (n_features=11, v3: +hour_sin/cos +temp_sq)
+2026-03-11 08:26:45 | INFO     | smart_grid | ======================================================================
+2026-03-11 08:26:45 | INFO     | smart_grid |   СИСТЕМА ПРОГНОЗИРОВАНИЯ ЭНЕРГОПОТРЕБЛЕНИЯ — SMART GRID
+2026-03-11 08:26:45 | INFO     | smart_grid | ======================================================================
+2026-03-11 08:26:45 | INFO     | smart_grid | 🚀 Full mode v4: DAYS=730, EPOCHS=300, HISTORY=72 | LSTM=384/192/96 | Trans d=128 h=8 L=4 dff=512 | RevIN=True
+2026-03-11 08:26:45 | INFO     | smart_grid | 
+[1/10] Генерация данных...
+2026-03-11 08:26:45 | INFO     | smart_grid.data.generator | Генерация данных Smart Grid: 730 дней, 500 домохозяйств
+2026-03-11 08:26:45 | INFO     | smart_grid.data.generator | Сгенерировано 17520 записей. Потребление: min=393.9, mean=8520.1, max=23692.5 кВт·ч
+2026-03-11 08:26:45 | INFO     | smart_grid.data.generator | Валидация данных...
+2026-03-11 08:26:45 | INFO     | smart_grid.data.generator |   ✅ NaN/Inf: нет
+2026-03-11 08:26:45 | INFO     | smart_grid.data.generator |   ✅ Отрицательных значений: нет
+2026-03-11 08:26:45 | INFO     | smart_grid.data.generator |   ✅ Утренний пик: 8:00
+2026-03-11 08:26:45 | INFO     | smart_grid.data.generator |   ✅ Вечерний пик: 19:00
+2026-03-11 08:26:45 | INFO     | smart_grid.data.generator |   ✅ Выходные/будни: 0.85
+2026-03-11 08:26:45 | INFO     | smart_grid.data.generator |   ✅ Сезонность: зима=11017.2 > лето=6726.3 кВт·ч
+2026-03-11 08:26:45 | INFO     | smart_grid.data.generator |   ✅ Диапазон температур: -30.1..40.5°C
+2026-03-11 08:26:45 | INFO     | smart_grid.data.generator | Валидация ПРОЙДЕНА
+2026-03-11 08:26:45 | INFO     | smart_grid | ──────────────────────────────────────────────────
+2026-03-11 08:26:45 | INFO     | smart_grid | КОНФИГУРАЦИЯ:
+2026-03-11 08:26:45 | INFO     | smart_grid |   Данные:      730 дней, 500 домохозяйств
+2026-03-11 08:26:45 | INFO     | smart_grid |   Признаки:    11 ковариат на шаг (мультивариантный вход)
+2026-03-11 08:26:45 | INFO     | smart_grid |   История:     72 ч → прогноз 24 ч
+2026-03-11 08:26:45 | INFO     | smart_grid |   Обучение:    300 эпох, batch=32
+2026-03-11 08:26:45 | INFO     | smart_grid |   LSTM:        units=384/192/96, drop=0.20, lr=0.0003, input=(72,11)
+2026-03-11 08:26:45 | INFO     | smart_grid |   Transformer: d=128 h=8 L=4 dff=512 drop=0.20, lr=0.0003, input=(72,11)
+2026-03-11 08:26:45 | INFO     | smart_grid |   XGBoost:     n_est=800, depth=5, col=0.35
+2026-03-11 08:26:45 | INFO     | smart_grid |   Тарифы:      пик=6.50 день=4.20 ночь=1.80 руб/кВт·ч
+2026-03-11 08:26:45 | INFO     | smart_grid |   Батарея:     4500 кВт·ч, SOC 25%→75% (ΔE=2250 кВт·ч)
+2026-03-11 08:26:45 | INFO     | smart_grid | ──────────────────────────────────────────────────
+2026-03-11 08:26:45 | INFO     | smart_grid | 
+[2/10] Исследовательский анализ данных...
+2026-03-11 08:26:45 | INFO     | smart_grid.analysis.eda | Запуск EDA...
+2026-03-11 08:26:45 | INFO     | smart_grid.analysis.eda | 
+count    17520.000000
+mean      8520.109375
+std       2927.222168
+min        393.874878
+25%       6373.599731
+50%       8030.789307
+75%      10101.645752
+max      23692.501953
+2026-03-11 08:26:45 | INFO     | smart_grid.analysis.eda | CV=0.344  Skew=0.927  Kurt=1.318
+2026-03-11 08:26:46 | INFO     | smart_grid.analysis.eda | Декомпозиция временного ряда...
+2026-03-11 08:26:47 | INFO     | smart_grid.analysis.eda | EDA завершён. Графики сохранены в: c:\Users\Admin\Downloads\smart_grid_project_v2 (5)\smart_grid_project\results\plots
+2026-03-11 08:26:47 | INFO     | smart_grid | 
+[3/10] Подготовка данных (scaler fit только на train)...
+2026-03-11 08:26:47 | INFO     | smart_grid.data.preprocessing | Данные подготовлены | train=12169 val=2533 test=2533
+2026-03-11 08:26:47 | INFO     | smart_grid.data.preprocessing | ✅ X_train.shape: (12169, 72, 11)  Y_train.shape: (12169, 24)  (n_features=11, v3: +hour_sin/cos +temp_sq)
+2026-03-11 08:26:47 | INFO     | smart_grid | ✅ ЧЕКЛИСТ X_train.shape=(12169, 72, 11) | 11 ковариат подтверждено
+2026-03-11 08:26:47 | INFO     | smart_grid.data.preprocessing | ✅ validate_data_integrity ПРОЙДЕНА | train=12169 val=2533 test=2533 | Y∈[0.000, 1.000]
+2026-03-11 08:26:47 | INFO     | smart_grid | 
+[4/10] Инициализация моделей...
+2026-03-11 08:26:48 | WARNING  | tensorflow | From C:\Users\Admin\AppData\Local\Programs\Python\Python312\Lib\site-packages\keras\src\backend\tensorflow\core.py:204: The name tf.placeholder is deprecated. Please use tf.compat.v1.placeholder instead.
+
+2026-03-11 08:26:48 | INFO     | smart_grid.models.lstm | AttentionLSTM v4 | 2005848 параметров | input=(72,11) | LSTM=384/192/96 | Attn heads=4 key_dim=24 | lr=3e-04 +CosineDecay | Huber δ=0.1
+2026-03-11 08:26:48 | INFO     | smart_grid.models.transformer | VanillaTransformer v4 [sinusoidal] d=128 h=8 L=4 sdrop=0.10 | 933272 params
+2026-03-11 08:26:48 | INFO     | smart_grid.models.transformer | PatchTST v4: history=72 patch=8 stride=4 → 17 patches | RevIN=True
+2026-03-11 08:29:57 | INFO     | smart_grid | ======================================================================
+2026-03-11 08:29:57 | INFO     | smart_grid |   СИСТЕМА ПРОГНОЗИРОВАНИЯ ЭНЕРГОПОТРЕБЛЕНИЯ — SMART GRID
+2026-03-11 08:29:57 | INFO     | smart_grid | ======================================================================
+2026-03-11 08:29:57 | INFO     | smart_grid | 🚀 Full mode v4: DAYS=730, EPOCHS=300, HISTORY=72 | LSTM=384/192/96 | Trans d=128 h=8 L=4 dff=512 | RevIN=True
+2026-03-11 08:29:57 | INFO     | smart_grid | 
+[1/10] Генерация данных...
+2026-03-11 08:29:57 | INFO     | smart_grid.data.generator | Генерация данных Smart Grid: 730 дней, 500 домохозяйств
+2026-03-11 08:29:57 | INFO     | smart_grid.data.generator | Сгенерировано 17520 записей. Потребление: min=393.9, mean=8520.1, max=23692.5 кВт·ч
+2026-03-11 08:29:57 | INFO     | smart_grid.data.generator | Валидация данных...
+2026-03-11 08:29:57 | INFO     | smart_grid.data.generator |   ✅ NaN/Inf: нет
+2026-03-11 08:29:57 | INFO     | smart_grid.data.generator |   ✅ Отрицательных значений: нет
+2026-03-11 08:29:57 | INFO     | smart_grid.data.generator |   ✅ Утренний пик: 8:00
+2026-03-11 08:29:57 | INFO     | smart_grid.data.generator |   ✅ Вечерний пик: 19:00
+2026-03-11 08:29:57 | INFO     | smart_grid.data.generator |   ✅ Выходные/будни: 0.85
+2026-03-11 08:29:57 | INFO     | smart_grid.data.generator |   ✅ Сезонность: зима=11017.2 > лето=6726.3 кВт·ч
+2026-03-11 08:29:57 | INFO     | smart_grid.data.generator |   ✅ Диапазон температур: -30.1..40.5°C
+2026-03-11 08:29:57 | INFO     | smart_grid.data.generator | Валидация ПРОЙДЕНА
+2026-03-11 08:29:57 | INFO     | smart_grid | ──────────────────────────────────────────────────
+2026-03-11 08:29:57 | INFO     | smart_grid | КОНФИГУРАЦИЯ:
+2026-03-11 08:29:57 | INFO     | smart_grid |   Данные:      730 дней, 500 домохозяйств
+2026-03-11 08:29:57 | INFO     | smart_grid |   Признаки:    11 ковариат на шаг (мультивариантный вход)
+2026-03-11 08:29:57 | INFO     | smart_grid |   История:     72 ч → прогноз 24 ч
+2026-03-11 08:29:57 | INFO     | smart_grid |   Обучение:    300 эпох, batch=32
+2026-03-11 08:29:57 | INFO     | smart_grid |   LSTM:        units=384/192/96, drop=0.20, lr=0.0003, input=(72,11)
+2026-03-11 08:29:57 | INFO     | smart_grid |   Transformer: d=128 h=8 L=4 dff=512 drop=0.20, lr=0.0003, input=(72,11)
+2026-03-11 08:29:57 | INFO     | smart_grid |   XGBoost:     n_est=800, depth=5, col=0.35
+2026-03-11 08:29:57 | INFO     | smart_grid |   Тарифы:      пик=6.50 день=4.20 ночь=1.80 руб/кВт·ч
+2026-03-11 08:29:57 | INFO     | smart_grid |   Батарея:     4500 кВт·ч, SOC 25%→75% (ΔE=2250 кВт·ч)
+2026-03-11 08:29:57 | INFO     | smart_grid | ──────────────────────────────────────────────────
+2026-03-11 08:29:57 | INFO     | smart_grid | 
+[2/10] Исследовательский анализ данных...
+2026-03-11 08:29:57 | INFO     | smart_grid.analysis.eda | Запуск EDA...
+2026-03-11 08:29:57 | INFO     | smart_grid.analysis.eda | 
+count    17520.000000
+mean      8520.109375
+std       2927.222168
+min        393.874878
+25%       6373.599731
+50%       8030.789307
+75%      10101.645752
+max      23692.501953
+2026-03-11 08:29:57 | INFO     | smart_grid.analysis.eda | CV=0.344  Skew=0.927  Kurt=1.318
+2026-03-11 08:29:58 | INFO     | smart_grid.analysis.eda | Декомпозиция временного ряда...
+2026-03-11 08:29:59 | INFO     | smart_grid.analysis.eda | EDA завершён. Графики сохранены в: c:\Users\Admin\Downloads\smart_grid_project_v2 (5)\smart_grid_project\results\plots
+2026-03-11 08:29:59 | INFO     | smart_grid | 
+[3/10] Подготовка данных (scaler fit только на train)...
+2026-03-11 08:29:59 | INFO     | smart_grid.data.preprocessing | Данные подготовлены | train=12169 val=2533 test=2533
+2026-03-11 08:29:59 | INFO     | smart_grid.data.preprocessing | ✅ X_train.shape: (12169, 72, 11)  Y_train.shape: (12169, 24)  (n_features=11, v3: +hour_sin/cos +temp_sq)
+2026-03-11 08:29:59 | INFO     | smart_grid | ✅ ЧЕКЛИСТ X_train.shape=(12169, 72, 11) | 11 ковариат подтверждено
+2026-03-11 08:29:59 | INFO     | smart_grid.data.preprocessing | ✅ validate_data_integrity ПРОЙДЕНА | train=12169 val=2533 test=2533 | Y∈[0.000, 1.000]
+2026-03-11 08:29:59 | INFO     | smart_grid | 
+[4/10] Инициализация моделей...
+2026-03-11 08:30:00 | WARNING  | tensorflow | From C:\Users\Admin\AppData\Local\Programs\Python\Python312\Lib\site-packages\keras\src\backend\tensorflow\core.py:204: The name tf.placeholder is deprecated. Please use tf.compat.v1.placeholder instead.
+
+2026-03-11 08:30:00 | INFO     | smart_grid.models.lstm | AttentionLSTM v4 | 2005848 параметров | input=(72,11) | LSTM=384/192/96 | Attn heads=4 key_dim=24 | lr=3e-04 +CosineDecay | Huber δ=0.1
+2026-03-11 08:30:01 | INFO     | smart_grid.models.transformer | VanillaTransformer v4 [sinusoidal] d=128 h=8 L=4 sdrop=0.10 | 933272 params
+2026-03-11 08:30:01 | INFO     | smart_grid.models.transformer | PatchTST v4: history=72 patch=8 stride=4 → 17 patches | RevIN=True
+2026-03-11 08:30:01 | INFO     | smart_grid.models.transformer | PatchTST v4 patch=8 stride=4 n_p=17 d=128 h=8 L=4 sdrop=0.10 RevIN=True | 943152 params
+2026-03-11 08:30:01 | INFO     | smart_grid | Параметры: LSTM=2005848 | VanillaTrans=933272 | PatchTST=943152
+2026-03-11 08:30:01 | INFO     | smart_grid | 
+[5/10] Обучение моделей...
+2026-03-11 08:30:01 | INFO     | smart_grid.models.trainer | ============================================================
+2026-03-11 08:30:01 | INFO     | smart_grid.models.trainer | Обучение модели: LSTM
+2026-03-11 08:30:01 | INFO     | smart_grid.models.trainer | ============================================================
+2026-03-11 09:16:30 | ERROR    | smart_grid.models.trainer | Ошибка при обучении LSTM: This optimizer was created with a `LearningRateSchedule` object as its `learning_rate` constructor argument, hence its learning rate is not settable. If you need the learning rate to be settable, you should instantiate the optimizer with a float `learning_rate` argument.
+2026-03-11 13:05:11 | INFO     | smart_grid | ======================================================================
+2026-03-11 13:05:11 | INFO     | smart_grid |   СИСТЕМА ПРОГНОЗИРОВАНИЯ ЭНЕРГОПОТРЕБЛЕНИЯ — SMART GRID
+2026-03-11 13:05:11 | INFO     | smart_grid | ======================================================================
+2026-03-11 13:05:11 | INFO     | smart_grid | ⚡ Fast mode v4: DAYS=365, EPOCHS=120 | LSTM=128/64/32 attn=4h | Trans d=64 h=4 L=2 sdrop=0.05 | RevIN=True
+2026-03-11 13:05:11 | INFO     | smart_grid | 
+[1/10] Генерация данных...
+2026-03-11 13:05:11 | INFO     | smart_grid.data.generator | Генерация данных Smart Grid: 365 дней, 250 домохозяйств
+2026-03-11 13:05:11 | INFO     | smart_grid.data.generator | Сгенерировано 8760 записей. Потребление: min=374.7, mean=4173.6, max=11462.7 кВт·ч
+2026-03-11 13:05:11 | INFO     | smart_grid.data.generator | Валидация данных...
+2026-03-11 13:05:11 | INFO     | smart_grid.data.generator |   ✅ NaN/Inf: нет
+2026-03-11 13:05:11 | INFO     | smart_grid.data.generator |   ✅ Отрицательных значений: нет
+2026-03-11 13:05:11 | INFO     | smart_grid.data.generator |   ✅ Утренний пик: 8:00
+2026-03-11 13:05:11 | INFO     | smart_grid.data.generator |   ✅ Вечерний пик: 19:00
+2026-03-11 13:05:11 | INFO     | smart_grid.data.generator |   ✅ Выходные/будни: 0.85
+2026-03-11 13:05:11 | INFO     | smart_grid.data.generator |   ✅ Сезонность: зима=5456.7 > лето=3314.0 кВт·ч
+2026-03-11 13:05:11 | INFO     | smart_grid.data.generator |   ✅ Диапазон температур: -30.0..36.4°C
+2026-03-11 13:05:11 | INFO     | smart_grid.data.generator | Валидация ПРОЙДЕНА
+2026-03-11 13:05:11 | INFO     | smart_grid | ──────────────────────────────────────────────────
+2026-03-11 13:05:11 | INFO     | smart_grid | КОНФИГУРАЦИЯ:
+2026-03-11 13:05:11 | INFO     | smart_grid |   Данные:      365 дней, 250 домохозяйств
+2026-03-11 13:05:11 | INFO     | smart_grid |   Признаки:    11 ковариат на шаг (мультивариантный вход)
+2026-03-11 13:05:11 | INFO     | smart_grid |   История:     48 ч → прогноз 24 ч
+2026-03-11 13:05:11 | INFO     | smart_grid |   Обучение:    120 эпох, batch=32
+2026-03-11 13:05:11 | INFO     | smart_grid |   LSTM:        units=128/64/32, drop=0.25, lr=0.0003, input=(48,11)
+2026-03-11 13:05:11 | INFO     | smart_grid |   Transformer: d=64 h=4 L=2 dff=128 drop=0.20, lr=0.0003, input=(48,11)
+2026-03-11 13:05:11 | INFO     | smart_grid |   XGBoost:     n_est=300, depth=5, col=0.40
+2026-03-11 13:05:11 | INFO     | smart_grid |   Тарифы:      пик=6.50 день=4.20 ночь=1.80 руб/кВт·ч
+2026-03-11 13:05:11 | INFO     | smart_grid |   Батарея:     4500 кВт·ч, SOC 25%→75% (ΔE=2250 кВт·ч)
+2026-03-11 13:05:11 | INFO     | smart_grid | ──────────────────────────────────────────────────
+2026-03-11 13:05:11 | INFO     | smart_grid | 
+[2/10] Исследовательский анализ данных...
+2026-03-11 13:05:11 | INFO     | smart_grid.analysis.eda | Запуск EDA...
+2026-03-11 13:05:11 | INFO     | smart_grid.analysis.eda | 
+count     8760.000000
+mean      4173.582520
+std       1457.744385
+min        374.747437
+25%       3111.594177
+50%       3927.566406
+75%       4947.240601
+max      11462.713867
+2026-03-11 13:05:11 | INFO     | smart_grid.analysis.eda | CV=0.349  Skew=1.019  Kurt=1.531
+2026-03-11 13:05:12 | INFO     | smart_grid.analysis.eda | Декомпозиция временного ряда...
+2026-03-11 13:05:13 | INFO     | smart_grid.analysis.eda | EDA завершён. Графики сохранены в: c:\Users\Admin\Downloads\smart_grid_project_v2 (5)\smart_grid_project\results\plots
+2026-03-11 13:05:13 | INFO     | smart_grid | 
+[3/10] Подготовка данных (scaler fit только на train)...
+2026-03-11 13:05:13 | INFO     | smart_grid.data.preprocessing | Данные подготовлены | train=6061 val=1243 test=1243
+2026-03-11 13:05:13 | INFO     | smart_grid.data.preprocessing | ✅ X_train.shape: (6061, 48, 11)  Y_train.shape: (6061, 24)  (n_features=11, v3: +hour_sin/cos +temp_sq)
+2026-03-11 13:05:13 | INFO     | smart_grid | ✅ ЧЕКЛИСТ X_train.shape=(6061, 48, 11) | 11 ковариат подтверждено
+2026-03-11 13:05:13 | INFO     | smart_grid.data.preprocessing | ✅ validate_data_integrity ПРОЙДЕНА | train=6061 val=1243 test=1243 | Y∈[0.000, 1.000]
+2026-03-11 13:05:13 | INFO     | smart_grid | 
+[4/10] Инициализация моделей...
+2026-03-11 13:05:14 | WARNING  | tensorflow | From C:\Users\Admin\AppData\Local\Programs\Python\Python312\Lib\site-packages\keras\src\backend\tensorflow\core.py:204: The name tf.placeholder is deprecated. Please use tf.compat.v1.placeholder instead.
+
+2026-03-11 13:05:14 | INFO     | smart_grid.models.lstm | AttentionLSTM v4 | 226264 параметров | input=(48,11) | LSTM=128/64/32 | Attn heads=4 key_dim=8 | lr=3e-04 +CosineDecay | Huber δ=0.1
+2026-03-11 13:05:14 | INFO     | smart_grid.models.transformer | VanillaTransformer v4 [sinusoidal] d=64 h=4 L=2 sdrop=0.05 | 86168 params
+2026-03-11 13:05:14 | INFO     | smart_grid.models.transformer | PatchTST v4: history=48 patch=8 stride=4 → 11 patches | RevIN=True
+2026-03-11 13:05:14 | INFO     | smart_grid.models.transformer | PatchTST v4 patch=8 stride=4 n_p=11 d=64 h=4 L=2 sdrop=0.05 RevIN=True | 91120 params
+2026-03-11 13:05:14 | INFO     | smart_grid | Параметры: LSTM=226264 | VanillaTrans=86168 | PatchTST=91120
+2026-03-11 13:05:14 | INFO     | smart_grid | 
+[5/10] Обучение моделей...
+2026-03-11 13:05:14 | INFO     | smart_grid.models.trainer | ============================================================
+2026-03-11 13:05:14 | INFO     | smart_grid.models.trainer | Обучение модели: LSTM
+2026-03-11 13:05:14 | INFO     | smart_grid.models.trainer | ============================================================
+2026-03-11 13:10:33 | ERROR    | smart_grid.models.trainer | Ошибка при обучении LSTM: This optimizer was created with a `LearningRateSchedule` object as its `learning_rate` constructor argument, hence its learning rate is not settable. If you need the learning rate to be settable, you should instantiate the optimizer with a float `learning_rate` argument.
+2026-03-11 13:16:35 | INFO     | smart_grid | ======================================================================
+2026-03-11 13:16:35 | INFO     | smart_grid |   СИСТЕМА ПРОГНОЗИРОВАНИЯ ЭНЕРГОПОТРЕБЛЕНИЯ — SMART GRID
+2026-03-11 13:16:35 | INFO     | smart_grid | ======================================================================
+2026-03-11 13:16:35 | INFO     | smart_grid | ⚡ Fast mode v4: DAYS=365, EPOCHS=120 | LSTM=128/64/32 attn=4h | Trans d=64 h=4 L=2 sdrop=0.05 | RevIN=True
+2026-03-11 13:16:35 | INFO     | smart_grid | 
+[1/10] Генерация данных...
+2026-03-11 13:16:35 | INFO     | smart_grid.data.generator | Генерация данных Smart Grid: 365 дней, 250 домохозяйств
+2026-03-11 13:16:35 | INFO     | smart_grid.data.generator | Сгенерировано 8760 записей. Потребление: min=374.7, mean=4173.6, max=11462.7 кВт·ч
+2026-03-11 13:16:35 | INFO     | smart_grid.data.generator | Валидация данных...
+2026-03-11 13:16:35 | INFO     | smart_grid.data.generator |   ✅ NaN/Inf: нет
+2026-03-11 13:16:35 | INFO     | smart_grid.data.generator |   ✅ Отрицательных значений: нет
+2026-03-11 13:16:35 | INFO     | smart_grid.data.generator |   ✅ Утренний пик: 8:00
+2026-03-11 13:16:35 | INFO     | smart_grid.data.generator |   ✅ Вечерний пик: 19:00
+2026-03-11 13:16:35 | INFO     | smart_grid.data.generator |   ✅ Выходные/будни: 0.85
+2026-03-11 13:16:35 | INFO     | smart_grid.data.generator |   ✅ Сезонность: зима=5456.7 > лето=3314.0 кВт·ч
+2026-03-11 13:16:35 | INFO     | smart_grid.data.generator |   ✅ Диапазон температур: -30.0..36.4°C
+2026-03-11 13:16:35 | INFO     | smart_grid.data.generator | Валидация ПРОЙДЕНА
+2026-03-11 13:16:35 | INFO     | smart_grid | ──────────────────────────────────────────────────
+2026-03-11 13:16:35 | INFO     | smart_grid | КОНФИГУРАЦИЯ:
+2026-03-11 13:16:35 | INFO     | smart_grid |   Данные:      365 дней, 250 домохозяйств
+2026-03-11 13:16:35 | INFO     | smart_grid |   Признаки:    11 ковариат на шаг (мультивариантный вход)
+2026-03-11 13:16:35 | INFO     | smart_grid |   История:     48 ч → прогноз 24 ч
+2026-03-11 13:16:35 | INFO     | smart_grid |   Обучение:    120 эпох, batch=32
+2026-03-11 13:16:35 | INFO     | smart_grid |   LSTM:        units=128/64/32, drop=0.25, lr=0.0003, input=(48,11)
+2026-03-11 13:16:35 | INFO     | smart_grid |   Transformer: d=64 h=4 L=2 dff=128 drop=0.20, lr=0.0003, input=(48,11)
+2026-03-11 13:16:35 | INFO     | smart_grid |   XGBoost:     n_est=300, depth=5, col=0.40
+2026-03-11 13:16:35 | INFO     | smart_grid |   Тарифы:      пик=6.50 день=4.20 ночь=1.80 руб/кВт·ч
+2026-03-11 13:16:35 | INFO     | smart_grid |   Батарея:     4500 кВт·ч, SOC 25%→75% (ΔE=2250 кВт·ч)
+2026-03-11 13:16:35 | INFO     | smart_grid | ──────────────────────────────────────────────────
+2026-03-11 13:16:35 | INFO     | smart_grid | 
+[2/10] Исследовательский анализ данных...
+2026-03-11 13:16:35 | INFO     | smart_grid.analysis.eda | Запуск EDA...
+2026-03-11 13:16:35 | INFO     | smart_grid.analysis.eda | 
+count     8760.000000
+mean      4173.582520
+std       1457.744385
+min        374.747437
+25%       3111.594177
+50%       3927.566406
+75%       4947.240601
+max      11462.713867
+2026-03-11 13:16:35 | INFO     | smart_grid.analysis.eda | CV=0.349  Skew=1.019  Kurt=1.531
+2026-03-11 13:16:36 | INFO     | smart_grid.analysis.eda | Декомпозиция временного ряда...
+2026-03-11 13:16:36 | INFO     | smart_grid.analysis.eda | EDA завершён. Графики сохранены в: c:\Users\Admin\Downloads\smart_grid_project_v2 (5)\smart_grid_project\results\plots
+2026-03-11 13:16:36 | INFO     | smart_grid | 
+[3/10] Подготовка данных (scaler fit только на train)...
+2026-03-11 13:16:36 | INFO     | smart_grid.data.preprocessing | Данные подготовлены | train=6061 val=1243 test=1243
+2026-03-11 13:16:36 | INFO     | smart_grid.data.preprocessing | ✅ X_train.shape: (6061, 48, 11)  Y_train.shape: (6061, 24)  (n_features=11, v3: +hour_sin/cos +temp_sq)
+2026-03-11 13:16:36 | INFO     | smart_grid | ✅ ЧЕКЛИСТ X_train.shape=(6061, 48, 11) | 11 ковариат подтверждено
+2026-03-11 13:16:36 | INFO     | smart_grid.data.preprocessing | ✅ validate_data_integrity ПРОЙДЕНА | train=6061 val=1243 test=1243 | Y∈[0.000, 1.000]
+2026-03-11 13:16:36 | INFO     | smart_grid | 
+[4/10] Инициализация моделей...
+2026-03-11 13:16:37 | WARNING  | tensorflow | From C:\Users\Admin\AppData\Local\Programs\Python\Python312\Lib\site-packages\keras\src\backend\tensorflow\core.py:204: The name tf.placeholder is deprecated. Please use tf.compat.v1.placeholder instead.
+
+2026-03-11 13:16:37 | INFO     | smart_grid.models.lstm | AttentionLSTM v4 | 226264 параметров | input=(48,11) | LSTM=128/64/32 | Attn heads=4 key_dim=8 | lr=3e-04 +CosineDecay | Huber δ=0.1
+2026-03-11 13:16:37 | INFO     | smart_grid.models.transformer | VanillaTransformer v4 [sinusoidal] d=64 h=4 L=2 sdrop=0.05 | 86168 params
+2026-03-11 13:16:37 | INFO     | smart_grid.models.transformer | PatchTST v4: history=48 patch=8 stride=4 → 11 patches | RevIN=True
+2026-03-11 13:16:38 | INFO     | smart_grid.models.transformer | PatchTST v4 patch=8 stride=4 n_p=11 d=64 h=4 L=2 sdrop=0.05 RevIN=True | 91120 params
+2026-03-11 13:16:38 | INFO     | smart_grid | Параметры: LSTM=226264 | VanillaTrans=86168 | PatchTST=91120
+2026-03-11 13:16:38 | INFO     | smart_grid | 
+[5/10] Обучение моделей...
+2026-03-11 13:16:38 | INFO     | smart_grid.models.trainer | ============================================================
+2026-03-11 13:16:38 | INFO     | smart_grid.models.trainer | Обучение модели: LSTM
+2026-03-11 13:16:38 | INFO     | smart_grid.models.trainer | ============================================================
+2026-03-11 13:16:38 | INFO     | smart_grid.models.trainer | LSTM: LR schedule обнаружен (isinstance check) → ReduceLROnPlateau отключён
+2026-03-11 13:21:58 | INFO     | smart_grid.models.trainer | LSTM: обучение завершено за 45 эпох
+2026-03-11 13:21:58 | INFO     | smart_grid.models.trainer | LSTM обучена за 320.6 сек
+2026-03-11 13:21:58 | INFO     | smart_grid.models.trainer | ============================================================
+2026-03-11 13:21:58 | INFO     | smart_grid.models.trainer | Обучение модели: VanillaTransformer
+2026-03-11 13:21:58 | INFO     | smart_grid.models.trainer | ============================================================
+2026-03-11 13:31:21 | INFO     | smart_grid | ======================================================================
+2026-03-11 13:31:21 | INFO     | smart_grid |   СИСТЕМА ПРОГНОЗИРОВАНИЯ ЭНЕРГОПОТРЕБЛЕНИЯ — SMART GRID
+2026-03-11 13:31:21 | INFO     | smart_grid | ======================================================================
+2026-03-11 13:31:21 | INFO     | smart_grid | ⚡ Fast mode v4: DAYS=365, EPOCHS=120 | LSTM=128/64/32 attn=4h | Trans d=64 h=4 L=2 sdrop=0.05 | RevIN=True
+2026-03-11 13:31:21 | INFO     | smart_grid | 
+[1/10] Генерация данных...
+2026-03-11 13:31:21 | INFO     | smart_grid.data.generator | Генерация данных Smart Grid: 365 дней, 250 домохозяйств
+2026-03-11 13:31:22 | INFO     | smart_grid.data.generator | Сгенерировано 8760 записей. Потребление: min=374.7, mean=4173.6, max=11462.7 кВт·ч
+2026-03-11 13:31:22 | INFO     | smart_grid.data.generator | Валидация данных...
+2026-03-11 13:31:22 | INFO     | smart_grid.data.generator |   ✅ NaN/Inf: нет
+2026-03-11 13:31:22 | INFO     | smart_grid.data.generator |   ✅ Отрицательных значений: нет
+2026-03-11 13:31:22 | INFO     | smart_grid.data.generator |   ✅ Утренний пик: 8:00
+2026-03-11 13:31:22 | INFO     | smart_grid.data.generator |   ✅ Вечерний пик: 19:00
+2026-03-11 13:31:22 | INFO     | smart_grid.data.generator |   ✅ Выходные/будни: 0.85
+2026-03-11 13:31:22 | INFO     | smart_grid.data.generator |   ✅ Сезонность: зима=5456.7 > лето=3314.0 кВт·ч
+2026-03-11 13:31:22 | INFO     | smart_grid.data.generator |   ✅ Диапазон температур: -30.0..36.4°C
+2026-03-11 13:31:22 | INFO     | smart_grid.data.generator | Валидация ПРОЙДЕНА
+2026-03-11 13:31:22 | INFO     | smart_grid | ──────────────────────────────────────────────────
+2026-03-11 13:31:22 | INFO     | smart_grid | КОНФИГУРАЦИЯ:
+2026-03-11 13:31:22 | INFO     | smart_grid |   Данные:      365 дней, 250 домохозяйств
+2026-03-11 13:31:22 | INFO     | smart_grid |   Признаки:    11 ковариат на шаг (мультивариантный вход)
+2026-03-11 13:31:22 | INFO     | smart_grid |   История:     48 ч → прогноз 24 ч
+2026-03-11 13:31:22 | INFO     | smart_grid |   Обучение:    120 эпох, batch=32
+2026-03-11 13:31:22 | INFO     | smart_grid |   LSTM:        units=128/64/32, drop=0.25, lr=0.0003, input=(48,11)
+2026-03-11 13:31:22 | INFO     | smart_grid |   Transformer: d=64 h=4 L=2 dff=128 drop=0.20, lr=0.0003, input=(48,11)
+2026-03-11 13:31:22 | INFO     | smart_grid |   XGBoost:     n_est=300, depth=5, col=0.40
+2026-03-11 13:31:22 | INFO     | smart_grid |   Тарифы:      пик=6.50 день=4.20 ночь=1.80 руб/кВт·ч
+2026-03-11 13:31:22 | INFO     | smart_grid |   Батарея:     4500 кВт·ч, SOC 25%→75% (ΔE=2250 кВт·ч)
+2026-03-11 13:31:22 | INFO     | smart_grid | ──────────────────────────────────────────────────
+2026-03-11 13:31:22 | INFO     | smart_grid | 
+[2/10] Исследовательский анализ данных...
+2026-03-11 13:31:22 | INFO     | smart_grid.analysis.eda | Запуск EDA...
+2026-03-11 13:31:22 | INFO     | smart_grid.analysis.eda | 
+count     8760.000000
+mean      4173.582520
+std       1457.744385
+min        374.747437
+25%       3111.594177
+50%       3927.566406
+75%       4947.240601
+max      11462.713867
+2026-03-11 13:31:22 | INFO     | smart_grid.analysis.eda | CV=0.349  Skew=1.019  Kurt=1.531
+2026-03-11 13:31:22 | INFO     | smart_grid.analysis.eda | Декомпозиция временного ряда...
+2026-03-11 13:31:23 | INFO     | smart_grid.analysis.eda | EDA завершён. Графики сохранены в: c:\Users\Admin\Downloads\smart_grid_project_v2 (5)\smart_grid_project\results\plots
+2026-03-11 13:31:23 | INFO     | smart_grid | 
+[3/10] Подготовка данных (scaler fit только на train)...
+2026-03-11 13:31:23 | INFO     | smart_grid.data.preprocessing | Данные подготовлены | train=6061 val=1243 test=1243
+2026-03-11 13:31:23 | INFO     | smart_grid.data.preprocessing | ✅ X_train.shape: (6061, 48, 11)  Y_train.shape: (6061, 24)  (n_features=11, v3: +hour_sin/cos +temp_sq)
+2026-03-11 13:31:23 | INFO     | smart_grid | ✅ ЧЕКЛИСТ X_train.shape=(6061, 48, 11) | 11 ковариат подтверждено
+2026-03-11 13:31:23 | INFO     | smart_grid.data.preprocessing | ✅ validate_data_integrity ПРОЙДЕНА | train=6061 val=1243 test=1243 | Y∈[0.000, 1.000]
+2026-03-11 13:31:23 | INFO     | smart_grid | 
+[4/10] Инициализация моделей...
+2026-03-11 13:31:24 | WARNING  | tensorflow | From C:\Users\Admin\AppData\Local\Programs\Python\Python312\Lib\site-packages\keras\src\backend\tensorflow\core.py:204: The name tf.placeholder is deprecated. Please use tf.compat.v1.placeholder instead.
+
+2026-03-11 13:31:24 | INFO     | smart_grid.models.lstm | AttentionLSTM v4 | 226264 параметров | input=(48,11) | LSTM=128/64/32 | Attn heads=4 key_dim=8 | lr=3e-04 +CosineDecay | Huber δ=0.1
+2026-03-11 13:31:24 | INFO     | smart_grid.models.transformer | VanillaTransformer v4 [sinusoidal] d=64 h=4 L=2 sdrop=0.05 | 86168 params
+2026-03-11 13:31:24 | INFO     | smart_grid.models.transformer | PatchTST v4: history=48 patch=8 stride=4 → 11 patches | RevIN=True
+2026-03-11 13:31:24 | INFO     | smart_grid.models.transformer | PatchTST v4 patch=8 stride=4 n_p=11 d=64 h=4 L=2 sdrop=0.05 RevIN=True | 91120 params
+2026-03-11 13:31:24 | INFO     | smart_grid | Параметры: LSTM=226264 | VanillaTrans=86168 | PatchTST=91120
+2026-03-11 13:31:24 | INFO     | smart_grid | 
+[5/10] Обучение моделей...
+2026-03-11 13:31:24 | INFO     | smart_grid.models.trainer | ============================================================
+2026-03-11 13:31:24 | INFO     | smart_grid.models.trainer | Обучение модели: LSTM
+2026-03-11 13:31:24 | INFO     | smart_grid.models.trainer | ============================================================
+2026-03-11 13:31:24 | INFO     | smart_grid.models.trainer | LSTM: LR schedule обнаружен → ReduceLROnPlateau отключён
+2026-03-11 13:36:23 | INFO     | smart_grid.models.trainer | LSTM: обучение завершено за 45 эпох
+2026-03-11 13:36:23 | INFO     | smart_grid.models.trainer | LSTM обучена за 298.3 сек
+2026-03-11 13:36:23 | INFO     | smart_grid.models.trainer | ============================================================
+2026-03-11 13:36:23 | INFO     | smart_grid.models.trainer | Обучение модели: VanillaTransformer
+2026-03-11 13:36:23 | INFO     | smart_grid.models.trainer | ============================================================
+2026-03-11 13:39:50 | INFO     | smart_grid.models.trainer | VanillaTransformer: обучение завершено за 55 эпох
+2026-03-11 13:39:50 | INFO     | smart_grid.models.trainer | VanillaTransformer обучена за 207.0 сек
+2026-03-11 13:39:50 | INFO     | smart_grid.models.trainer | ============================================================
+2026-03-11 13:39:50 | INFO     | smart_grid.models.trainer | Обучение модели: PatchTST
+2026-03-11 13:39:50 | INFO     | smart_grid.models.trainer | ============================================================
+2026-03-11 13:40:50 | INFO     | smart_grid.models.trainer | PatchTST: обучение завершено за 28 эпох
+2026-03-11 13:40:50 | INFO     | smart_grid.models.trainer | PatchTST обучена за 59.8 сек
+2026-03-11 13:40:50 | INFO     | smart_grid.models.trainer | ============================================================
+2026-03-11 13:40:50 | INFO     | smart_grid.models.trainer | Обучение модели: LinearRegression
+2026-03-11 13:40:50 | INFO     | smart_grid.models.trainer | ============================================================
+2026-03-11 13:40:50 | INFO     | smart_grid.models.baseline | LinearRegression обучен | X_flat: 528 фич
+2026-03-11 13:40:50 | INFO     | smart_grid.models.trainer | LinearRegression обучена за 0.1 сек
+2026-03-11 13:40:50 | INFO     | smart_grid.models.trainer | ============================================================
+2026-03-11 13:40:50 | INFO     | smart_grid.models.trainer | Обучение модели: XGBoost
+2026-03-11 13:40:50 | INFO     | smart_grid.models.trainer | ============================================================
+2026-03-11 13:41:30 | INFO     | smart_grid.models.trainer | XGBoost обучен
+2026-03-11 13:41:30 | INFO     | smart_grid.models.trainer | XGBoost обучена за 39.6 сек
+2026-03-11 13:41:30 | INFO     | smart_grid | 
+[6/10] Сравнение моделей на тестовой выборке...
+2026-03-11 13:41:30 | INFO     | smart_grid.models.trainer | 
+============================================================
+2026-03-11 13:41:30 | INFO     | smart_grid.models.trainer | СРАВНЕНИЕ МОДЕЛЕЙ (split=TEST)
+2026-03-11 13:41:30 | INFO     | smart_grid.models.trainer | ============================================================
+2026-03-11 13:41:30 | INFO     | smart_grid.models.trainer | Модель                      MAE     RMSE    MAPE%      R²
+2026-03-11 13:41:30 | INFO     | smart_grid.models.trainer | ----------------------------------------------------------
+2026-03-11 13:41:31 | INFO     | smart_grid.utils.metrics | LSTM            | MAE= 1223.12 | RMSE= 1404.02 | MAPE= 23.03% | R²=0.0529
+2026-03-11 13:41:31 | INFO     | smart_grid.models.trainer | LSTM                    1223.12  1404.02   23.03% 0.0529
+2026-03-11 13:41:32 | INFO     | smart_grid.utils.metrics | VanillaTransformer | MAE=  454.02 | RMSE=  679.29 | MAPE= 10.66% | R²=0.7783
+2026-03-11 13:41:32 | INFO     | smart_grid.models.trainer | VanillaTransformer       454.02   679.29   10.66% 0.7783
+2026-03-11 13:41:32 | INFO     | smart_grid.utils.metrics | PatchTST        | MAE=  423.60 | RMSE=  670.11 | MAPE=  9.82% | R²=0.7842
+2026-03-11 13:41:32 | INFO     | smart_grid.models.trainer | PatchTST                 423.60   670.11    9.82% 0.7842
+2026-03-11 13:41:32 | INFO     | smart_grid.utils.metrics | LinearRegression | MAE=  424.98 | RMSE=  656.18 | MAPE=  9.72% | R²=0.7931
+2026-03-11 13:41:32 | INFO     | smart_grid.models.trainer | LinearRegression         424.98   656.18    9.72% 0.7931
+2026-03-11 13:41:32 | INFO     | smart_grid.utils.metrics | XGBoost         | MAE=  891.49 | RMSE= 1186.50 | MAPE= 16.88% | R²=0.3236
+2026-03-11 13:41:32 | INFO     | smart_grid.models.trainer | XGBoost                  891.49  1186.50   16.88% 0.3236
+2026-03-11 13:41:32 | INFO     | smart_grid.models.trainer | ----------------------------------------------------------
+2026-03-11 13:41:32 | INFO     | smart_grid.models.trainer | 🏆 Лучшая модель по MAE: PatchTST
+2026-03-11 13:41:34 | INFO     | smart_grid | 🏆 Лучшая модель: PatchTST (MAE=423.60)
+2026-03-11 13:41:34 | INFO     | smart_grid | 
+[7/10] Визуализация весов внимания...
+2026-03-11 13:41:34 | INFO     | smart_grid.utils.attention_viz | Attention heatmap: c:\Users\Admin\Downloads\smart_grid_project_v2 (5)\smart_grid_project\results\plots\attention_VanillaTransformer_block_0.png
+2026-03-11 13:41:35 | INFO     | smart_grid.utils.attention_viz | Attention heatmap: c:\Users\Admin\Downloads\smart_grid_project_v2 (5)\smart_grid_project\results\plots\attention_VanillaTransformer_block_1.png
+2026-03-11 13:41:35 | INFO     | smart_grid.utils.attention_viz | Summary attention: c:\Users\Admin\Downloads\smart_grid_project_v2 (5)\smart_grid_project\results\plots\attention_summary_VanillaTransformer.png
+2026-03-11 13:41:35 | INFO     | smart_grid.utils.attention_viz | Head specialization: c:\Users\Admin\Downloads\smart_grid_project_v2 (5)\smart_grid_project\results\plots\head_specialization_VanillaTransformer.png
+2026-03-11 13:41:36 | INFO     | smart_grid.utils.attention_viz | Attention heatmap: c:\Users\Admin\Downloads\smart_grid_project_v2 (5)\smart_grid_project\results\plots\attention_PatchTST_block_0.png
+2026-03-11 13:41:36 | INFO     | smart_grid.utils.attention_viz | Attention heatmap: c:\Users\Admin\Downloads\smart_grid_project_v2 (5)\smart_grid_project\results\plots\attention_PatchTST_block_1.png
+2026-03-11 13:41:36 | INFO     | smart_grid.utils.attention_viz | Summary attention: c:\Users\Admin\Downloads\smart_grid_project_v2 (5)\smart_grid_project\results\plots\attention_summary_PatchTST.png
+2026-03-11 13:41:36 | INFO     | smart_grid.utils.attention_viz | Head specialization: c:\Users\Admin\Downloads\smart_grid_project_v2 (5)\smart_grid_project\results\plots\head_specialization_PatchTST.png
+2026-03-11 13:41:36 | INFO     | smart_grid | 
+[8/10] Анализ остатков лучшей модели: PatchTST
+2026-03-11 13:41:37 | INFO     | smart_grid.analysis.residuals | Анализ остатков модели: PatchTST (n=29832)
+2026-03-11 13:41:38 | INFO     | smart_grid.analysis.residuals | ADF тест: stat=-5.2677 p=0.0000 (стационарны)
+2026-03-11 13:41:39 | INFO     | smart_grid.analysis.residuals | KPSS тест: stat=0.2834 p=0.1000
+2026-03-11 13:41:41 | INFO     | smart_grid.analysis.residuals | Ljung-Box lag=10: p=0.0000  lag=20: p=0.0000
+2026-03-11 13:41:41 | INFO     | smart_grid.analysis.residuals | Durbin-Watson: 0.3665 (2.0=нет автокорреляции)
+2026-03-11 13:41:41 | INFO     | smart_grid.analysis.residuals | Jarque-Bera: stat=444604.0246 p=0.0000
+2026-03-11 13:41:41 | INFO     | smart_grid.analysis.residuals | График остатков: c:\Users\Admin\Downloads\smart_grid_project_v2 (5)\smart_grid_project\results\plots\residuals_PatchTST.png
+2026-03-11 13:41:41 | INFO     | smart_grid | 
+[9/10] Скользящий бэктестинг...
+2026-03-11 13:41:41 | INFO     | smart_grid.analysis.backtesting | Бэктестинг PatchTST: 8 окон по ~155 шагов
+2026-03-11 13:41:42 | INFO     | smart_grid.analysis.backtesting |   Окно  1/8 | MAE=308.75 MAPE=5.92%
+2026-03-11 13:41:42 | INFO     | smart_grid.analysis.backtesting |   Окно  2/8 | MAE=304.22 MAPE=5.57%
+2026-03-11 13:41:42 | INFO     | smart_grid.analysis.backtesting |   Окно  3/8 | MAE=277.09 MAPE=5.18%
+2026-03-11 13:41:42 | INFO     | smart_grid.analysis.backtesting |   Окно  4/8 | MAE=611.99 MAPE=31.81%
+2026-03-11 13:41:42 | INFO     | smart_grid.analysis.backtesting |   Окно  5/8 | MAE=352.19 MAPE=6.21%
+2026-03-11 13:41:42 | INFO     | smart_grid.analysis.backtesting |   Окно  6/8 | MAE=311.63 MAPE=5.53%
+2026-03-11 13:41:42 | INFO     | smart_grid.analysis.backtesting |   Окно  7/8 | MAE=474.10 MAPE=8.05%
+2026-03-11 13:41:42 | INFO     | smart_grid.analysis.backtesting |   Окно  8/8 | MAE=742.67 MAPE=10.30%
+2026-03-11 13:41:42 | INFO     | smart_grid.analysis.backtesting | График бэктестинга: c:\Users\Admin\Downloads\smart_grid_project_v2 (5)\smart_grid_project\results\plots\backtesting_PatchTST.png
+2026-03-11 13:41:42 | INFO     | smart_grid.analysis.backtesting | Итого по бэктестингу PatchTST: MAE=422.83±160.62  MAPE=9.82±8.46%
+2026-03-11 13:41:42 | INFO     | smart_grid | 
+[10/10] Оптимизация накопителя энергии...
+2026-03-11 13:41:42 | INFO     | smart_grid.optimization.storage | ──────────────────────────────────────────────────
+2026-03-11 13:41:42 | INFO     | smart_grid.optimization.storage | Горизонт: 720 ч (30.0 сут) | SOC 25%→75% (ΔE=2250 кВт·ч)
+2026-03-11 13:41:42 | INFO     | smart_grid.optimization.storage | Базовая стоимость:         15241691.66 руб
+2026-03-11 13:41:42 | INFO     | smart_grid.optimization.storage | Оптимизированная (грязная):15021580.83 руб
+2026-03-11 13:41:42 | INFO     | smart_grid.optimization.storage | Валовая экономия:           220110.83 руб
+2026-03-11 13:41:42 | INFO     | smart_grid.optimization.storage | Стоимость деградации:         6007.50 руб
+2026-03-11 13:41:42 | INFO     | smart_grid.optimization.storage | ЧИСТАЯ экономия:            214103.33 руб (1.40%)
+2026-03-11 13:41:42 | INFO     | smart_grid.optimization.storage | Прокачано:                  100125.00 кВт·ч
+2026-03-11 13:41:42 | INFO     | smart_grid.optimization.storage | Часов заряд/разряд:        23 / 22 из 720
+2026-03-11 13:41:42 | INFO     | smart_grid.optimization.storage | Экономия/год (оценка):     2604923.86 руб/год
+2026-03-11 13:41:42 | INFO     | smart_grid.optimization.storage | Срок окупаемости:                 1.2 лет
+2026-03-11 13:41:44 | INFO     | smart_grid.optimization.storage | ──────────────────────────────────────────────────
+2026-03-11 13:41:44 | INFO     | smart_grid.optimization.storage | Горизонт: 720 ч (30.0 сут) | SOC 40%→60% (ΔE=900 кВт·ч)
+2026-03-11 13:41:44 | INFO     | smart_grid.optimization.storage | Базовая стоимость:         15241691.66 руб
+2026-03-11 13:41:44 | INFO     | smart_grid.optimization.storage | Оптимизированная (грязная):15153647.33 руб
+2026-03-11 13:41:44 | INFO     | smart_grid.optimization.storage | Валовая экономия:            88044.33 руб
+2026-03-11 13:41:44 | INFO     | smart_grid.optimization.storage | Стоимость деградации:         2403.00 руб
+2026-03-11 13:41:44 | INFO     | smart_grid.optimization.storage | ЧИСТАЯ экономия:             85641.33 руб (0.56%)
+2026-03-11 13:41:44 | INFO     | smart_grid.optimization.storage | Прокачано:                   40050.00 кВт·ч
+2026-03-11 13:41:44 | INFO     | smart_grid.optimization.storage | Часов заряд/разряд:        23 / 22 из 720
+2026-03-11 13:41:44 | INFO     | smart_grid.optimization.storage | Экономия/год (оценка):     1041969.54 руб/год
+2026-03-11 13:41:44 | INFO     | smart_grid.optimization.storage | Срок окупаемости:                43.2 лет
+2026-03-11 13:41:44 | INFO     | smart_grid.optimization.storage | Стратегия: Консервативная (SOC 40%→60%, ΔE=900 кВт·ч)
+2026-03-11 13:41:44 | INFO     | smart_grid.optimization.storage | ──────────────────────────────────────────────────
+2026-03-11 13:41:44 | INFO     | smart_grid.optimization.storage | Горизонт: 720 ч (30.0 сут) | SOC 25%→75% (ΔE=2250 кВт·ч)
+2026-03-11 13:41:44 | INFO     | smart_grid.optimization.storage | Базовая стоимость:         15241691.66 руб
+2026-03-11 13:41:44 | INFO     | smart_grid.optimization.storage | Оптимизированная (грязная):15021580.83 руб
+2026-03-11 13:41:44 | INFO     | smart_grid.optimization.storage | Валовая экономия:           220110.83 руб
+2026-03-11 13:41:44 | INFO     | smart_grid.optimization.storage | Стоимость деградации:         6007.50 руб
+2026-03-11 13:41:44 | INFO     | smart_grid.optimization.storage | ЧИСТАЯ экономия:            214103.33 руб (1.40%)
+2026-03-11 13:41:44 | INFO     | smart_grid.optimization.storage | Прокачано:                  100125.00 кВт·ч
+2026-03-11 13:41:44 | INFO     | smart_grid.optimization.storage | Часов заряд/разряд:        23 / 22 из 720
+2026-03-11 13:41:44 | INFO     | smart_grid.optimization.storage | Экономия/год (оценка):     2604923.86 руб/год
+2026-03-11 13:41:44 | INFO     | smart_grid.optimization.storage | Срок окупаемости:                17.3 лет
+2026-03-11 13:41:44 | INFO     | smart_grid.optimization.storage | Стратегия: Умеренная (SOC 25%→75%, ΔE=2250 кВт·ч)
+2026-03-11 13:41:44 | INFO     | smart_grid.optimization.storage | ──────────────────────────────────────────────────
+2026-03-11 13:41:44 | INFO     | smart_grid.optimization.storage | Горизонт: 720 ч (30.0 сут) | SOC 8%→92% (ΔE=3780 кВт·ч)
+2026-03-11 13:41:44 | INFO     | smart_grid.optimization.storage | Базовая стоимость:         15241691.66 руб
+2026-03-11 13:41:44 | INFO     | smart_grid.optimization.storage | Оптимизированная (грязная):14869079.92 руб
+2026-03-11 13:41:44 | INFO     | smart_grid.optimization.storage | Валовая экономия:           372611.74 руб
+2026-03-11 13:41:44 | INFO     | smart_grid.optimization.storage | Стоимость деградации:        10000.80 руб
+2026-03-11 13:41:44 | INFO     | smart_grid.optimization.storage | ЧИСТАЯ экономия:            362610.94 руб (2.38%)
+2026-03-11 13:41:44 | INFO     | smart_grid.optimization.storage | Прокачано:                  166680.00 кВт·ч
+2026-03-11 13:41:44 | INFO     | smart_grid.optimization.storage | Часов заряд/разряд:        44 / 44 из 720
+2026-03-11 13:41:44 | INFO     | smart_grid.optimization.storage | Экономия/год (оценка):     4411766.44 руб/год
+2026-03-11 13:41:44 | INFO     | smart_grid.optimization.storage | Срок окупаемости:                10.2 лет
+2026-03-11 13:41:44 | INFO     | smart_grid.optimization.storage | Стратегия: Агрессивная (SOC 8%→92%, ΔE=3780 кВт·ч)
+2026-03-11 13:41:44 | INFO     | smart_grid.optimization.storage | ═════════════════════════════════════════════════════════════════
+2026-03-11 13:41:44 | INFO     | smart_grid.optimization.storage | Стратегия            ΔE кВт·ч   Чистая экон.     Экон.%    Окупаем.
+2026-03-11 13:41:44 | INFO     | smart_grid.optimization.storage | ─────────────────────────────────────────────────────────────────
+2026-03-11 13:41:44 | INFO     | smart_grid.optimization.storage | Консервативная            900        85641 руб     0.56%    43.2 лет
+2026-03-11 13:41:44 | INFO     | smart_grid.optimization.storage | Умеренная                2250       214103 руб     1.40%    17.3 лет
+2026-03-11 13:41:44 | INFO     | smart_grid.optimization.storage | Агрессивная              3780       362611 руб     2.38%    10.2 лет
+2026-03-11 13:41:44 | INFO     | smart_grid.optimization.storage | ═════════════════════════════════════════════════════════════════
+2026-03-11 13:41:44 | INFO     | smart_grid.optimization.storage | 🏆 Лучшая: Агрессивная | 2.38% | окупаемость 10.2 лет
+2026-03-11 13:41:44 | INFO     | smart_grid | Экспорт модели 'PatchTST'...
+2026-03-11 13:41:44 | INFO     | smart_grid.utils.deployment | Модель сохранена: c:\Users\Admin\Downloads\smart_grid_project_v2 (5)\smart_grid_project\results\models\PatchTST\model.keras
+2026-03-11 13:41:44 | INFO     | smart_grid.utils.deployment | Scaler сохранён: c:\Users\Admin\Downloads\smart_grid_project_v2 (5)\smart_grid_project\results\models\PatchTST\scaler.pkl
+2026-03-11 13:41:44 | INFO     | smart_grid.utils.deployment | Конфиг сохранён: c:\Users\Admin\Downloads\smart_grid_project_v2 (5)\smart_grid_project\results\models\PatchTST\config.json
+2026-03-11 13:41:44 | INFO     | smart_grid | 
+======================================================================
+2026-03-11 13:41:44 | INFO     | smart_grid | ✅ Пайплайн завершён успешно!
+2026-03-11 13:41:44 | INFO     | smart_grid | 📁 Результаты в: c:\Users\Admin\Downloads\smart_grid_project_v2 (5)\smart_grid_project\results
+2026-03-11 13:41:44 | INFO     | smart_grid | ======================================================================

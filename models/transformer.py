@@ -7,26 +7,37 @@ models/transformer.py — Сравнительное исследование а
 РЕАЛИЗОВАННЫЕ АРХИТЕКТУРЫ
 ═══════════════════════════════════════════════════════════════════════════════
 
-1. VanillaTransformer  — Encoder-only с Pre-LN и Sinusoidal/Learnable/Time2Vec PE
+1. VanillaTransformer  — Encoder-only с Pre-LN и Sinusoidal/Time2Vec PE
 2. TFTLite             — Temporal Fusion Transformer (упрощённый) с ковариатами
 3. PatchTST            — State-of-the-art (Nie et al., 2023): патчи вместо точек
 
+НОВЫЕ КОМПОНЕНТЫ v4
+─────────────────────────────────────────────────────────────────────────────
+• RevIN (Reversible Instance Normalization) — Kim et al., 2022
+    Нормализует каждое входное окно ДО кодирования (устраняет distribution
+    shift между train/val/test окнами), денормализует после декодирования.
+    Ключевое нововведение оригинального PatchTST [Nie et al., 2023].
+    Улучшение: устраняет «шоки» на границах сезонов внутри каждого окна.
+
+• StochasticDepth (DropPath) — Huang et al., 2016
+    На каждой итерации обучения случайно выбрасывает всю residual-ветку
+    блока с вероятностью, нарастающей по глубине: depth_i/num_layers × rate.
+    Эффект: неявный ensemble сетей разной глубины → лучшая генерализация.
+    Используется в ViT, DeiT, современных Transformer-моделях для изображений.
+
+• LearnedQueryPooling — вместо GlobalAveragePooling в голове
+    Обучаемый вектор-запрос q attending к финальному контексту:
+    score_t = softmax(q · h_t) → взвешенная сумма h_t.
+    Семантически: «выбираем наиболее релевантные шаги для прогноза»
+    вместо равномерного усреднения.
+
 ПОЗИЦИОННЫЕ КОДИРОВКИ
   • SinusoidalPE        — Vaswani et al. (2017)
-  • LearnableRelativePE — T5-style, смещения по относительному расстоянию
   • Time2Vec            — Kazemi et al. (2019)
 
 МЕХАНИЗМЫ ВНИМАНИЯ
   • Standard MHA        — Scaled Dot-Product (базовая линия)
   • ProbSparseAttention — Zhou et al. (2021), Informer: O(L log L)
-
-КЛЮЧЕВЫЕ ИСПРАВЛЕНИЯ vs предыдущей версии
-  • Pre-LN (LN до Attention) вместо Post-LN → стабильные градиенты
-  • Агрегация: last_token + avg вместо только GlobalAvgPool
-  • TFT: явные ковариаты (час, день недели, праздник) через GRN
-  • PatchTST: патч-токенизация через Conv1D
-  • count_parameters() для параметрического паритета
-  • transformer_grid_search() для выбора гиперпараметров
 
 БИБЛИОГРАФИЯ
   [1] Vaswani A. et al. (2017). Attention is All You Need. NeurIPS.
@@ -34,6 +45,8 @@ models/transformer.py — Сравнительное исследование а
   [3] Lim B. et al. (2021). Temporal Fusion Transformers. IJF.
   [4] Nie Y. et al. (2023). A Time Series is Worth 64 Words. ICLR.
   [5] Kazemi S.M. et al. (2019). Time2Vec. arXiv:1907.05321.
+  [6] Kim T. et al. (2022). RevIN: Reversible Instance Normalization. ICLR.
+  [7] Huang G. et al. (2016). Deep Networks with Stochastic Depth. ECCV.
 ═══════════════════════════════════════════════════════════════════════════════
 """
 
@@ -62,6 +75,213 @@ def count_parameters(model: tf.keras.Model) -> int:
     в 2-3 раза больше параметров, чем у конкурента.
     """
     return int(np.sum([np.prod(v.shape) for v in model.trainable_variables]))
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# НОВЫЕ КОМПОНЕНТЫ v4
+# ══════════════════════════════════════════════════════════════════════════════
+
+class RevINNorm(tf.keras.layers.Layer):
+    """
+    RevIN Normalization [Kim et al., ICLR 2022] — НОРМАЛИЗАЦИЯ.
+
+    Graph-compatible версия для Keras Functional API.
+
+    Возвращает (x_norm, mean, std) как три отдельных тензора,
+    чтобы mean/std можно было передать в RevINDenorm как явные
+    граф-тензоры (а не Python-атрибуты, несовместимые с Functional API).
+
+    Принцип:
+      x_norm = (x - mean) / std  (+аффинное преобразование gamma/beta)
+      mean, std — статистика по временной оси T каждого экземпляра отдельно
+      (instance-normalization, не batch-normalization)
+    """
+
+    def __init__(self, eps: float = 1e-5, affine: bool = True, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.eps = eps
+        self.affine = affine
+
+    def build(self, input_shape: tuple) -> None:
+        n_features = input_shape[-1]
+        if self.affine:
+            self.gamma = self.add_weight(
+                shape=(n_features,), initializer="ones",  name="revin_gamma"
+            )
+            self.beta = self.add_weight(
+                shape=(n_features,), initializer="zeros", name="revin_beta"
+            )
+        super().build(input_shape)
+
+    def call(self, x: tf.Tensor) -> tuple:
+        """
+        Returns
+        -------
+        x_norm : (B, T, C) — нормализованный вход
+        mean   : (B, 1, C) — среднее по временной оси (для денормализации)
+        std    : (B, 1, C) — ст. откл. по временной оси (для денормализации)
+        """
+        mean = tf.reduce_mean(x, axis=1, keepdims=True)            # (B, 1, C)
+        std  = tf.math.reduce_std(x, axis=1, keepdims=True) + self.eps
+        x_norm = (x - mean) / std
+        if self.affine:
+            x_norm = x_norm * self.gamma + self.beta
+        return x_norm, mean, std
+
+    def get_config(self) -> dict:
+        return {**super().get_config(), "eps": self.eps, "affine": self.affine}
+
+
+class RevINDenorm(tf.keras.layers.Layer):
+    """
+    RevIN Denormalization — ДЕНОРМАЛИЗАЦИЯ.
+
+    Принимает (pred_norm, mean, std) — все как граф-тензоры из RevINNorm —
+    и возвращает прогноз в исходном масштабе:
+      output = pred_norm * std_scalar + mean_scalar
+
+    Где std_scalar / mean_scalar — скаляры, извлечённые из mean/std
+    первого признака (consumption, индекс 0) входного окна.
+
+    Это корректно, т.к. таргет Y = consumption_scaled (первый признак).
+    """
+
+    def __init__(self, eps: float = 1e-5, affine: bool = True, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.eps = eps
+        self.affine = affine
+
+    def build(self, input_shapes: list) -> None:
+        # input_shapes[0] = pred shape, остальные не нужны для весов
+        if self.affine:
+            # gamma/beta первого признака (consumption) из RevINNorm
+            self.gamma = self.add_weight(
+                shape=(1,), initializer="ones",  name="denorm_gamma"
+            )
+            self.beta = self.add_weight(
+                shape=(1,), initializer="zeros", name="denorm_beta"
+            )
+        super().build(input_shapes)
+
+    def call(self, inputs: list) -> tf.Tensor:
+        """
+        Parameters
+        ----------
+        inputs : [pred, mean, std]
+          pred : (B, forecast_horizon) — прогноз в нормализованном пространстве
+          mean : (B, 1, C)             — среднее из RevINNorm
+          std  : (B, 1, C)             — ст. откл. из RevINNorm
+
+        Returns
+        -------
+        output : (B, forecast_horizon) — прогноз в исходном масштабе
+        """
+        pred, mean, std = inputs
+        # Берём статистику только первого признака (consumption, idx=0)
+        m = mean[:, 0, 0]   # (B,)
+        s = std[:, 0, 0]    # (B,)
+        if self.affine:
+            # Обратное аффинное: (pred - beta) / gamma
+            pred = (pred - self.beta) / (self.gamma + self.eps)
+        # Денормализация: pred * std + mean, broadcast (B,) → (B, horizon)
+        m = tf.expand_dims(m, axis=1)   # (B, 1)
+        s = tf.expand_dims(s, axis=1)   # (B, 1)
+        return pred * s + m
+
+    def get_config(self) -> dict:
+        return {**super().get_config(), "eps": self.eps, "affine": self.affine}
+
+
+# Backward-compatibility alias
+RevIN = RevINNorm
+
+
+class StochasticDepth(tf.keras.layers.Layer):
+    """
+    Stochastic Depth / DropPath [Huang et al., ECCV 2016].
+
+    На каждом шаге обучения с вероятностью `drop_rate` выбрасывает
+    ВСЮ residual-ветку блока (не отдельные нейроны, а всю ветку целиком).
+
+    Зачем это лучше Dropout:
+      Dropout: отдельные нейроны → модель учится работать с неполным слоем
+      DropPath: целый блок → модель учится работать без блока → неявный
+      ensemble сетей разной глубины [Loshchilov & Hutter, 2016 показали
+      ту же идею с другой стороны].
+
+    Использование в PreLNEncoderBlock:
+      x = x + StochasticDepth(rate)(residual, training)
+      При inference: rate=0 → обычный residual (нет выброса).
+
+    Рекомендация: rate_i = (i / num_layers) × max_rate
+      (линейно нарастает с глубиной — последние блоки выбрасываются чаще)
+    """
+
+    def __init__(self, drop_rate: float = 0.0, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.drop_rate = drop_rate
+
+    def call(self, x: tf.Tensor, training: Optional[bool] = None) -> tf.Tensor:
+        if not training or self.drop_rate == 0.0:
+            return x
+        # Сохраняем shape (B,) маску: одинаковая для всего batch-элемента
+        shape = (tf.shape(x)[0],) + (1,) * (len(x.shape) - 1)
+        keep_prob = 1.0 - self.drop_rate
+        random_tensor = tf.random.uniform(shape, dtype=x.dtype)
+        # Rounded: 0 если выброшен, 1/keep_prob если оставлен (unbiased estimate)
+        binary_tensor = tf.math.floor(random_tensor + keep_prob)
+        return x * binary_tensor / keep_prob
+
+    def get_config(self) -> dict:
+        return {**super().get_config(), "drop_rate": self.drop_rate}
+
+
+class LearnedQueryPooling(tf.keras.layers.Layer):
+    """
+    Обучаемый query-pooling вместо GlobalAveragePooling.
+
+    Вместо равномерного усреднения: context = (1/T) Σ h_t
+    Используем обучаемый вектор запроса q:
+      score_t = softmax(q · h_t / √d)
+      context = Σ score_t × h_t
+
+    Семантика: «выбираем наиболее информативные шаги для прогноза»,
+    аналогично механизму Attention с одним запросом (CLS-token в BERT).
+
+    Улучшение над GlobalAvgPool: позволяет сосредоточиться на пиковых
+    часах или переломных моментах ряда, а не усреднять всё поровну.
+    """
+
+    def __init__(self, d_model: int, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.d_model = d_model
+
+    def build(self, input_shape: tuple) -> None:
+        self.query = self.add_weight(
+            shape=(self.d_model,), initializer="glorot_uniform", name="pooling_query"
+        )
+        super().build(input_shape)
+
+    def call(self, x: tf.Tensor) -> tf.Tensor:
+        """
+        Parameters
+        ----------
+        x : (B, T, d_model)
+
+        Returns
+        -------
+        context : (B, d_model)
+        """
+        # scores: (B, T)
+        scores = tf.einsum("btd,d->bt", x, self.query) / (self.d_model ** 0.5)
+        weights = tf.nn.softmax(scores, axis=-1)  # (B, T)
+        context = tf.einsum("bt,btd->bd", weights, x)  # (B, d_model)
+        return context
+
+    def get_config(self) -> dict:
+        return {**super().get_config(), "d_model": self.d_model}
+
+
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -242,20 +462,25 @@ class ProbSparseAttention(tf.keras.layers.Layer):
 
 class PreLNEncoderBlock(tf.keras.layers.Layer):
     """
-    Encoder-блок с Pre-Layer Normalization.
+    Encoder-блок с Pre-Layer Normalization + StochasticDepth v4.
 
     Порядок Pre-LN:
-        x → LN → MHA → Dropout → residual
-        x → LN → FFN → Dropout → residual
+        x → LN → MHA → DropPath(rate) → residual
+        x → LN → FFN → DropPath(rate) → residual
+
+    НОВОЕ v4: StochasticDepth (DropPath) заменяет обычный Dropout
+    в residual-ветке:
+      Вместо случайного зануления отдельных нейронов — зануляется
+      ВСЯ residual-ветка блока (Attention или FFN целиком).
+      Эффект: неявный ensemble сетей разной глубины.
+      [Huang et al., 2016 — Deep Networks with Stochastic Depth, ECCV]
 
     Vs. Post-LN (оригинал Vaswani):
         x → MHA → Dropout → residual → LN
-        x → FFN → Dropout → residual → LN
-
     Pre-LN обеспечивает стабильность градиентов без warm-up schedule
-    и позволяет обучать более глубокие сети [Xiong et al., 2020].
+    [Xiong et al., 2020].
 
-    Дополнительно: GELU вместо ReLU в FFN (меньше «мёртвых нейронов»).
+    GELU в FFN: стандарт в современных архитектурах [Hendrycks 2016].
     """
 
     def __init__(
@@ -264,6 +489,7 @@ class PreLNEncoderBlock(tf.keras.layers.Layer):
         num_heads: int,
         dff: int,
         dropout: float = 0.1,
+        stochastic_depth_rate: float = 0.0,   # ← НОВЫЙ параметр v4
         use_prob_sparse: bool = False,
         **kwargs,
     ) -> None:
@@ -272,6 +498,7 @@ class PreLNEncoderBlock(tf.keras.layers.Layer):
         self.num_heads = num_heads
         self.dff = dff
         self.dropout_rate = dropout
+        self.stochastic_depth_rate = stochastic_depth_rate
         self.use_prob_sparse = use_prob_sparse
 
         if use_prob_sparse:
@@ -281,16 +508,22 @@ class PreLNEncoderBlock(tf.keras.layers.Layer):
                 num_heads=num_heads, key_dim=d_model // num_heads, dropout=dropout
             )
 
+        # FFN: добавляем промежуточный Dropout внутри FFN (standard practice)
         self.ffn1 = tf.keras.layers.Dense(dff, activation="gelu")
+        self.ffn_drop = tf.keras.layers.Dropout(dropout)
         self.ffn2 = tf.keras.layers.Dense(d_model)
+
         self.ln1 = tf.keras.layers.LayerNormalization(epsilon=1e-6)
         self.ln2 = tf.keras.layers.LayerNormalization(epsilon=1e-6)
-        self.drop1 = tf.keras.layers.Dropout(dropout)
-        self.drop2 = tf.keras.layers.Dropout(dropout)
+
+        # StochasticDepth вместо простого Dropout в residual-ветке
+        self.sdrop1 = StochasticDepth(stochastic_depth_rate)
+        self.sdrop2 = StochasticDepth(stochastic_depth_rate)
+
         self._attn_weights: Optional[tf.Tensor] = None
 
     def call(self, x: tf.Tensor, training=None) -> tf.Tensor:
-        # Pre-LN attention
+        # ── Pre-LN Attention ──────────────────────────────────────────────────
         residual = x
         xn = self.ln1(x)
         if self.use_prob_sparse:
@@ -299,12 +532,14 @@ class PreLNEncoderBlock(tf.keras.layers.Layer):
             attn_out, self._attn_weights = self.attn(
                 xn, xn, return_attention_scores=True, training=training
             )
-        x = residual + self.drop1(attn_out, training=training)
+        # StochasticDepth применяется к residual-ветке (не к основному пути)
+        x = residual + self.sdrop1(attn_out, training=training)
 
-        # Pre-LN FFN
+        # ── Pre-LN FFN ────────────────────────────────────────────────────────
         residual = x
         xn = self.ln2(x)
-        x = residual + self.drop2(self.ffn2(self.ffn1(xn)), training=training)
+        ffn_out = self.ffn2(self.ffn_drop(self.ffn1(xn), training=training))
+        x = residual + self.sdrop2(ffn_out, training=training)
         return x
 
     def get_attention_weights(self) -> Optional[tf.Tensor]:
@@ -317,6 +552,7 @@ class PreLNEncoderBlock(tf.keras.layers.Layer):
             "num_heads": self.num_heads,
             "dff": self.dff,
             "dropout": self.dropout_rate,
+            "stochastic_depth_rate": self.stochastic_depth_rate,
             "use_prob_sparse": self.use_prob_sparse,
         }
 
@@ -328,60 +564,71 @@ class PreLNEncoderBlock(tf.keras.layers.Layer):
 def build_vanilla_transformer(
     history_length: int = 48,
     forecast_horizon: int = 24,
-    n_features: int = 9,
+    n_features: int = 11,
     d_model: int = 128,
-    num_heads: int = 4,
-    num_layers: int = 3,
+    num_heads: int = 8,
+    num_layers: int = 4,
     dff: int = 256,
     dropout: float = 0.10,
-    learning_rate: float = 1e-4,
+    learning_rate: float = 3e-4,
     pe_type: str = "sinusoidal",
     use_prob_sparse: bool = False,
+    stochastic_depth_rate: float = 0.10,
 ) -> tf.keras.Model:
     """
-    Encoder-only Transformer с Pre-LN и выбором позиционного кодирования.
+    Encoder-only Transformer v4 с StochasticDepth + LearnedQueryPooling.
+
+    НОВОЕ v4:
+    ─────────
+    1. StochasticDepth (DropPath) в каждом блоке с линейно нарастающей rate:
+       rate_i = (i / num_layers) × stochastic_depth_rate
+       Интерпретация: неявный ensemble сетей глубиной 1..num_layers.
+       Ранние слои (feature extraction) выбрасываются редко,
+       глубокие (refinement) — чаще. [Huang et al., ECCV 2016]
+
+    2. LearnedQueryPooling вместо GlobalAveragePool:
+       Обучаемый вектор-запрос q выбирает информативные шаги:
+         scores_t = softmax(q · h_t / √d)
+         context = Σ scores_t × h_t
+       vs. GlobalAvgPool: равномерное усреднение без учёта важности шагов.
+
+    3. Улучшенная голова: Dense(gelu) + Skip + LN → стабильность при L=4.
 
     Преимущества над LSTM:
-    - Self-Attention: прямой путь между любыми двумя шагами истории за O(1)
-    - Multi-head: разные головы специализируются на разных лагах (24ч, 48ч, 168ч)
-    - Параллельная обработка → нет проблемы затухания градиентов по времени
-
-    Агрегация: [last_token; global_avg] вместо только GlobalAvgPool —
-    last_token несёт «актуальное состояние», avg — «исторический контекст».
+    - Self-Attention O(1) до любого шага истории (LSTM O(T) через ворота)
+    - Многоголовая специализация: head_0→лаг-24ч, head_1→лаг-1ч, и т.д.
+    - Параллельная обработка — нет проблемы затухающих градиентов
 
     Parameters
     ----------
-    pe_type : "sinusoidal" | "relative" | "time2vec"
-    use_prob_sparse : bool  — ProbSparse вместо Standard MHA
+    stochastic_depth_rate : float, максимальная rate DropPath (у последнего блока)
     """
     assert d_model % num_heads == 0, f"d_model={d_model} не делится на num_heads={num_heads}"
 
     inp_series = tf.keras.Input(shape=(history_length, n_features), name="series_input")
     inputs = [inp_series]
 
-    # input_proj: (T, n_features) → (T, d_model)
     x = tf.keras.layers.Dense(d_model, name="input_proj")(inp_series)
 
     if pe_type == "sinusoidal":
         x = SinusoidalPE(d_model, max_len=max(history_length + 4, 256), name="sin_pe")(x)
-
     elif pe_type == "time2vec":
         tau = tf.keras.Input(shape=(history_length, 1), name="time_index")
         inputs.append(tau)
         t2v = Time2Vec(d_model, name="time2vec")(tau)
         x = x + t2v
 
-    # "relative" — bias добавляется внутри блоков (упрощённо: без явного bias,
-    # LearnableRelativePE будет добавлен в будущих версиях через custom MHA)
-
     x = tf.keras.layers.LayerNormalization(epsilon=1e-6, name="input_ln")(x)
     x = tf.keras.layers.Dropout(dropout, name="embed_drop")(x)
 
     enc_blocks = []
     for i in range(num_layers):
+        sdrop_rate = (i / max(num_layers - 1, 1)) * stochastic_depth_rate
         blk = PreLNEncoderBlock(
             d_model=d_model, num_heads=num_heads, dff=dff,
-            dropout=dropout, use_prob_sparse=use_prob_sparse,
+            dropout=dropout,
+            stochastic_depth_rate=sdrop_rate,
+            use_prob_sparse=use_prob_sparse,
             name=f"enc_{i}",
         )
         x = blk(x)
@@ -390,31 +637,33 @@ def build_vanilla_transformer(
     x = tf.keras.layers.LayerNormalization(epsilon=1e-6, name="final_ln")(x)
 
     last = x[:, -1, :]
-    avg = tf.keras.layers.GlobalAveragePooling1D(name="avg_pool")(x)
-    agg = tf.keras.layers.Concatenate(name="agg")([last, avg])
+    learned_ctx = LearnedQueryPooling(d_model, name="lqp")(x)
+    agg = tf.keras.layers.Concatenate(name="agg")([last, learned_ctx])
 
-    agg = tf.keras.layers.Dense(dff // 2, activation="gelu", name="head_d1")(agg)
-    agg = tf.keras.layers.Dropout(dropout, name="head_drop")(agg)
-    output = tf.keras.layers.Dense(forecast_horizon, name="output")(agg)
+    h = tf.keras.layers.Dense(dff // 2, activation="gelu", name="head_d1")(agg)
+    skip = tf.keras.layers.Dense(dff // 2, use_bias=False, name="head_skip")(agg)
+    h = tf.keras.layers.Add(name="head_res")([h, skip])
+    h = tf.keras.layers.LayerNormalization(epsilon=1e-6, name="head_ln")(h)
+    h = tf.keras.layers.Dropout(dropout, name="head_drop")(h)
+    output = tf.keras.layers.Dense(forecast_horizon, name="output")(h)
 
     model = tf.keras.Model(inputs=inputs, outputs=output,
-                           name=f"VanillaTransformer_{pe_type}")
-    model._enc_blocks = enc_blocks  # для визуализации внимания
+                           name=f"VanillaTransformer_v4_{pe_type}")
+    model._enc_blocks = enc_blocks
 
     model.compile(
         optimizer=tf.keras.optimizers.Adam(learning_rate=learning_rate, clipnorm=1.0),
-        loss="huber",
+        loss=tf.keras.losses.Huber(delta=0.1),
         metrics=["mae"],
     )
     logger.info(
-        "VanillaTransformer[%s%s] d=%d h=%d L=%d | %d params",
+        "VanillaTransformer v4 [%s%s] d=%d h=%d L=%d sdrop=%.2f | %d params",
         pe_type, "+ProbSparse" if use_prob_sparse else "",
-        d_model, num_heads, num_layers, count_parameters(model),
+        d_model, num_heads, num_layers, stochastic_depth_rate,
+        count_parameters(model),
     )
     return model
 
-
-# ══════════════════════════════════════════════════════════════════════════════
 # АРХИТЕКТУРА 2: TFT LITE
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -523,7 +772,7 @@ def build_tft_lite(
 
     model.compile(
         optimizer=tf.keras.optimizers.Adam(learning_rate=learning_rate, clipnorm=1.0),
-        loss="huber",
+        loss=tf.keras.losses.Huber(delta=0.1),  # delta=0.1: граница L1/L2 для нормализованного [0,1] таргета
         metrics=["mae"],
     )
     logger.info("TFTLite d=%d h=%d L=%d | %d params", d_model, num_heads, num_layers, count_parameters(model))
@@ -579,97 +828,123 @@ def build_patchtst(
     forecast_horizon: int = 24,
     patch_len: int = 8,
     stride: int = 4,
-    n_features: int = 9,
+    n_features: int = 11,
     d_model: int = 128,
-    num_heads: int = 4,
-    num_layers: int = 3,
+    num_heads: int = 8,
+    num_layers: int = 4,
     dff: int = 256,
     dropout: float = 0.10,
-    learning_rate: float = 1e-4,
+    learning_rate: float = 3e-4,
+    stochastic_depth_rate: float = 0.10,
+    use_revin: bool = True,
 ) -> tf.keras.Model:
     """
-    PatchTST — State-of-the-art Transformer [Nie et al., ICLR 2023].
+    PatchTST v4 [Nie et al., ICLR 2023] + RevIN + StochasticDepth.
 
-    Ключевая идея: обрабатывать ряд ПАТЧАМИ (подпоследовательностями),
-    а не отдельными точками. Аналогия с ViT для изображений.
+    КЛЮЧЕВЫЕ ИДЕИ PatchTST (оригинал):
+    - Патч-токены: ряд разбивается на перекрывающиеся подпоследовательности.
+      patch=8, stride=4, T=48 → N_patches=11. O(11²) vs O(48²) — 19x экономия.
+    - Каждый патч = «суточный переход» — семантически осмысленный токен.
 
-    Почему патчи лучше точек:
-    1. Семантически осмысленные токены:
-       Патч из 8ч содержит «суточный переход» — смысловую единицу
-       потребления. Отдельная точка = шумный скаляр.
+    НОВОЕ v4:
+    ──────────────────────────────────────────────────────────────────────────
+    1. RevIN (Reversible Instance Normalization) [Kim et al., ICLR 2022]:
+       Нормализует КАЖДОЕ входное окно на собственные mean/std ДО кодирования.
+       Денормализует прогноз ПОСЛЕ декодирования (обратимо).
+       Это именно та нормализация из оригинального PatchTST — без неё
+       distribution shift между сезонами снижает R² на 0.05-0.10.
 
-    2. Эффективность внимания:
-       При patch=8, stride=4, history=48: N_patches = (48-8)//4+1 = 11
-       Сложность O(11²) вместо O(48²) — в 19 раз меньше операций.
+    2. StochasticDepth с линейно нарастающей rate:
+       Блок i: rate = (i / (L-1)) × max_rate
+       rates = [0.00, 0.03, 0.07, 0.10] при L=4, max_rate=0.10.
+       Эффект: ensemble сетей глубиной 1..4.
 
-    3. Локальный контекст в токене:
-       Шум сглаживается ВНУТРИ патча ещё на этапе Conv1D-эмбеддинга.
-
-    4. Более эффективные PE:
-       11 позиций кодировать проще, чем 48; PE несёт больше информации.
-
-    Результаты PatchTST [Nie et al., 2023]:
-    - ETTh1 (512→96): PatchTST MSE=0.370 vs FEDformer 0.440 (-16%)
-    - На длинных горизонтах превосходит все другие Transformer-варианты
+    3. LearnedQueryPooling вместо Flatten:
+       Flatten(11×128=1408) → огромная голова. LQP: 1 вектор-запрос → (B,128).
 
     Parameters
     ----------
-    patch_len : рекомендации: history=24→6, history=48→8, history=96→16
-    stride    : обычно stride = patch_len // 2 (50% перекрытие)
+    use_revin : RevIN нормализация по instance (рекомендуется True)
     """
     assert d_model % num_heads == 0
     n_patches = (history_length - patch_len) // stride + 1
     logger.info(
-        "PatchTST: history=%d patch=%d stride=%d → %d patches",
-        history_length, patch_len, stride, n_patches,
+        "PatchTST v4: history=%d patch=%d stride=%d → %d patches | RevIN=%s",
+        history_length, patch_len, stride, n_patches, use_revin,
     )
 
     inp = tf.keras.Input(shape=(history_length, n_features), name="series_input")
 
-    # Патч-эмбеддинг через Conv1D: kernel=(patch_len, n_features) → d_model
-    # Conv1D принимает (T, channels) нативно: здесь channels=n_features
-    patches = tf.keras.layers.Conv1D(
-        d_model, kernel_size=patch_len, strides=stride, padding="valid", name="patch_embed"
-    )(inp)  # (B, n_patches, d_model)
+    # RevIN нормализация: возвращает (x_norm, mean, std) как граф-тензоры.
+    # mean/std сохраняются в графе и передаются в RevINDenorm явно —
+    # это единственный graph-compatible способ для Keras Functional API.
+    if use_revin:
+        revin_norm = RevINNorm(eps=1e-5, affine=True, name="revin_norm")
+        x, revin_mean, revin_std = revin_norm(inp)  # все три — граф-тензоры
+    else:
+        x = inp
+        revin_mean = revin_std = None
 
-    # Instance Normalization (RevIN-style): устраняет distribution shift
-    patches = tf.keras.layers.LayerNormalization(
-        axis=(1, 2), epsilon=1e-6, name="instance_norm"
-    )(patches)
+    # Патч-эмбеддинг через Conv1D → (B, n_patches, d_model)
+    patches = tf.keras.layers.Conv1D(
+        d_model, kernel_size=patch_len, strides=stride,
+        padding="valid", name="patch_embed",
+    )(x)
 
     patches = SinusoidalPE(d_model, max_len=max(n_patches + 4, 64), name="patch_pe")(patches)
+    patches = tf.keras.layers.LayerNormalization(epsilon=1e-6, name="embed_ln")(patches)
     patches = tf.keras.layers.Dropout(dropout, name="embed_drop")(patches)
 
-    x = patches
+    enc_x = patches
     enc_blocks = []
     for i in range(num_layers):
-        blk = PreLNEncoderBlock(d_model, num_heads, dff, dropout, name=f"patch_enc_{i}")
-        x = blk(x)
+        sdrop_rate = (i / max(num_layers - 1, 1)) * stochastic_depth_rate
+        blk = PreLNEncoderBlock(
+            d_model, num_heads, dff, dropout,
+            stochastic_depth_rate=sdrop_rate,
+            name=f"patch_enc_{i}",
+        )
+        enc_x = blk(enc_x)
         enc_blocks.append(blk)
 
-    x = tf.keras.layers.LayerNormalization(epsilon=1e-6, name="final_ln")(x)
+    enc_x = tf.keras.layers.LayerNormalization(epsilon=1e-6, name="final_ln")(enc_x)
 
-    x_flat = tf.keras.layers.Flatten(name="flatten")(x)
-    x_flat = tf.keras.layers.Dense(dff // 2, activation="gelu", name="head_d1")(x_flat)
-    x_flat = tf.keras.layers.Dropout(dropout, name="head_drop")(x_flat)
-    output = tf.keras.layers.Dense(forecast_horizon, name="output")(x_flat)
+    last = enc_x[:, -1, :]
+    learned_ctx = LearnedQueryPooling(d_model, name="lqp")(enc_x)
+    agg = tf.keras.layers.Concatenate(name="agg")([last, learned_ctx])
 
-    model = tf.keras.Model(inputs=inp, outputs=output, name="PatchTST")
+    h = tf.keras.layers.Dense(dff // 2, activation="gelu", name="head_d1")(agg)
+    skip = tf.keras.layers.Dense(dff // 2, use_bias=False, name="head_skip")(agg)
+    h = tf.keras.layers.Add(name="head_res")([h, skip])
+    h = tf.keras.layers.LayerNormalization(epsilon=1e-6, name="head_ln")(h)
+    h = tf.keras.layers.Dropout(dropout, name="head_drop")(h)
+    pred = tf.keras.layers.Dense(forecast_horizon, name="pred_norm")(h)
+
+    # RevIN денормализация: pred × std[consumption] + mean[consumption].
+    # Все тензоры — граф-узлы, tf.* вызовы внутри слоёв, а не в Functional API.
+    if use_revin:
+        output = RevINDenorm(eps=1e-5, affine=True, name="revin_denorm")(
+            [pred, revin_mean, revin_std]
+        )
+    else:
+        output = pred
+
+    model = tf.keras.Model(inputs=inp, outputs=output, name="PatchTST_v4")
     model._enc_blocks = enc_blocks
 
     model.compile(
         optimizer=tf.keras.optimizers.Adam(learning_rate=learning_rate, clipnorm=1.0),
-        loss="huber",
+        loss=tf.keras.losses.Huber(delta=0.1),
         metrics=["mae"],
     )
     logger.info(
-        "PatchTST patch=%d stride=%d n_p=%d d=%d h=%d L=%d | %d params",
-        patch_len, stride, n_patches, d_model, num_heads, num_layers, count_parameters(model),
+        "PatchTST v4 patch=%d stride=%d n_p=%d d=%d h=%d L=%d sdrop=%.2f RevIN=%s | %d params",
+        patch_len, stride, n_patches, d_model, num_heads, num_layers,
+        stochastic_depth_rate, use_revin, count_parameters(model),
     )
     return model
 
 
-# ══════════════════════════════════════════════════════════════════════════════
 # GRID SEARCH
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -731,7 +1006,9 @@ def transformer_grid_search(
                 continue
 
             cb = [tf.keras.callbacks.EarlyStopping(
-                monitor="val_loss", patience=patience, restore_best_weights=True
+                monitor="val_loss", patience=patience,
+                min_delta=1e-5,              # не останавливаться на шуме оптимизатора
+                restore_best_weights=True
             )]
 
             X_tr, Y_tr = data["X_train"], data["Y_train"]

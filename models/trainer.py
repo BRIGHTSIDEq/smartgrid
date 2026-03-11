@@ -86,23 +86,45 @@ class ModelTrainer:
         lr_factor: float,
         min_delta: float,
     ) -> None:
+        # ReduceLROnPlateau несовместим с LearningRateSchedule (CosineDecay).
+        # TF2.15+: нельзя использовать hasattr(...,"__call__") — float LR тоже callable.
+        #          нельзя использовать `getattr() or getattr()` — bool(KerasVariable) crash.
+        # Единственный надёжный способ — inspect конфиг оптимизатора или try/except.
+        _has_schedule = False
+        try:
+            _opt = self.model.optimizer
+            # get_config() всегда возвращает dict с "learning_rate"
+            # Если LR — schedule, его конфиг содержит ключ "class_name"
+            _lr_cfg = _opt.get_config().get("learning_rate", None)
+            if isinstance(_lr_cfg, dict) and "class_name" in _lr_cfg:
+                _has_schedule = True   # CosineDecay / ExponentialDecay / etc.
+            elif isinstance(_lr_cfg, tf.keras.optimizers.schedules.LearningRateSchedule):
+                _has_schedule = True
+        except Exception:
+            _has_schedule = False  # безопасный fallback — добавляем ReduceLR
+
         callbacks: List[tf.keras.callbacks.Callback] = [
             tf.keras.callbacks.EarlyStopping(
                 monitor="val_loss",
                 patience=patience,
-                min_delta=min_delta,        # ← ИСПРАВЛЕНИЕ: не останавливаться на шуме
+                min_delta=min_delta,
                 restore_best_weights=True,
                 verbose=1,
             ),
-            tf.keras.callbacks.ReduceLROnPlateau(
+        ]
+        if not _has_schedule:
+            # Только для flat LR — CosineDecay сам снижает LR, ReduceLR не нужен
+            callbacks.append(tf.keras.callbacks.ReduceLROnPlateau(
                 monitor="val_loss",
                 factor=lr_factor,
                 patience=lr_patience,
                 min_delta=min_delta,
                 min_lr=1e-6,
                 verbose=1,
-            ),
-        ]
+            ))
+        else:
+            logger.info("%s: LR schedule обнаружен → ReduceLROnPlateau отключён",
+                        self.model_name)
 
         try:
             self.history = self.model.fit(
@@ -122,8 +144,9 @@ class ModelTrainer:
 
     def _train_sklearn(self, data: Dict[str, Any]) -> None:
         """
-        Для XGBoost с early_stopping_rounds нужен eval_set.
-        Для обычных sklearn-моделей — просто fit().
+        Для sklearn-моделей — просто fit().
+        eval_set для XGBoost убран: early_stopping_rounds удалён из baseline.py
+        (причина: multi-output усредняет 24 eval_metric → шумный сигнал → premat. stop).
         """
         try:
             import xgboost as xgb
@@ -132,13 +155,7 @@ class ModelTrainer:
             if isinstance(model_inner, xgb.XGBRegressor):
                 X_tr = data["X_train"].reshape(data["X_train"].shape[0], -1)
                 Y_tr = data["Y_train"]
-                X_val = data["X_val"].reshape(data["X_val"].shape[0], -1)
-                Y_val = data["Y_val"]
-                model_inner.fit(
-                    X_tr, Y_tr,
-                    eval_set=[(X_val, Y_val)],
-                    verbose=False,
-                )
+                model_inner.fit(X_tr, Y_tr, verbose=False)
                 logger.info("XGBoost обучен")
             else:
                 self.model.fit(

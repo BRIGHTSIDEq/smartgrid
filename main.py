@@ -66,8 +66,8 @@ def main() -> None:
     logger.info("=" * 70)
 
     # ── 1. Режим (раскомментируй нужный) ─────────────────────────────────────
-    # Config.set_fast_mode()          # 90 дней, 50 эпох — быстрая отладка
-    Config.set_optimal_mode()         # 180 дней, 200 эпох — по умолчанию
+    Config.set_fast_mode()        # 365 дней, 150 эпох — быстрая отладка
+    # Config.set_optimal_mode()       # 365 дней, 200 эпох — по умолчанию ✅
     # Config.set_full_mode()          # 365 дней, 300 эпох — финальный запуск
     Config.create_dirs()
 
@@ -109,6 +109,11 @@ def main() -> None:
     logger.info("\n[4/10] Инициализация моделей...")
 
     # LSTM — базовая линия
+    # AttentionLSTM v4: LSTM + Temporal Self-Attention + LayerNorm + GELU + CosineDecay
+    # total_steps ≈ EPOCHS × (n_train // batch): используется для расчёта CosineDecay.
+    # Приближение — EarlyStopping всё равно остановит раньше, это безопасно.
+    _n_train_approx = int(Config.DAYS * 0.70 * 24 - Config.HISTORY_LENGTH - Config.FORECAST_HORIZON)
+    _total_steps = Config.EPOCHS * max(_n_train_approx // Config.BATCH_SIZE, 1)
     lstm = build_lstm_model(
         history_length=Config.HISTORY_LENGTH,
         forecast_horizon=Config.FORECAST_HORIZON,
@@ -117,10 +122,13 @@ def main() -> None:
         lstm_units_2=Config.LSTM_UNITS_2,
         lstm_units_3=Config.LSTM_UNITS_3,
         dropout_rate=Config.DROPOUT_RATE,
-        learning_rate=Config.LSTM_LEARNING_RATE,     # ← отдельный LR для LSTM
+        learning_rate=Config.LSTM_LEARNING_RATE,
+        attn_heads=Config.LSTM_ATTN_HEADS,               # v4: Temporal Attention
+        use_cosine_decay=Config.LSTM_USE_COSINE_DECAY,   # v4: CosineDecay LR
+        total_steps=_total_steps,
     )
 
-    # Vanilla Transformer (Encoder-only, Pre-LN, Sinusoidal PE)
+    # VanillaTransformer v4: Pre-LN + StochasticDepth + LearnedQueryPooling
     vanilla_tr = build_vanilla_transformer(
         history_length=Config.HISTORY_LENGTH,
         forecast_horizon=Config.FORECAST_HORIZON,
@@ -132,9 +140,10 @@ def main() -> None:
         dropout=Config.TRANSFORMER_DROPOUT,
         learning_rate=Config.TRANSFORMER_LEARNING_RATE,
         pe_type="sinusoidal",
+        stochastic_depth_rate=Config.TRANSFORMER_STOCHASTIC_DEPTH,  # v4: DropPath
     )
 
-    # PatchTST
+    # PatchTST v4: RevIN + StochasticDepth + LearnedQueryPooling
     patch_len = 8 if Config.HISTORY_LENGTH >= 48 else 6
     stride = patch_len // 2
     patchtst = build_patchtst(
@@ -149,6 +158,8 @@ def main() -> None:
         dff=Config.TRANSFORMER_DFF,
         dropout=Config.TRANSFORMER_DROPOUT,
         learning_rate=Config.TRANSFORMER_LEARNING_RATE,
+        stochastic_depth_rate=Config.TRANSFORMER_STOCHASTIC_DEPTH,  # v4: DropPath
+        use_revin=Config.PATCHTST_USE_REVIN,                        # v4: RevIN
     )
 
     # Базовые sklearn-модели
@@ -269,7 +280,9 @@ def main() -> None:
 
     # ── 11. Оптимизация накопителя ────────────────────────────────────────────
     logger.info("\n[10/10] Оптимизация накопителя энергии...")
-    sample_forecast = predictions[best_name].flatten()[:Config.STORAGE_HORIZON]
+    # raw_test — непрерывный реальный ряд потребления.
+    # predictions[].flatten() — это склеенные 24-часовые окна (артефакт нарезки).
+    sample_forecast = data["raw_test"][:Config.STORAGE_HORIZON]
 
     storage_result = simulate_storage(
         forecast=sample_forecast,
@@ -287,8 +300,13 @@ def main() -> None:
     compare_strategies(
         sample_forecast,
         capacity=Config.BATTERY_CAPACITY,
+        max_power=Config.BATTERY_MAX_POWER,
         round_trip_efficiency=Config.BATTERY_EFFICIENCY,
         cycle_cost_per_kwh=Config.BATTERY_CYCLE_COST,
+        battery_cost_rub=Config.BATTERY_COST_RUB,   # ← ИСПРАВЛЕНО: было дефолт 3M вместо 45M
+        tariff_night=Config.TARIFF_NIGHT,
+        tariff_half_peak=Config.TARIFF_HALF_PEAK,
+        tariff_peak=Config.TARIFF_PEAK,
     )
 
     # ── 12. Экспорт лучшей Keras-модели ──────────────────────────────────────

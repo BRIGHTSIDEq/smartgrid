@@ -263,6 +263,9 @@ def compare_strategies(
     round_trip_efficiency: float = 0.95,
     cycle_cost_per_kwh: float = 0.06,
     battery_cost_rub: float = 3_000_000.0,
+    tariff_night: float = 1.80,       # руб/кВт·ч — ночная зона (23–07)
+    tariff_half_peak: float = 4.20,   # руб/кВт·ч — дневная зона
+    tariff_peak: float = 6.50,        # руб/кВт·ч — пиковая зона (10–17, 21–23 будни)
 ) -> Dict[str, StorageResult]:
     """
     Три стратегии с разным целевым SOC.
@@ -292,6 +295,9 @@ def compare_strategies(
             min_soc=min_soc,
             max_soc=max_soc,
             battery_cost_rub=battery_cost_rub,
+            tariff_night=tariff_night,
+            tariff_half_peak=tariff_half_peak,
+            tariff_peak=tariff_peak,
             strategy_name=label,
         )
 

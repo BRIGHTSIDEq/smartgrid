@@ -3,24 +3,28 @@
 data/preprocessing.py — Подготовка мультивариантных данных для нейросетей.
 
 ═══════════════════════════════════════════════════════════════════════════════
-ВЕРСИЯ 2 — мультивариантный вход (9 признаков)
+ВЕРСИЯ 3 — мультивариантный вход (11 признаков, было 9)
 
-ПРОБЛЕМА v1: X_train.shape = (N, 48, 1) — только потребление.
-  Нейросети не видели час суток, тариф, температуру — то, что XGBoost
-  получал «бесплатно» через признаки. Это делало сравнение нечестным.
+ИЗМЕНЕНИЯ v3:
+  • hour_norm (линейный) → hour_sin + hour_cos (циклические)
+    Причина: hour/23 создаёт разрыв на границе 23→0. Sin/cos — замкнутый
+    круг без артефакта разрыва. [Ke et al., 2017]
+  • temperature_squared (новый): нелинейная U-образная зависимость от T.
+    При T<15°C потребление растёт (отопление), при T>25°C — растёт снова
+    (кондиционирование). Квадратичный член приближает эту форму.
 
-РЕШЕНИЕ v2: X_train.shape = (N, 48, 9) — все временны́е ковариаты.
-
-СОСТАВ 9 ПРИЗНАКОВ (индексы):
-  0  consumption_scaled   — нормализованное потребление [0, 1]
-  1  hour_norm            — час суток / 23  → [0, 1]
-  2  is_peak_hour         — 0/1
-  3  is_night_hour        — 0/1
-  4  is_weekend           — 0/1
-  5  is_holiday           — 0/1
-  6  temperature_scaled   — нормализованная температура [0, 1]
-  7  tariff_zone_enc      — ночь=0.0 / день=0.5 / пик=1.0
-  8  day_of_year_norm     — (день_года − 1) / 364 → [0, 1]
+СОСТАВ 11 ПРИЗНАКОВ (индексы):
+  0  consumption_scaled    — нормализованное потребление [0, 1]
+  1  hour_sin              — sin(2π·h/24) циклический час
+  2  hour_cos              — cos(2π·h/24) циклический час
+  3  is_peak_hour          — 0/1
+  4  is_night_hour         — 0/1
+  5  is_weekend            — 0/1
+  6  is_holiday            — 0/1
+  7  temperature_scaled    — нормализованная температура [0, 1]
+  8  temperature_squared   — T²/max(T²) нелинейный тепловой признак [0, 1]
+  9  tariff_zone_enc       — ночь=0.0 / день=0.5 / пик=1.0
+  10 day_of_year_norm      — (день_года − 1) / 364 → [0, 1]
 
 НОРМАЛИЗАЦИЯ (без утечки):
   consumption : MinMaxScaler обучается ТОЛЬКО на train
@@ -43,7 +47,7 @@ from sklearn.preprocessing import MinMaxScaler
 logger = logging.getLogger("smart_grid.data.preprocessing")
 
 # Число признаков — константа для других модулей
-N_FEATURES: int = 9
+N_FEATURES: int = 11   # было 9: добавлены hour_sin, hour_cos, temperature_squared
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -68,7 +72,7 @@ def _encode_tariff_zone(df: pd.DataFrame) -> np.ndarray:
     weekday = df["weekday"].values if "weekday" in df.columns else np.zeros(len(df))
     enc = np.full(len(df), 0.5, dtype=np.float32)
     night = (hours < 7) | (hours >= 23)
-    peak = ((hours >= 10) & (hours < 17) | (hours >= 21) & (hours < 23)) & (weekday < 5)
+    peak = (((hours >= 10) & (hours < 17)) | ((hours >= 21) & (hours < 23))) & (weekday < 5)
     enc[night] = 0.0
     enc[peak] = 1.0
     return enc
@@ -80,16 +84,19 @@ def _build_feature_matrix(
     temp_scaler: MinMaxScaler,
 ) -> np.ndarray:
     """
-    Собирает матрицу (N, 9) из DataFrame.
+    Собирает матрицу (N, 11) из DataFrame.
+
+    v3: hour_norm заменён на hour_sin + hour_cos;
+        добавлен temperature_squared.
 
     Parameters
     ----------
-    cons_scaler : обученный MinMaxScaler для потребления
-    temp_scaler : обученный MinMaxScaler для температуры
+    cons_scaler : обученный MinMaxScaler для потребления (fit только на train)
+    temp_scaler : обученный MinMaxScaler для температуры (fit только на train)
 
     Returns
     -------
-    np.ndarray shape=(N, 9), dtype=float32
+    np.ndarray shape=(N, 11), dtype=float32
     """
     N = len(df)
 
@@ -98,10 +105,14 @@ def _build_feature_matrix(
         df["consumption"].values.reshape(-1, 1)
     ).flatten().astype(np.float32)
 
-    # 1. Hour normalized [0, 1]
-    hour_norm = (df["hour"].values / 23.0).astype(np.float32)
+    # 1–2. Циклическое кодирование часа: sin/cos вместо hour/23
+    # hour/23 создаёт разрыв: часы 23 и 0 кажутся «далёкими» (1.0 vs 0.0).
+    # Sin/cos обеспечивают непрерывность: f(0) ≈ f(24). [Ke et al., 2017]
+    hour_vals = df["hour"].values.astype(np.float32)
+    hour_sin = np.sin(2 * np.pi * hour_vals / 24).astype(np.float32)
+    hour_cos = np.cos(2 * np.pi * hour_vals / 24).astype(np.float32)
 
-    # 2–5. Бинарные признаки
+    # 3–6. Бинарные признаки
     is_peak = df["is_peak_hour"].values.astype(np.float32) \
         if "is_peak_hour" in df.columns else np.zeros(N, dtype=np.float32)
     is_night = df["is_night_hour"].values.astype(np.float32) \
@@ -109,7 +120,7 @@ def _build_feature_matrix(
     is_weekend = df["is_weekend"].values.astype(np.float32)
     is_holiday = df["is_holiday"].values.astype(np.float32)
 
-    # 6. Temperature (нормализованная)
+    # 7. Temperature (нормализованная)
     if "temperature" in df.columns:
         temp = temp_scaler.transform(
             df["temperature"].values.reshape(-1, 1)
@@ -117,20 +128,34 @@ def _build_feature_matrix(
     else:
         temp = np.zeros(N, dtype=np.float32)
 
-    # 7. Tariff zone encoded
+    # 8. Temperature² — нелинейный тепловой признак
+    # Если generator v3 уже посчитал — используем напрямую.
+    # Иначе считаем здесь (обратная совместимость со старым generator v2).
+    if "temperature_squared" in df.columns:
+        temp_sq = df["temperature_squared"].values.astype(np.float32)
+    elif "temperature" in df.columns:
+        t_raw = df["temperature"].values.astype(np.float32)
+        t_sq = t_raw ** 2
+        t_sq_max = float(t_sq.max()) + 1e-8
+        temp_sq = (t_sq / t_sq_max).astype(np.float32)
+    else:
+        temp_sq = np.zeros(N, dtype=np.float32)
+
+    # 9. Tariff zone encoded
     tariff_enc = _encode_tariff_zone(df)
 
-    # 8. Day of year normalized [0, 1]
+    # 10. Day of year normalized [0, 1]
     if "day_of_year" in df.columns:
         doy_norm = (df["day_of_year"].values.astype(np.float32)) / 364.0
     else:
         doy_norm = np.zeros(N, dtype=np.float32)
 
-    # Сборка (N, 9)
+    # Сборка (N, 11): порядок индексов фиксирован (документация выше)
     return np.stack(
-        [cons, hour_norm, is_peak, is_night, is_weekend, is_holiday, temp, tariff_enc, doy_norm],
+        [cons, hour_sin, hour_cos, is_peak, is_night,
+         is_weekend, is_holiday, temp, temp_sq, tariff_enc, doy_norm],
         axis=1,
-    )  # (N, 9)
+    )  # (N, 11)
 
 
 def _make_multivariate_windows(
@@ -240,7 +265,7 @@ def prepare_data(
         len(X_train), len(X_val), len(X_test),
     )
     logger.info(
-        "✅ X_train.shape: %s  Y_train.shape: %s  (n_features=%d)",
+        "✅ X_train.shape: %s  Y_train.shape: %s  (n_features=%d, v3: +hour_sin/cos +temp_sq)",
         X_train.shape, Y_train.shape, N_FEATURES,
     )
 

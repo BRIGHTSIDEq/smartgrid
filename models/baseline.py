@@ -97,6 +97,10 @@ def build_xgboost(
         n_jobs=-1,
         verbosity=0,
         tree_method="hist",
-        early_stopping_rounds=20,   # остановится если нет улучшений 20 раундов
+        # early_stopping_rounds: УБРАН.
+        # Причина: при multi-output (24 targets) eval_metric усредняется по 24 головам →
+        # шумный сигнал val_loss → преждевременная остановка на ~50-100 деревьях вместо 500.
+        # При 528 фичах и 50 деревьях = underfitting. С 500 деревьями + lr=0.05 модель
+        # уже достаточно регуляризована через shrinkage (ранняя остановка не нужна).
     )
     return FlattenWrapper(model, name="XGBoost")

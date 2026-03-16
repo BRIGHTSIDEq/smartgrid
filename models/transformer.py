@@ -152,15 +152,7 @@ class RevINDenorm(tf.keras.layers.Layer):
         self.affine = affine
 
     def build(self, input_shapes: list) -> None:
-        # input_shapes[0] = pred shape, остальные не нужны для весов
-        if self.affine:
-            # gamma/beta первого признака (consumption) из RevINNorm
-            self.gamma = self.add_weight(
-                shape=(1,), initializer="ones",  name="denorm_gamma"
-            )
-            self.beta = self.add_weight(
-                shape=(1,), initializer="zeros", name="denorm_beta"
-            )
+        # Нет обучаемых весов — денормализация использует статистику из RevINNorm
         super().build(input_shapes)
 
     def call(self, inputs: list) -> tf.Tensor:
@@ -168,25 +160,27 @@ class RevINDenorm(tf.keras.layers.Layer):
         Parameters
         ----------
         inputs : [pred, mean, std]
-          pred : (B, forecast_horizon) — прогноз в нормализованном пространстве
+          pred : (B, forecast_horizon) — прогноз в RevIN-нормализованном пространстве
           mean : (B, 1, C)             — среднее из RevINNorm
           std  : (B, 1, C)             — ст. откл. из RevINNorm
 
         Returns
         -------
-        output : (B, forecast_horizon) — прогноз в исходном масштабе
+        output : (B, forecast_horizon) — прогноз в исходном (MinMax) масштабе
+
+        ИСПРАВЛЕНИЕ: убраны отдельные denorm_gamma/denorm_beta.
+        Инверсия RevINNorm: output = pred * std[0] + mean[0].
+        Отдельные gamma/beta не нужны — это не обращение аффинного преобразования,
+        это просто денормализация по сохранённым instance-statistics.
+        Предыдущая версия обучала независимые веса, не связанные с RevINNorm.gamma/beta,
+        что приводило к некорректной денормализации после нескольких эпох обучения.
         """
         pred, mean, std = inputs
-        # Берём статистику только первого признака (consumption, idx=0)
-        m = mean[:, 0, 0]   # (B,)
-        s = std[:, 0, 0]    # (B,)
-        if self.affine:
-            # Обратное аффинное: (pred - beta) / gamma
-            pred = (pred - self.beta) / (self.gamma + self.eps)
-        # Денормализация: pred * std + mean, broadcast (B,) → (B, horizon)
-        m = tf.expand_dims(m, axis=1)   # (B, 1)
-        s = tf.expand_dims(s, axis=1)   # (B, 1)
-        return pred * s + m
+        m = mean[:, 0, 0]              # (B,) — mean consumption этого окна
+        s = std[:, 0, 0]               # (B,) — std consumption этого окна
+        m = tf.expand_dims(m, axis=1)  # (B, 1)
+        s = tf.expand_dims(s, axis=1)  # (B, 1)
+        return pred * s + m            # broadcast (B, 1) × (B, 24) → (B, 24)
 
     def get_config(self) -> dict:
         return {**super().get_config(), "eps": self.eps, "affine": self.affine}

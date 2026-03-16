@@ -3,17 +3,15 @@
 data/preprocessing.py — Подготовка мультивариантных данных для нейросетей.
 
 ═══════════════════════════════════════════════════════════════════════════════
-ВЕРСИЯ 3 — мультивариантный вход (11 признаков, было 9)
+ВЕРСИЯ 4 — расширение до 15 признаков (generator v4)
 
-ИЗМЕНЕНИЯ v3:
-  • hour_norm (линейный) → hour_sin + hour_cos (циклические)
-    Причина: hour/23 создаёт разрыв на границе 23→0. Sin/cos — замкнутый
-    круг без артефакта разрыва. [Ke et al., 2017]
-  • temperature_squared (новый): нелинейная U-образная зависимость от T.
-    При T<15°C потребление растёт (отопление), при T>25°C — растёт снова
-    (кондиционирование). Квадратичный член приближает эту форму.
+ИЗМЕНЕНИЯ v4:
+  • Добавлены 4 новых признака из generator v4:
+    humidity, wind_speed, rolling_mean_24h, rolling_std_24h
+  • Новые скалеры: humidity_scaler, wind_scaler, rolling_std_scaler
+    (fit ТОЛЬКО на train — без утечки в val/test)
 
-СОСТАВ 11 ПРИЗНАКОВ (индексы):
+СОСТАВ 15 ПРИЗНАКОВ (индексы):
   0  consumption_scaled    — нормализованное потребление [0, 1]
   1  hour_sin              — sin(2π·h/24) циклический час
   2  hour_cos              — cos(2π·h/24) циклический час
@@ -25,20 +23,34 @@ data/preprocessing.py — Подготовка мультивариантных 
   8  temperature_squared   — T²/max(T²) нелинейный тепловой признак [0, 1]
   9  tariff_zone_enc       — ночь=0.0 / день=0.5 / пик=1.0
   10 day_of_year_norm      — (день_года − 1) / 364 → [0, 1]
+  11 humidity_scaled       — нормализованная влажность [0, 1]
+  12 wind_speed_scaled     — нормализованная скорость ветра [0, 1]
+  13 rolling_mean_scaled   — rolling_mean_24h через cons_scaler (та же шкала)
+  14 rolling_std_scaled    — rolling_std_24h через rolling_std_scaler
+
+ЗАМЕТКА О rolling_mean_24h И УТЕЧКЕ:
+  rolling вычисляется в generator на ПОЛНОМ df ДО сплита.
+  Это корректно: rolling(24) — окно назад. Значение в момент t использует
+  [t-23..t]. Первые строки val используют хвост train как историю — ровно
+  те данные, что были бы известны в реальном времени.
+  Утечка была бы только при rolling(center=True).
+  Нормализация rolling_mean через cons_scaler: единицы одинаковые (кВт·ч).
+  Нормализация rolling_std через отдельный rolling_std_scaler: std имеет
+  другой диапазон — не [min_cons, max_cons], а [0, ~std_max].
 
 НОРМАЛИЗАЦИЯ (без утечки):
-  consumption : MinMaxScaler обучается ТОЛЬКО на train
-  temperature : MinMaxScaler обучается ТОЛЬКО на train
-  Остальные  : детерминированные преобразования (нет обучения)
-
-ЦЕЛЕВАЯ ПЕРЕМЕННАЯ Y:
-  Только scaled consumption — прогнозируем один ряд.
-  inverse_scale() работает как раньше через consumption-scaler.
+  consumption       : MinMaxScaler fit на train
+  temperature       : MinMaxScaler fit на train
+  humidity          : MinMaxScaler fit на train
+  wind_speed        : MinMaxScaler fit на train
+  rolling_std_24h   : MinMaxScaler fit на train
+  rolling_mean_24h  : cons_scaler (те же единицы, что consumption)
+  Остальные         : детерминированные преобразования
 ═══════════════════════════════════════════════════════════════════════════════
 """
 
 import logging
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -47,7 +59,7 @@ from sklearn.preprocessing import MinMaxScaler
 logger = logging.getLogger("smart_grid.data.preprocessing")
 
 # Число признаков — константа для других модулей
-N_FEATURES: int = 11   # было 9: добавлены hour_sin, hour_cos, temperature_squared
+N_FEATURES: int = 15   # v4: +humidity, +wind_speed, +rolling_mean_24h, +rolling_std_24h
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -82,45 +94,49 @@ def _build_feature_matrix(
     df: pd.DataFrame,
     cons_scaler: MinMaxScaler,
     temp_scaler: MinMaxScaler,
+    humidity_scaler: Optional[MinMaxScaler] = None,
+    wind_scaler: Optional[MinMaxScaler] = None,
+    rolling_std_scaler: Optional[MinMaxScaler] = None,
 ) -> np.ndarray:
     """
-    Собирает матрицу (N, 11) из DataFrame.
+    Собирает матрицу признаков из DataFrame.
 
-    v3: hour_norm заменён на hour_sin + hour_cos;
-        добавлен temperature_squared.
+    v4: расширена до 15 признаков (humidity, wind_speed, rolling_mean_24h,
+        rolling_std_24h).
 
     Parameters
     ----------
-    cons_scaler : обученный MinMaxScaler для потребления (fit только на train)
-    temp_scaler : обученный MinMaxScaler для температуры (fit только на train)
+    cons_scaler         : fit на train consumption
+    temp_scaler         : fit на train temperature
+    humidity_scaler     : fit на train humidity (None → нули, если колонка отсутствует)
+    wind_scaler         : fit на train wind_speed
+    rolling_std_scaler  : fit на train rolling_std_24h
 
     Returns
     -------
-    np.ndarray shape=(N, 11), dtype=float32
+    np.ndarray shape=(N, 15), dtype=float32
     """
     N = len(df)
 
-    # 0. Consumption (нормализованное)
+    # ── 0. Consumption (нормализованное) ──────────────────────────────────────
     cons = cons_scaler.transform(
         df["consumption"].values.reshape(-1, 1)
     ).flatten().astype(np.float32)
 
-    # 1–2. Циклическое кодирование часа: sin/cos вместо hour/23
-    # hour/23 создаёт разрыв: часы 23 и 0 кажутся «далёкими» (1.0 vs 0.0).
-    # Sin/cos обеспечивают непрерывность: f(0) ≈ f(24). [Ke et al., 2017]
+    # ── 1–2. Циклическое кодирование часа ─────────────────────────────────────
     hour_vals = df["hour"].values.astype(np.float32)
     hour_sin = np.sin(2 * np.pi * hour_vals / 24).astype(np.float32)
     hour_cos = np.cos(2 * np.pi * hour_vals / 24).astype(np.float32)
 
-    # 3–6. Бинарные признаки
-    is_peak = df["is_peak_hour"].values.astype(np.float32) \
-        if "is_peak_hour" in df.columns else np.zeros(N, dtype=np.float32)
-    is_night = df["is_night_hour"].values.astype(np.float32) \
+    # ── 3–6. Бинарные признаки ────────────────────────────────────────────────
+    is_peak    = df["is_peak_hour"].values.astype(np.float32)  \
+        if "is_peak_hour"  in df.columns else np.zeros(N, dtype=np.float32)
+    is_night   = df["is_night_hour"].values.astype(np.float32) \
         if "is_night_hour" in df.columns else np.zeros(N, dtype=np.float32)
     is_weekend = df["is_weekend"].values.astype(np.float32)
     is_holiday = df["is_holiday"].values.astype(np.float32)
 
-    # 7. Temperature (нормализованная)
+    # ── 7. Temperature (нормализованная) ──────────────────────────────────────
     if "temperature" in df.columns:
         temp = temp_scaler.transform(
             df["temperature"].values.reshape(-1, 1)
@@ -128,34 +144,76 @@ def _build_feature_matrix(
     else:
         temp = np.zeros(N, dtype=np.float32)
 
-    # 8. Temperature² — нелинейный тепловой признак
-    # Если generator v3 уже посчитал — используем напрямую.
-    # Иначе считаем здесь (обратная совместимость со старым generator v2).
+    # ── 8. Temperature² ───────────────────────────────────────────────────────
     if "temperature_squared" in df.columns:
         temp_sq = df["temperature_squared"].values.astype(np.float32)
     elif "temperature" in df.columns:
         t_raw = df["temperature"].values.astype(np.float32)
-        t_sq = t_raw ** 2
-        t_sq_max = float(t_sq.max()) + 1e-8
-        temp_sq = (t_sq / t_sq_max).astype(np.float32)
+        t_sq  = t_raw ** 2
+        temp_sq = (t_sq / (float(t_sq.max()) + 1e-8)).astype(np.float32)
     else:
         temp_sq = np.zeros(N, dtype=np.float32)
 
-    # 9. Tariff zone encoded
+    # ── 9. Tariff zone encoded ────────────────────────────────────────────────
     tariff_enc = _encode_tariff_zone(df)
 
-    # 10. Day of year normalized [0, 1]
+    # ── 10. Day of year normalized ────────────────────────────────────────────
     if "day_of_year" in df.columns:
         doy_norm = (df["day_of_year"].values.astype(np.float32)) / 364.0
     else:
         doy_norm = np.zeros(N, dtype=np.float32)
 
-    # Сборка (N, 11): порядок индексов фиксирован (документация выше)
+    # ── 11. Humidity (нормализованная через humidity_scaler) ──────────────────
+    # Взаимодействие с температурой (кондиционирование при высокой влажности и жаре).
+    # Скалер fit на train → нет утечки. Если колонки нет → нули (обратная совместимость).
+    if "humidity" in df.columns and humidity_scaler is not None:
+        humidity = humidity_scaler.transform(
+            df["humidity"].values.reshape(-1, 1)
+        ).flatten().astype(np.float32)
+    else:
+        humidity = np.zeros(N, dtype=np.float32)
+
+    # ── 12. Wind speed (нормализованная через wind_scaler) ────────────────────
+    # Взаимодействие с температурой (теплопотери на ветру в мороз).
+    if "wind_speed" in df.columns and wind_scaler is not None:
+        wind = wind_scaler.transform(
+            df["wind_speed"].values.reshape(-1, 1)
+        ).flatten().astype(np.float32)
+    else:
+        wind = np.zeros(N, dtype=np.float32)
+
+    # ── 13. Rolling mean 24h (нормализованная через cons_scaler) ──────────────
+    # rolling_mean_24h имеет те же единицы что consumption → cons_scaler корректен.
+    # Значение: среднее потребление за последние 24ч — «текущий уровень нагрузки».
+    # Вычислена в generator на полном df с backward-only окном → утечки нет.
+    if "rolling_mean_24h" in df.columns:
+        rolling_mean = cons_scaler.transform(
+            df["rolling_mean_24h"].values.reshape(-1, 1)
+        ).flatten().clip(0.0, 1.0).astype(np.float32)
+    else:
+        rolling_mean = cons.copy()   # fallback: само потребление
+
+    # ── 14. Rolling std 24h (нормализованная через rolling_std_scaler) ────────
+    # rolling_std имеет другой диапазон чем consumption → отдельный скалер.
+    # Значение: волатильность потребления за 24ч — «нестабильность нагрузки».
+    if "rolling_std_24h" in df.columns and rolling_std_scaler is not None:
+        rolling_std = rolling_std_scaler.transform(
+            df["rolling_std_24h"].values.reshape(-1, 1)
+        ).flatten().clip(0.0, 1.0).astype(np.float32)
+    elif "rolling_std_24h" in df.columns:
+        # Fallback без скалера: нормируем на max
+        raw_std = df["rolling_std_24h"].values.astype(np.float32)
+        rolling_std = (raw_std / (float(raw_std.max()) + 1e-8)).astype(np.float32)
+    else:
+        rolling_std = np.zeros(N, dtype=np.float32)
+
+    # ── Сборка (N, 15) ────────────────────────────────────────────────────────
     return np.stack(
         [cons, hour_sin, hour_cos, is_peak, is_night,
-         is_weekend, is_holiday, temp, temp_sq, tariff_enc, doy_norm],
+         is_weekend, is_holiday, temp, temp_sq, tariff_enc, doy_norm,
+         humidity, wind, rolling_mean, rolling_std],
         axis=1,
-    )  # (N, 11)
+    ).astype(np.float32)  # (N, 15)
 
 
 def _make_multivariate_windows(
@@ -203,41 +261,43 @@ def prepare_data(
     val_ratio: float = 0.15,
 ) -> Dict[str, Any]:
     """
-    Полный пайплайн подготовки мультивариантных данных.
+    Полный пайплайн подготовки мультивариантных данных (v4: 15 признаков).
 
     Шаги:
     1. Хронологическое разделение train / val / test
-    2. Нормализация consumption и temperature (fit только на train)
-    3. Сборка матрицы признаков (N, 9)
-    4. Нарезка скользящими окнами → (samples, history, 9)
+    2. Fit скалеров ТОЛЬКО на train: cons, temp, humidity, wind, rolling_std
+    3. Сборка матриц признаков (N, 15) для каждого сплита
+    4. Нарезка скользящими окнами → (samples, history, 15)
 
     Returns
     -------
     dict с ключами:
-        X_train, Y_train  — (N_tr, T, 9), (N_tr, H)
-        X_val,   Y_val
-        X_test,  Y_test
-        scaler            — MinMaxScaler для consumption (для inverse_scale)
-        temp_scaler       — MinMaxScaler для temperature
-        n_features        — 9
-        raw_train/val/test — сырые ряды потребления
-        scaled_train/val/test — нормализованные ряды потребления
+        X_train, Y_train  — тензоры обучения
+        X_val,   Y_val    — тензоры валидации
+        X_test,  Y_test   — тензоры теста
+        scaler            — MinMaxScaler consumption (для inverse_scale)
+        temp_scaler       — MinMaxScaler temperature
+        humidity_scaler   — MinMaxScaler humidity  (None если колонки нет)
+        wind_scaler       — MinMaxScaler wind_speed (None если колонки нет)
+        rolling_std_scaler— MinMaxScaler rolling_std_24h (None если нет)
+        n_features        — 15
+        raw_*/scaled_*    — сырые и нормализованные ряды потребления
         train_end_idx, val_end_idx, test_start_idx
         timestamps        — np.ndarray дат
     """
-    total = len(df)
-    train_end = int(total * train_ratio)
-    val_end = int(total * (train_ratio + val_ratio))
+    total      = len(df)
+    train_end  = int(total * train_ratio)
+    val_end    = int(total * (train_ratio + val_ratio))
 
-    df_train = df.iloc[:train_end]
-    df_val = df.iloc[train_end:val_end]
-    df_test = df.iloc[val_end:]
+    df_train = df.iloc[:train_end].copy()
+    df_val   = df.iloc[train_end:val_end].copy()
+    df_test  = df.iloc[val_end:].copy()
 
     raw_train = df_train["consumption"].values.astype(np.float32)
-    raw_val = df_val["consumption"].values.astype(np.float32)
-    raw_test = df_test["consumption"].values.astype(np.float32)
+    raw_val   = df_val["consumption"].values.astype(np.float32)
+    raw_test  = df_test["consumption"].values.astype(np.float32)
 
-    # ── Обучаем скалеры ТОЛЬКО на train ──────────────────────────────────────
+    # ── Скалеры: fit ТОЛЬКО на train ─────────────────────────────────────────
     cons_scaler = MinMaxScaler(feature_range=(0, 1))
     cons_scaler.fit(raw_train.reshape(-1, 1))
 
@@ -245,28 +305,59 @@ def prepare_data(
     if "temperature" in df.columns:
         temp_scaler.fit(df_train["temperature"].values.reshape(-1, 1))
 
-    # Нормализованные ряды потребления (для обратного масштабирования и BCE)
-    scaled_train = cons_scaler.transform(raw_train.reshape(-1, 1)).flatten()
-    scaled_val = cons_scaler.transform(raw_val.reshape(-1, 1)).flatten()
-    scaled_test = cons_scaler.transform(raw_test.reshape(-1, 1)).flatten()
+    # humidity_scaler: fit на train, transform val/test
+    humidity_scaler: Optional[MinMaxScaler] = None
+    if "humidity" in df.columns:
+        humidity_scaler = MinMaxScaler(feature_range=(0, 1))
+        humidity_scaler.fit(df_train["humidity"].values.reshape(-1, 1))
 
-    # ── Матрицы признаков (N, 9) ──────────────────────────────────────────────
-    feat_train = _build_feature_matrix(df_train, cons_scaler, temp_scaler)
-    feat_val = _build_feature_matrix(df_val, cons_scaler, temp_scaler)
-    feat_test = _build_feature_matrix(df_test, cons_scaler, temp_scaler)
+    # wind_scaler: fit на train
+    wind_scaler: Optional[MinMaxScaler] = None
+    if "wind_speed" in df.columns:
+        wind_scaler = MinMaxScaler(feature_range=(0, 1))
+        wind_scaler.fit(df_train["wind_speed"].values.reshape(-1, 1))
+
+    # rolling_std_scaler: std имеет диапазон [0, ~std_max], отличный от consumption
+    rolling_std_scaler: Optional[MinMaxScaler] = None
+    if "rolling_std_24h" in df.columns:
+        rolling_std_scaler = MinMaxScaler(feature_range=(0, 1))
+        rolling_std_scaler.fit(df_train["rolling_std_24h"].values.reshape(-1, 1))
+
+    # Нормализованные ряды потребления (для inverse_scale и storage)
+    scaled_train = cons_scaler.transform(raw_train.reshape(-1, 1)).flatten()
+    scaled_val   = cons_scaler.transform(raw_val.reshape(-1,   1)).flatten()
+    scaled_test  = cons_scaler.transform(raw_test.reshape(-1,  1)).flatten()
+
+    # ── Матрицы признаков (N, 15) ─────────────────────────────────────────────
+    _scaler_kwargs = dict(
+        humidity_scaler    = humidity_scaler,
+        wind_scaler        = wind_scaler,
+        rolling_std_scaler = rolling_std_scaler,
+    )
+    feat_train = _build_feature_matrix(df_train, cons_scaler, temp_scaler, **_scaler_kwargs)
+    feat_val   = _build_feature_matrix(df_val,   cons_scaler, temp_scaler, **_scaler_kwargs)
+    feat_test  = _build_feature_matrix(df_test,  cons_scaler, temp_scaler, **_scaler_kwargs)
+
+    actual_n_features = feat_train.shape[1]   # 15 если все колонки есть, иначе меньше
 
     # ── Скользящие окна ───────────────────────────────────────────────────────
     X_train, Y_train = _make_multivariate_windows(feat_train, history_length, forecast_horizon)
-    X_val, Y_val = _make_multivariate_windows(feat_val, history_length, forecast_horizon)
-    X_test, Y_test = _make_multivariate_windows(feat_test, history_length, forecast_horizon)
+    X_val,   Y_val   = _make_multivariate_windows(feat_val,   history_length, forecast_horizon)
+    X_test,  Y_test  = _make_multivariate_windows(feat_test,  history_length, forecast_horizon)
 
     logger.info(
-        "Данные подготовлены | train=%d val=%d test=%d",
-        len(X_train), len(X_val), len(X_test),
+        "Данные подготовлены v4 | train=%d val=%d test=%d | n_features=%d",
+        len(X_train), len(X_val), len(X_test), actual_n_features,
     )
     logger.info(
-        "✅ X_train.shape: %s  Y_train.shape: %s  (n_features=%d, v3: +hour_sin/cos +temp_sq)",
-        X_train.shape, Y_train.shape, N_FEATURES,
+        "✅ X_train.shape: %s  Y_train.shape: %s",
+        X_train.shape, Y_train.shape,
+    )
+    logger.info(
+        "   Скалеры: humidity=%s  wind=%s  rolling_std=%s",
+        "✓" if humidity_scaler    is not None else "✗ (нет колонки)",
+        "✓" if wind_scaler        is not None else "✗ (нет колонки)",
+        "✓" if rolling_std_scaler is not None else "✗ (нет колонки)",
     )
 
     return {
@@ -277,15 +368,18 @@ def prepare_data(
         # Сырые и нормализованные ряды (для inverse_scale и storage)
         "raw_train": raw_train, "raw_val": raw_val, "raw_test": raw_test,
         "scaled_train": scaled_train, "scaled_val": scaled_val, "scaled_test": scaled_test,
-        # Скалеры
-        "scaler": cons_scaler,
-        "temp_scaler": temp_scaler,
+        # Скалеры (все нужны для сохранения и инференса)
+        "scaler":              cons_scaler,
+        "temp_scaler":         temp_scaler,
+        "humidity_scaler":     humidity_scaler,
+        "wind_scaler":         wind_scaler,
+        "rolling_std_scaler":  rolling_std_scaler,
         # Мета
-        "n_features": N_FEATURES,
-        "train_end_idx": train_end,
-        "val_end_idx": val_end,
-        "test_start_idx": val_end + history_length,
-        "timestamps": df["timestamp"].values,
+        "n_features":        actual_n_features,
+        "train_end_idx":     train_end,
+        "val_end_idx":       val_end,
+        "test_start_idx":    val_end + history_length,
+        "timestamps":        df["timestamp"].values,
     }
 
 

@@ -66,8 +66,8 @@ def main() -> None:
     logger.info("=" * 70)
 
     # ── 1. Режим (раскомментируй нужный) ─────────────────────────────────────
-    Config.set_fast_mode()        # 365 дней, 150 эпох — быстрая отладка
-    # Config.set_optimal_mode()       # 365 дней, 200 эпох — по умолчанию ✅
+    # Config.set_fast_mode()        # 365 дней, 150 эпох — быстрая отладка
+    Config.set_optimal_mode()       # 365 дней, 200 эпох — по умолчанию ✅
     # Config.set_full_mode()          # 365 дней, 300 эпох — финальный запуск
     Config.create_dirs()
 
@@ -78,6 +78,18 @@ def main() -> None:
         households=Config.HOUSEHOLDS,
         start_date=Config.START_DATE,
         seed=Config.SEED,
+        temp_setpoint=Config.GEN_TEMP_SETPOINT,
+        temp_quadratic_coef=Config.GEN_TEMP_QUADRATIC_COEF,
+        humidity_threshold=Config.GEN_HUMIDITY_THRESHOLD,
+        humidity_coef=Config.GEN_HUMIDITY_COEF,
+        wind_temp_threshold=Config.GEN_WIND_TEMP_THRESHOLD,
+        wind_coef=Config.GEN_WIND_COEF,
+        early_bird_frac=Config.GEN_EARLY_BIRD_FRAC,
+        night_owl_frac=Config.GEN_NIGHT_OWL_FRAC,
+        ar_phi=Config.GEN_AR_PHI,
+        ar_sigma=Config.GEN_AR_SIGMA,
+        seasonal_winter_boost=Config.GEN_SEASONAL_WINTER_BOOST,
+        seasonal_summer_dip=Config.GEN_SEASONAL_SUMMER_DIP,
     )
     validate_generated_data(df)
     Config.print_summary()
@@ -295,6 +307,8 @@ def main() -> None:
         tariff_night=Config.TARIFF_NIGHT,
         tariff_half_peak=Config.TARIFF_HALF_PEAK,
         tariff_peak=Config.TARIFF_PEAK,
+        demand_charge_rub_per_kw_month=Config.DEMAND_CHARGE_RUB_PER_KW_MONTH,
+        annual_om_share=Config.BATTERY_OM_SHARE,
     )
     plot_storage_result(storage_result, sample_forecast, plots_dir=Config.PLOTS_DIR)
     compare_strategies(
@@ -307,6 +321,8 @@ def main() -> None:
         tariff_night=Config.TARIFF_NIGHT,
         tariff_half_peak=Config.TARIFF_HALF_PEAK,
         tariff_peak=Config.TARIFF_PEAK,
+        demand_charge_rub_per_kw_month=Config.DEMAND_CHARGE_RUB_PER_KW_MONTH,
+        annual_om_share=Config.BATTERY_OM_SHARE,
     )
 
     # ── 12. Экспорт лучшей Keras-модели ──────────────────────────────────────

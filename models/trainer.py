@@ -144,25 +144,17 @@ class ModelTrainer:
 
     def _train_sklearn(self, data: Dict[str, Any]) -> None:
         """
-        Для sklearn-моделей — просто fit().
-        eval_set для XGBoost убран: early_stopping_rounds удалён из baseline.py
-        (причина: multi-output усредняет 24 eval_metric → шумный сигнал → premat. stop).
+        Для sklearn/xgboost моделей — делегируем в wrapper.fit().
+        FlattenWrapper и LagFeaturesWrapper имеют единый интерфейс fit(X, Y).
+        Никакой XGBoost-специфичной логики здесь нет — она инкапсулирована
+        в соответствующих wrapper-классах из baseline.py.
         """
         try:
-            import xgboost as xgb
-            model_inner = getattr(self.model, "estimator", self.model)
-
-            if isinstance(model_inner, xgb.XGBRegressor):
-                X_tr = data["X_train"].reshape(data["X_train"].shape[0], -1)
-                Y_tr = data["Y_train"]
-                model_inner.fit(X_tr, Y_tr, verbose=False)
-                logger.info("XGBoost обучен")
-            else:
-                self.model.fit(
-                    data["X_train"], data["Y_train"],
-                    X_val=data.get("X_val"),
-                    Y_val=data.get("Y_val"),
-                )
+            self.model.fit(
+                data["X_train"], data["Y_train"],
+                X_val=data.get("X_val"),
+                Y_val=data.get("Y_val"),
+            )
         except Exception as exc:
             logger.error("Ошибка при обучении %s: %s", self.model_name, exc)
             raise

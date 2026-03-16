@@ -15,7 +15,7 @@ class Config:
     START_DATE: str = "2024-01-01"
 
     # ── Признаки ─────────────────────────────────────────────────────────────
-    N_FEATURES: int = 11           # v3: +hour_sin, +hour_cos, +temperature_squared
+    N_FEATURES: int = 15           # v4: +humidity, +wind_speed, +rolling_mean_24h, +rolling_std_24h
 
     # ── Временные окна ────────────────────────────────────────────────────────
     HISTORY_LENGTH: int = 48
@@ -30,19 +30,28 @@ class Config:
     # ── Обучение (общее) ──────────────────────────────────────────────────────
     EPOCHS: int = 200
     BATCH_SIZE: int = 32
-    PATIENCE: int = 25
-    LR_PATIENCE: int = 10
+    # v6: стратегия EarlyStopping пересмотрена
+    # БЫЛО: PATIENCE=40, MIN_DELTA=1e-4 — плохая пара.
+    #   val_loss на MSE [0,1] естественно колеблется ±3e-4 между эпохами.
+    #   min_delta=1e-4 < 3e-4 → каждое случайное колебание считается прогрессом
+    #   → patience сбрасывается слишком часто → модель учится 200 эпох до overfitting.
+    # СТАЛО: MIN_DELTA=0.0 + PATIENCE=20 — строгий и быстрый минимум.
+    #   MIN_DELTA=0.0: принимаем любое улучшение, даже 1e-8 → не пропускаем настоящий минимум.
+    #   PATIENCE=20: если 20 эпох подряд нет улучшения вообще → останавливаемся.
+    #   Итог: чекпоинт = истинный минимум val_loss, не случайная флуктуация.
+    PATIENCE: int = 20               # v6: было 40
+    LR_PATIENCE: int = 8             # v6: было 10 — ReduceLR срабатывает раньше
     LR_FACTOR: float = 0.5
-    MIN_DELTA: float = 1e-5      # мин. улучшение для EarlyStopping
+    MIN_DELTA: float = 0.0           # v6: было 1e-4 — принимаем любое улучшение
 
     # ── LSTM ──────────────────────────────────────────────────────────────────
-    LSTM_UNITS_1: int = 256
-    LSTM_UNITS_2: int = 128
-    LSTM_UNITS_3: int = 64
+    LSTM_UNITS_1: int = 128          # v5: снижено (было 256) — 128/64 под ~6100 сэмплов
+    LSTM_UNITS_2: int = 64           # v5: снижено (было 128)
+    LSTM_UNITS_3: int = 64           # не используется в v5, оставлен для совместимости
     DROPOUT_RATE: float = 0.20
-    LSTM_LEARNING_RATE: float = 3e-4        # v4: CosineDecay начинает высоко, затем убывает
-    LSTM_ATTN_HEADS: int = 4                 # v4: Temporal Attention heads
-    LSTM_USE_COSINE_DECAY: bool = True       # v4: CosineDecay LR schedule
+    LSTM_LEARNING_RATE: float = 3e-4         # v5: 3e-4 (1e-3 насыщает forget-gate в LSTM+Adam)
+    LSTM_ATTN_HEADS: int = 4                 # Temporal Attention heads
+    LSTM_USE_COSINE_DECAY: bool = False      # v5: ОТКЛЮЧЁН (несовместим с EarlyStopping)
 
     # ── Transformer ───────────────────────────────────────────────────────────
     TRANSFORMER_D_MODEL: int = 128
@@ -55,11 +64,38 @@ class Config:
     PATCHTST_USE_REVIN: bool = True          # v4: RevIN нормализация
 
     # ── XGBoost ───────────────────────────────────────────────────────────────
-    XGB_N_ESTIMATORS: int = 500          # увеличено с 200 (432 фичи требуют больше деревьев)
-    XGB_MAX_DEPTH: int = 5               # снижено с 6 (меньше переобучения на 432 фичах)
+    XGB_N_ESTIMATORS: int = 500
+    XGB_MAX_DEPTH: int = 5
     XGB_LR: float = 0.05
     XGB_SUBSAMPLE: float = 0.80
-    XGB_COLSAMPLE: float = 0.40          # снижено: 432×0.4=173 фичи/дерево — эффективнее
+    XGB_COLSAMPLE: float = 0.40
+
+    # ── Генератор данных v4 ────────────────────────────────────────────────────
+    # Температурный отклик (U-кривая)
+    GEN_TEMP_SETPOINT: float = 18.0       # комфортная температура (°C)
+    GEN_TEMP_QUADRATIC_COEF: float = 2.5e-4  # коэф. U-кривой: (T−18)² × 2.5e-4
+                                               # T=−20°C → +36%, T=+38°C → +10%
+
+    # Взаимодействие температура × влажность
+    GEN_HUMIDITY_THRESHOLD: float = 60.0  # % влажности; ниже — эффект близок к нулю
+    GEN_HUMIDITY_COEF: float = 0.30       # max усиление кондиционирования при жаре
+
+    # Взаимодействие температура × ветер
+    GEN_WIND_TEMP_THRESHOLD: float = 10.0  # °C; ниже — ветер усиливает теплопотери
+    GEN_WIND_COEF: float = 0.15            # коэф. log1p(wind_speed) при холоде
+
+    # Типы домохозяйств (фиксированы при Config.SEED → воспроизводимость)
+    GEN_EARLY_BIRD_FRAC: float = 0.28    # «ранние птицы»: пик 6–8ч
+    GEN_NIGHT_OWL_FRAC:  float = 0.20   # «ночные совы»: пик 21–23ч
+    # standard = 1 - early - night = 0.52 → пик 18–20ч
+
+    # Поведенческий AR(1) остаток
+    GEN_AR_PHI: float   = 0.40   # коэффициент AR(1): инерция потребления между часами
+    GEN_AR_SIGMA: float = 0.022  # базовая сигма шума (в часы пик × 1.5)
+
+    # Годовой seasonal drift (sinusoidal)
+    GEN_SEASONAL_WINTER_BOOST: float = 0.15  # зима: +15% к базовому потреблению
+    GEN_SEASONAL_SUMMER_DIP:   float = 0.10  # лето: −10% к базовому потреблению
 
     # ── Батарея ───────────────────────────────────────────────────────────────
     BATTERY_CAPACITY: float = 4_500.0    # 500 хоз-в × 9 кВт·ч/хоз-во
@@ -67,6 +103,8 @@ class Config:
     BATTERY_EFFICIENCY: float = 0.95
     BATTERY_CYCLE_COST: float = 0.06
     BATTERY_COST_RUB: float = 45_000_000.0  # 10 000 руб/кВт·ч × 4500
+    BATTERY_OM_SHARE: float = 0.015          # O&M ~1.5% CAPEX/год
+    DEMAND_CHARGE_RUB_PER_KW_MONTH: float = 950.0
     # Стратегия по умолчанию: умеренная
     BATTERY_MIN_SOC: float = 0.25
     BATTERY_MAX_SOC: float = 0.75
@@ -115,17 +153,17 @@ class Config:
         cls.DAYS = 365                   # ОБЯЗАТЕЛЬНО 365 — иначе seasonal shift (зима≠лето)
         cls.HOUSEHOLDS = 250
         cls.EPOCHS = 120
-        cls.PATIENCE = 18
-        cls.HISTORY_LENGTH = 48
+        cls.PATIENCE = 15            # v6: было 30 — MIN_DELTA=0.0 требует меньше patience
+        cls.LR_PATIENCE = 6          # v6: было 10        cls.HISTORY_LENGTH = 48
         cls.STORAGE_HORIZON = 720
-        # LSTM v4: уменьшаем capacity, атрибуты Attention адаптируются автоматически
-        cls.LSTM_UNITS_1 = 128
-        cls.LSTM_UNITS_2 = 64
-        cls.LSTM_UNITS_3 = 32
+        # LSTM v5: 2 слоя, увеличенный capacity под 15 признаков v4
+        cls.LSTM_UNITS_1 = 96        # v4: было 64 — 64/32 слишком мало для нелинейных данных
+        cls.LSTM_UNITS_2 = 48        # v4: было 32 — key_dim=48//4=12, приемлемо
+        cls.LSTM_UNITS_3 = 48
         cls.LSTM_ATTN_HEADS = 4          # key_dim = 32//4 = 8
         cls.DROPOUT_RATE = 0.25
-        cls.LSTM_LEARNING_RATE = 3e-4
-        cls.LSTM_USE_COSINE_DECAY = True
+        cls.LSTM_LEARNING_RATE = 3e-4    # v5: 3e-4 (1e-3 насыщает forget-gate в LSTM+Adam)
+        cls.LSTM_USE_COSINE_DECAY = False # v5: отключён
         # Transformer v4: малый размер
         cls.TRANSFORMER_D_MODEL = 64
         cls.TRANSFORMER_N_HEADS = 4
@@ -151,17 +189,18 @@ class Config:
         cls.DAYS = 365
         cls.HOUSEHOLDS = 500
         cls.EPOCHS = 200
-        cls.PATIENCE = 25
+        cls.PATIENCE = 20            # v6: было 40 — MIN_DELTA=0.0, строгий минимум
+        cls.LR_PATIENCE = 8          # v6: было 10
         cls.HISTORY_LENGTH = 48
         cls.STORAGE_HORIZON = 720
-        # LSTM v4
-        cls.LSTM_UNITS_1 = 256
-        cls.LSTM_UNITS_2 = 128
+        # LSTM v5: 2 слоя 128/64 — ~120K параметров, соотношение 1:50
+        cls.LSTM_UNITS_1 = 128       # v5: было 256
+        cls.LSTM_UNITS_2 = 64        # v5: было 128
         cls.LSTM_UNITS_3 = 64
         cls.LSTM_ATTN_HEADS = 4          # key_dim = 64//4 = 16
         cls.DROPOUT_RATE = 0.20
-        cls.LSTM_LEARNING_RATE = 3e-4
-        cls.LSTM_USE_COSINE_DECAY = True
+        cls.LSTM_LEARNING_RATE = 3e-4    # v5: 3e-4 (1e-3 насыщает forget-gate в LSTM+Adam)
+        cls.LSTM_USE_COSINE_DECAY = False # v5: отключён
         # Transformer v4
         cls.TRANSFORMER_D_MODEL = 128
         cls.TRANSFORMER_N_HEADS = 8
@@ -190,17 +229,18 @@ class Config:
         cls.DAYS = 730
         cls.HOUSEHOLDS = 500
         cls.EPOCHS = 300
-        cls.PATIENCE = 35
+        cls.PATIENCE = 25            # v6: было 50 — больше данных (730 дней) → чуть больше patience
+        cls.LR_PATIENCE = 8          # v6: было 10
         cls.HISTORY_LENGTH = 72          # 72ч = 3 суток контекста
         cls.STORAGE_HORIZON = 720
-        # LSTM v4
-        cls.LSTM_UNITS_1 = 384
-        cls.LSTM_UNITS_2 = 192
+        # LSTM v5: 730 дней → ~12000 сэмплов, можно чуть больше capacity
+        cls.LSTM_UNITS_1 = 192       # v5: было 384 — соотношение 1:60 при 12K сэмплов
+        cls.LSTM_UNITS_2 = 96
         cls.LSTM_UNITS_3 = 96
         cls.LSTM_ATTN_HEADS = 4          # key_dim = 96//4 = 24
         cls.DROPOUT_RATE = 0.20
-        cls.LSTM_LEARNING_RATE = 3e-4
-        cls.LSTM_USE_COSINE_DECAY = True
+        cls.LSTM_LEARNING_RATE = 3e-4    # v5: 3e-4 (1e-3 насыщает forget-gate в LSTM+Adam)
+        cls.LSTM_USE_COSINE_DECAY = False # v5: отключён
         # Transformer v4
         cls.TRANSFORMER_D_MODEL = 128
         cls.TRANSFORMER_N_HEADS = 8

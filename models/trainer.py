@@ -4,15 +4,13 @@ models/trainer.py — Универсальный тренер моделей.
 
 ИСПРАВЛЕНИЯ v2:
   1. EarlyStopping: добавлен min_delta=Config.MIN_DELTA
-     Причина: без min_delta остановка на изменении 1e-7 (шум оптимизатора),
-     что приводит к преждевременной остановке (31 эпоха вместо 100+).
-
   2. XGBoost: передаём eval_set для early_stopping_rounds
-     Причина: XGBRegressor с early_stopping_rounds требует eval_set
-     при fit(), иначе RuntimeError.
-
   3. plt.show() → plt.savefig() без show() в headless-режиме
-     Причина: plt.show() блокирует выполнение на серверах без дисплея.
+
+ИСПРАВЛЕНИЯ v3 (баги из code review):
+  4. load_keras: добавлен TemporalAttentionBlock в custom_objects.
+     БЫЛО: отсутствовал → ValueError при загрузке любой LSTM-модели.
+     СТАЛО: импортируется из models.lstm и передаётся в custom_objects.
 """
 
 import logging
@@ -93,15 +91,13 @@ class ModelTrainer:
         _has_schedule = False
         try:
             _opt = self.model.optimizer
-            # get_config() всегда возвращает dict с "learning_rate"
-            # Если LR — schedule, его конфиг содержит ключ "class_name"
             _lr_cfg = _opt.get_config().get("learning_rate", None)
             if isinstance(_lr_cfg, dict) and "class_name" in _lr_cfg:
-                _has_schedule = True   # CosineDecay / ExponentialDecay / etc.
+                _has_schedule = True
             elif isinstance(_lr_cfg, tf.keras.optimizers.schedules.LearningRateSchedule):
                 _has_schedule = True
         except Exception:
-            _has_schedule = False  # безопасный fallback — добавляем ReduceLR
+            _has_schedule = False
 
         callbacks: List[tf.keras.callbacks.Callback] = [
             tf.keras.callbacks.EarlyStopping(
@@ -113,7 +109,6 @@ class ModelTrainer:
             ),
         ]
         if not _has_schedule:
-            # Только для flat LR — CosineDecay сам снижает LR, ReduceLR не нужен
             callbacks.append(tf.keras.callbacks.ReduceLROnPlateau(
                 monitor="val_loss",
                 factor=lr_factor,
@@ -164,6 +159,34 @@ class ModelTrainer:
             return self.model.predict(X, verbose=0)
         return self.model.predict(X)
 
+    def mc_predict(
+        self,
+        X: np.ndarray,
+        n_samples: int = 50,
+    ) -> tuple:
+        """
+        Monte Carlo Dropout: n_samples прогонов с training=True.
+
+        Использование:
+            mean, std = trainer.mc_predict(X_test, n_samples=50)
+
+        Требует модель, построенную с mc_dropout=True (v7: параметр сохраняется
+        в логах, но training=True надо передавать явно — что здесь и делается).
+
+        Returns
+        -------
+        mean : np.ndarray shape=(N, horizon)
+        std  : np.ndarray shape=(N, horizon)
+        """
+        if not isinstance(self.model, tf.keras.Model):
+            raise TypeError("mc_predict доступен только для Keras-моделей")
+
+        preds = np.stack(
+            [self.model(X, training=True).numpy() for _ in range(n_samples)],
+            axis=0,
+        )  # (n_samples, N, horizon)
+        return preds.mean(axis=0), preds.std(axis=0)
+
     def evaluate(
         self,
         data: Dict[str, Any],
@@ -203,15 +226,23 @@ class ModelTrainer:
     def load_keras(cls, path: str, model_name: str = "") -> "ModelTrainer":
         try:
             from models.transformer import (
-                PreLNEncoderBlock, SinusoidalPE, Time2Vec, GatedResidualNetwork
+                PreLNEncoderBlock, SinusoidalPE, Time2Vec, GatedResidualNetwork,
             )
+            # ── ИСПРАВЛЕНИЕ v3 ───────────────────────────────────────────────
+            # БЫЛО: TemporalAttentionBlock отсутствовал в custom_objects.
+            # tf.keras.models.load_model() не может восстановить граф LSTM-модели
+            # без явной регистрации кастомных слоёв → ValueError при загрузке.
+            # СТАЛО: импортируем и передаём TemporalAttentionBlock явно.
+            from models.lstm import TemporalAttentionBlock
+            # ────────────────────────────────────────────────────────────────
             model = tf.keras.models.load_model(
                 path,
                 custom_objects={
-                    "PreLNEncoderBlock": PreLNEncoderBlock,
-                    "SinusoidalPE": SinusoidalPE,
-                    "Time2Vec": Time2Vec,
+                    "PreLNEncoderBlock":    PreLNEncoderBlock,
+                    "SinusoidalPE":         SinusoidalPE,
+                    "Time2Vec":             Time2Vec,
                     "GatedResidualNetwork": GatedResidualNetwork,
+                    "TemporalAttentionBlock": TemporalAttentionBlock,  # v3: добавлен
                 },
             )
             trainer = cls(model, model_name or os.path.basename(path))
@@ -233,7 +264,7 @@ def compare_trainers(
     logger.info("\n%s", "=" * 60)
     logger.info("СРАВНЕНИЕ МОДЕЛЕЙ (split=%s)", split.upper())
     logger.info("%s", "=" * 60)
-    logger.info("%-22s %8s %8s %8s %7s", "Модель", "MAE", "RMSE", "MAPE%", "R²")
+    logger.info("%-22s %8s %8s %8s %7s", "Модель", "MAE", "RMSE", "MAPE%", "R2")
     logger.info("%s", "-" * 58)
 
     for trainer in trainers:
@@ -250,6 +281,6 @@ def compare_trainers(
     if results:
         best = min(results, key=lambda k: results[k]["MAE"])
         logger.info("%s", "-" * 58)
-        logger.info("🏆 Лучшая модель по MAE: %s", best)
+        logger.info("Лучшая модель по MAE: %s", best)
 
     return results

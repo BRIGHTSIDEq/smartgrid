@@ -47,7 +47,7 @@ class Config:
     # ── LSTM ──────────────────────────────────────────────────────────────────
     LSTM_UNITS_1: int = 128          # v5: снижено (было 256) — 128/64 под ~6100 сэмплов
     LSTM_UNITS_2: int = 64           # v5: снижено (было 128)
-    LSTM_UNITS_3: int = 64           # не используется в v5, оставлен для совместимости
+    LSTM_UNITS_3: int = 64           # не используется в v7, оставлен для совместимости
     DROPOUT_RATE: float = 0.20
     LSTM_LEARNING_RATE: float = 3e-4         # v5: 3e-4 (1e-3 насыщает forget-gate в LSTM+Adam)
     LSTM_ATTN_HEADS: int = 4                 # Temporal Attention heads
@@ -72,40 +72,37 @@ class Config:
 
     # ── Генератор данных v4 ────────────────────────────────────────────────────
     # Температурный отклик (U-кривая)
-    GEN_TEMP_SETPOINT: float = 18.0       # комфортная температура (°C)
-    GEN_TEMP_QUADRATIC_COEF: float = 2.5e-4  # коэф. U-кривой: (T−18)² × 2.5e-4
-                                               # T=−20°C → +36%, T=+38°C → +10%
+    GEN_TEMP_SETPOINT: float = 18.0
+    GEN_TEMP_QUADRATIC_COEF: float = 2.5e-4
 
     # Взаимодействие температура × влажность
-    GEN_HUMIDITY_THRESHOLD: float = 60.0  # % влажности; ниже — эффект близок к нулю
-    GEN_HUMIDITY_COEF: float = 0.30       # max усиление кондиционирования при жаре
+    GEN_HUMIDITY_THRESHOLD: float = 60.0
+    GEN_HUMIDITY_COEF: float = 0.30
 
     # Взаимодействие температура × ветер
-    GEN_WIND_TEMP_THRESHOLD: float = 10.0  # °C; ниже — ветер усиливает теплопотери
-    GEN_WIND_COEF: float = 0.15            # коэф. log1p(wind_speed) при холоде
+    GEN_WIND_TEMP_THRESHOLD: float = 10.0
+    GEN_WIND_COEF: float = 0.15
 
-    # Типы домохозяйств (фиксированы при Config.SEED → воспроизводимость)
-    GEN_EARLY_BIRD_FRAC: float = 0.28    # «ранние птицы»: пик 6–8ч
-    GEN_NIGHT_OWL_FRAC:  float = 0.20   # «ночные совы»: пик 21–23ч
-    # standard = 1 - early - night = 0.52 → пик 18–20ч
+    # Типы домохозяйств
+    GEN_EARLY_BIRD_FRAC: float = 0.28
+    GEN_NIGHT_OWL_FRAC:  float = 0.20
 
     # Поведенческий AR(1) остаток
-    GEN_AR_PHI: float   = 0.40   # коэффициент AR(1): инерция потребления между часами
-    GEN_AR_SIGMA: float = 0.022  # базовая сигма шума (в часы пик × 1.5)
+    GEN_AR_PHI: float   = 0.40
+    GEN_AR_SIGMA: float = 0.022
 
-    # Годовой seasonal drift (sinusoidal)
-    GEN_SEASONAL_WINTER_BOOST: float = 0.15  # зима: +15% к базовому потреблению
-    GEN_SEASONAL_SUMMER_DIP:   float = 0.10  # лето: −10% к базовому потреблению
+    # Годовой seasonal drift
+    GEN_SEASONAL_WINTER_BOOST: float = 0.15
+    GEN_SEASONAL_SUMMER_DIP:   float = 0.10
 
     # ── Батарея ───────────────────────────────────────────────────────────────
-    BATTERY_CAPACITY: float = 4_500.0    # 500 хоз-в × 9 кВт·ч/хоз-во
-    BATTERY_MAX_POWER: float = 2_250.0   # C-rate=0.5
+    BATTERY_CAPACITY: float = 4_500.0
+    BATTERY_MAX_POWER: float = 2_250.0
     BATTERY_EFFICIENCY: float = 0.95
     BATTERY_CYCLE_COST: float = 0.06
-    BATTERY_COST_RUB: float = 45_000_000.0  # 10 000 руб/кВт·ч × 4500
-    BATTERY_OM_SHARE: float = 0.015          # O&M ~1.5% CAPEX/год
+    BATTERY_COST_RUB: float = 45_000_000.0
+    BATTERY_OM_SHARE: float = 0.015
     DEMAND_CHARGE_RUB_PER_KW_MONTH: float = 950.0
-    # Стратегия по умолчанию: умеренная
     BATTERY_MIN_SOC: float = 0.25
     BATTERY_MAX_SOC: float = 0.75
 
@@ -149,35 +146,42 @@ class Config:
 
     @classmethod
     def set_fast_mode(cls) -> None:
-        """Быстрый режим: 180 дней, ~100 эпох. Для отладки и проверки пайплайна."""
+        """Быстрый режим: 365 дней, ~120 эпох. Для отладки и проверки пайплайна."""
         cls.DAYS = 365                   # ОБЯЗАТЕЛЬНО 365 — иначе seasonal shift (зима≠лето)
         cls.HOUSEHOLDS = 250
         cls.EPOCHS = 120
-        cls.PATIENCE = 15            # v6: было 30 — MIN_DELTA=0.0 требует меньше patience
-        cls.LR_PATIENCE = 6          # v6: было 10        cls.HISTORY_LENGTH = 48
+        cls.PATIENCE = 15                # v6: было 30
+        cls.LR_PATIENCE = 6              # v6: было 10
+        # ── ИСПРАВЛЕНИЕ v7 ──────────────────────────────────────────────────
+        # БЫЛО: cls.LR_PATIENCE = 6  # v6: было 10        cls.HISTORY_LENGTH = 48
+        # cls.HISTORY_LENGTH = 48 была поглощена комментарием предыдущей строки
+        # и никогда не выполнялась. Разнесены на отдельные строки.
+        cls.HISTORY_LENGTH = 48
+        # ────────────────────────────────────────────────────────────────────
         cls.STORAGE_HORIZON = 720
-        # LSTM v5: 2 слоя, увеличенный capacity под 15 признаков v4
-        cls.LSTM_UNITS_1 = 96        # v4: было 64 — 64/32 слишком мало для нелинейных данных
-        cls.LSTM_UNITS_2 = 48        # v4: было 32 — key_dim=48//4=12, приемлемо
+        # LSTM v7: 2 слоя
+        cls.LSTM_UNITS_1 = 96
+        cls.LSTM_UNITS_2 = 48
         cls.LSTM_UNITS_3 = 48
-        cls.LSTM_ATTN_HEADS = 4          # key_dim = 32//4 = 8
+        cls.LSTM_ATTN_HEADS = 4          # key_dim = 48//4 = 12
         cls.DROPOUT_RATE = 0.25
-        cls.LSTM_LEARNING_RATE = 3e-4    # v5: 3e-4 (1e-3 насыщает forget-gate в LSTM+Adam)
-        cls.LSTM_USE_COSINE_DECAY = False # v5: отключён
-        # Transformer v4: малый размер
+        cls.LSTM_LEARNING_RATE = 3e-4
+        cls.LSTM_USE_COSINE_DECAY = False
+        # Transformer
         cls.TRANSFORMER_D_MODEL = 64
         cls.TRANSFORMER_N_HEADS = 4
         cls.TRANSFORMER_N_LAYERS = 2
         cls.TRANSFORMER_DFF = 128
         cls.TRANSFORMER_DROPOUT = 0.20
         cls.TRANSFORMER_LEARNING_RATE = 3e-4
-        cls.TRANSFORMER_STOCHASTIC_DEPTH = 0.05  # меньше при shallow
+        cls.TRANSFORMER_STOCHASTIC_DEPTH = 0.05
         cls.PATCHTST_USE_REVIN = True
         cls.XGB_N_ESTIMATORS = 300
         logging.getLogger("smart_grid").info(
-            "⚡ Fast mode v4: DAYS=%d, EPOCHS=%d | LSTM=%d/%d/%d attn=%dh | "
+            "Fast mode v4: DAYS=%d, EPOCHS=%d, HISTORY=%d | "
+            "LSTM=%d/%d/%d attn=%dh | "
             "Trans d=%d h=%d L=%d sdrop=%.2f | RevIN=%s",
-            cls.DAYS, cls.EPOCHS,
+            cls.DAYS, cls.EPOCHS, cls.HISTORY_LENGTH,
             cls.LSTM_UNITS_1, cls.LSTM_UNITS_2, cls.LSTM_UNITS_3, cls.LSTM_ATTN_HEADS,
             cls.TRANSFORMER_D_MODEL, cls.TRANSFORMER_N_HEADS, cls.TRANSFORMER_N_LAYERS,
             cls.TRANSFORMER_STOCHASTIC_DEPTH, cls.PATCHTST_USE_REVIN,
@@ -189,19 +193,19 @@ class Config:
         cls.DAYS = 365
         cls.HOUSEHOLDS = 500
         cls.EPOCHS = 200
-        cls.PATIENCE = 20            # v6: было 40 — MIN_DELTA=0.0, строгий минимум
+        cls.PATIENCE = 20            # v6: было 40
         cls.LR_PATIENCE = 8          # v6: было 10
         cls.HISTORY_LENGTH = 48
         cls.STORAGE_HORIZON = 720
-        # LSTM v5: 2 слоя 128/64 — ~120K параметров, соотношение 1:50
-        cls.LSTM_UNITS_1 = 128       # v5: было 256
-        cls.LSTM_UNITS_2 = 64        # v5: было 128
+        # LSTM v7: 2 слоя 128/64
+        cls.LSTM_UNITS_1 = 128
+        cls.LSTM_UNITS_2 = 64
         cls.LSTM_UNITS_3 = 64
         cls.LSTM_ATTN_HEADS = 4          # key_dim = 64//4 = 16
         cls.DROPOUT_RATE = 0.20
-        cls.LSTM_LEARNING_RATE = 3e-4    # v5: 3e-4 (1e-3 насыщает forget-gate в LSTM+Adam)
-        cls.LSTM_USE_COSINE_DECAY = False # v5: отключён
-        # Transformer v4
+        cls.LSTM_LEARNING_RATE = 3e-4
+        cls.LSTM_USE_COSINE_DECAY = False
+        # Transformer
         cls.TRANSFORMER_D_MODEL = 128
         cls.TRANSFORMER_N_HEADS = 8
         cls.TRANSFORMER_N_LAYERS = 4
@@ -213,9 +217,10 @@ class Config:
         cls.XGB_N_ESTIMATORS = 500
         cls.XGB_COLSAMPLE = 0.40
         logging.getLogger("smart_grid").info(
-            "🎯 Optimal mode v4: DAYS=%d, EPOCHS=%d, HISTORY=%d | "
-            "LSTM=%d/%d/%d attn=%dh CosineDecay | "
-            "Trans d=%d h=%d L=%d lr=%.0e sdrop=%.2f | RevIN=%s | STORAGE=%dh | BAT=%.0f кВт·ч",
+            "Optimal mode v4: DAYS=%d, EPOCHS=%d, HISTORY=%d | "
+            "LSTM=%d/%d/%d attn=%dh | "
+            "Trans d=%d h=%d L=%d lr=%.0e sdrop=%.2f | RevIN=%s | "
+            "STORAGE=%dh | BAT=%.0f кВт·ч",
             cls.DAYS, cls.EPOCHS, cls.HISTORY_LENGTH,
             cls.LSTM_UNITS_1, cls.LSTM_UNITS_2, cls.LSTM_UNITS_3, cls.LSTM_ATTN_HEADS,
             cls.TRANSFORMER_D_MODEL, cls.TRANSFORMER_N_HEADS, cls.TRANSFORMER_N_LAYERS,
@@ -229,23 +234,23 @@ class Config:
         cls.DAYS = 730
         cls.HOUSEHOLDS = 500
         cls.EPOCHS = 300
-        cls.PATIENCE = 25            # v6: было 50 — больше данных (730 дней) → чуть больше patience
-        cls.LR_PATIENCE = 8          # v6: было 10
+        cls.PATIENCE = 25            # v6: было 50
+        cls.LR_PATIENCE = 8
         cls.HISTORY_LENGTH = 72          # 72ч = 3 суток контекста
         cls.STORAGE_HORIZON = 720
-        # LSTM v5: 730 дней → ~12000 сэмплов, можно чуть больше capacity
-        cls.LSTM_UNITS_1 = 192       # v5: было 384 — соотношение 1:60 при 12K сэмплов
+        # LSTM v7
+        cls.LSTM_UNITS_1 = 192
         cls.LSTM_UNITS_2 = 96
         cls.LSTM_UNITS_3 = 96
         cls.LSTM_ATTN_HEADS = 4          # key_dim = 96//4 = 24
         cls.DROPOUT_RATE = 0.20
-        cls.LSTM_LEARNING_RATE = 3e-4    # v5: 3e-4 (1e-3 насыщает forget-gate в LSTM+Adam)
-        cls.LSTM_USE_COSINE_DECAY = False # v5: отключён
-        # Transformer v4
+        cls.LSTM_LEARNING_RATE = 3e-4
+        cls.LSTM_USE_COSINE_DECAY = False
+        # Transformer
         cls.TRANSFORMER_D_MODEL = 128
         cls.TRANSFORMER_N_HEADS = 8
         cls.TRANSFORMER_N_LAYERS = 4
-        cls.TRANSFORMER_DFF = 512        # 256 → 512 при full
+        cls.TRANSFORMER_DFF = 512
         cls.TRANSFORMER_DROPOUT = 0.20
         cls.TRANSFORMER_LEARNING_RATE = 3e-4
         cls.TRANSFORMER_STOCHASTIC_DEPTH = 0.10
@@ -253,7 +258,7 @@ class Config:
         cls.XGB_N_ESTIMATORS = 800
         cls.XGB_COLSAMPLE = 0.35
         logging.getLogger("smart_grid").info(
-            "🚀 Full mode v4: DAYS=%d, EPOCHS=%d, HISTORY=%d | "
+            "Full mode v4: DAYS=%d, EPOCHS=%d, HISTORY=%d | "
             "LSTM=%d/%d/%d | Trans d=%d h=%d L=%d dff=%d | RevIN=%s",
             cls.DAYS, cls.EPOCHS, cls.HISTORY_LENGTH,
             cls.LSTM_UNITS_1, cls.LSTM_UNITS_2, cls.LSTM_UNITS_3,

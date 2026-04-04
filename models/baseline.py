@@ -43,12 +43,11 @@ XGBoost (LagFeaturesWrapper v4) получал 71 признак из канал
 """
 
 import logging
-from typing import Optional
+from typing import List, Optional
 
 import numpy as np
 from sklearn.linear_model import Ridge
 from sklearn.base import BaseEstimator
-from sklearn.multioutput import MultiOutputRegressor
 import xgboost as xgb
 
 logger = logging.getLogger("smart_grid.models.baseline")
@@ -177,7 +176,11 @@ class LagFeaturesWrapper:
         Y_val: Optional[np.ndarray] = None,
     ) -> "LagFeaturesWrapper":
         X2d = build_lag_features(X_train)
-        self.estimator.fit(X2d, Y_train)
+        if X_val is not None and Y_val is not None:
+            X_val_2d = build_lag_features(X_val)
+            self.estimator.fit(X2d, Y_train, X_val=X_val_2d, Y_val=Y_val)
+        else:
+            self.estimator.fit(X2d, Y_train)
         logger.info(
             "%s обучен | lag-features: %d | Y: %s",
             self.name, X2d.shape[1], str(Y_train.shape),
@@ -260,26 +263,65 @@ def build_xgboost(
                            листья могут быть чуть меньше чем при 71 признаке.
       Соотношение 165:6100 = 1:37 — безопасно при reg_alpha+reg_lambda.
     """
-    base_model = xgb.XGBRegressor(
-        n_estimators=n_estimators,
-        learning_rate=learning_rate,
-        max_depth=max_depth,
-        subsample=subsample,
-        colsample_bytree=colsample_bytree,
-        min_child_weight=min_child_weight,
-        reg_alpha=0.1,
-        reg_lambda=2.0,
-        random_state=seed,
-        n_jobs=1,
-        verbosity=0,
-        tree_method="hist",
-    )
+    class MultiHorizonXGB:
+        """
+        Обучает отдельный XGBRegressor на каждый шаг горизонта.
+        Поддерживает early stopping по валидации для снижения переобучения.
+        """
+        def __init__(self) -> None:
+            self.models: List[xgb.XGBRegressor] = []
+            self.horizon: Optional[int] = None
 
-    multi_model = MultiOutputRegressor(base_model, n_jobs=-1)
+        def _make_estimator(self, random_state_offset: int = 0) -> xgb.XGBRegressor:
+            return xgb.XGBRegressor(
+                n_estimators=n_estimators,
+                learning_rate=learning_rate,
+                max_depth=max_depth,
+                subsample=subsample,
+                colsample_bytree=colsample_bytree,
+                min_child_weight=min_child_weight,
+                reg_alpha=0.1,
+                reg_lambda=2.0,
+                random_state=seed + random_state_offset,
+                n_jobs=1,
+                verbosity=0,
+                tree_method="hist",
+                early_stopping_rounds=50,
+            )
+
+        def fit(
+            self,
+            X_train: np.ndarray,
+            Y_train: np.ndarray,
+            X_val: Optional[np.ndarray] = None,
+            Y_val: Optional[np.ndarray] = None,
+        ) -> "MultiHorizonXGB":
+            self.horizon = Y_train.shape[1]
+            self.models = []
+            use_val = X_val is not None and Y_val is not None
+            for h in range(self.horizon):
+                model = self._make_estimator(random_state_offset=h)
+                if use_val:
+                    model.fit(
+                        X_train, Y_train[:, h],
+                        eval_set=[(X_val, Y_val[:, h])],
+                        verbose=False,
+                    )
+                else:
+                    model.fit(X_train, Y_train[:, h], verbose=False)
+                self.models.append(model)
+            return self
+
+        def predict(self, X: np.ndarray) -> np.ndarray:
+            if not self.models:
+                raise RuntimeError("Модель не обучена: вызовите fit() перед predict().")
+            preds = [m.predict(X) for m in self.models]
+            return np.stack(preds, axis=1).astype(np.float32)
 
     logger.info(
-        "XGBoost v5 (FullLags + RollingAllChannels + MultiOutput) | "
-        "~165 признаков | 24 независимых модели | n_est=%d depth=%d min_cw=%d",
+        "XGBoost v5 (FullLags + RollingAllChannels + MultiHorizon) | "
+        "~165 признаков | 24 независимых модели + val-early-stopping | "
+        "n_est=%d depth=%d min_cw=%d",
         n_estimators, max_depth, min_child_weight,
     )
-    return LagFeaturesWrapper(multi_model, name="XGBoost")
+    return LagFeaturesWrapper(MultiHorizonXGB(), name="XGBoost")

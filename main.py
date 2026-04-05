@@ -81,6 +81,7 @@ def main():
         ev_penetration=Config.GEN_EV_PENETRATION,          # v9
         solar_penetration=Config.GEN_SOLAR_PENETRATION,    # v9
         industrial_loads=Config.GEN_INDUSTRIAL_LOADS,      # v9
+        city_districts=Config.GEN_CITY_DISTRICTS,
     )
     validate_generated_data(df)
     Config.print_summary()

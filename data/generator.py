@@ -95,10 +95,14 @@ def generate_smartgrid_data(
     ev_penetration=0.50,          # v6: 28% → 50%
     solar_penetration=0.22,
     industrial_loads=6,           # v6: 4 → 6
+    city_districts=12,
 ):
     rng = np.random.default_rng(seed)
-    logger.info("Генерация Smart Grid v6: %d дней, %d домохозяйств | EV=%.0f%% Solar=%.0f%%",
-                days, households, ev_penetration*100, solar_penetration*100)
+    city_districts = int(max(1, city_districts))
+    logger.info(
+        "Генерация Smart Grid v6: %d дней, %d домохозяйств, районов=%d | EV=%.0f%% Solar=%.0f%%",
+        days, households, city_districts, ev_penetration*100, solar_penetration*100
+    )
 
     hours = days * 24
     t = np.arange(hours, dtype=np.float32)
@@ -170,6 +174,28 @@ def generate_smartgrid_data(
         s = se
     agg *= regime
 
+    # ── ГОРОДСКАЯ СИМУЛЯЦИЯ: районная структура и маятниковая миграция ─────
+    # Каждый район имеет свой профиль + чувствительность к погоде/выходным.
+    # Это добавляет реализм «целого города», но оставляет прогнозируемый паттерн.
+    district_weights = rng.dirichlet(np.ones(city_districts)).astype(np.float32)
+    district_curve = np.zeros(hours, np.float32)
+    commute_morning = _gaussian_peak(t % 24, 8.5, 1.8).astype(np.float32)
+    commute_evening = _gaussian_peak(t % 24, 18.5, 2.2).astype(np.float32)
+    weekend_shift = np.where(is_weekend > 0, -0.04, 0.02).astype(np.float32)
+    for d_i in range(city_districts):
+        dist_scale = rng.uniform(0.78, 1.26)
+        commute_amp = rng.uniform(0.04, 0.14)
+        office_bias = rng.uniform(0.85, 1.25)
+        # деловые районы активнее в будни, спальные — вечером и в выходные
+        district_pattern = (
+            1.0
+            + commute_amp * office_bias * commute_morning
+            + commute_amp * (2.0 - office_bias) * commute_evening
+            + weekend_shift * (2.0 - office_bias)
+        ).astype(np.float32)
+        district_curve += district_weights[d_i] * dist_scale * district_pattern
+    district_curve = np.clip(district_curve, 0.80, 1.35).astype(np.float32)
+
     holiday_base_reduction = (1.0 - 0.35*ny_mask - 0.18*holiday_mask*(1-ny_mask)).astype(np.float32)
     mid  = (seasonal_winter_boost - seasonal_summer_dip)/2
     amp  = (seasonal_winter_boost + seasonal_summer_dip)/2
@@ -209,6 +235,7 @@ def generate_smartgrid_data(
     base_scale = float(households)*10.0
     base_consumption = (
         agg*holiday_base_reduction*seasonal_drift*temp_response
+        *district_curve
         *heat_surge_factor*cold_wave_factor*anomaly_factor*(1.0+ar)*trend*base_scale
     ).astype(np.float32)
 

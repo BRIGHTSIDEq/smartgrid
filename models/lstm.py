@@ -190,9 +190,20 @@ def build_lstm_model(
     # ── RevIN нормализация consumption-канала ───────────────────────────────
     cons_slice = inp[:, :, :1]             # (B, T, 1)
     cov_slice  = inp[:, :, 1:]             # (B, T, n_features-1)
-    mean_cons  = tf.reduce_mean(cons_slice, axis=1, keepdims=True)
-    std_cons   = tf.math.reduce_std(cons_slice, axis=1, keepdims=True) + 1e-6
-    cons_norm  = (cons_slice - mean_cons) / std_cons
+    # Keras 3: нельзя вызывать tf.reduce_* напрямую на KerasTensor вне слоя.
+    # Оборачиваем RevIN-статистики в Lambda-слои (graph-safe Functional API).
+    mean_cons = tf.keras.layers.Lambda(
+        lambda t: tf.reduce_mean(t, axis=1, keepdims=True),
+        name="revin_mean_cons",
+    )(cons_slice)
+    std_cons = tf.keras.layers.Lambda(
+        lambda t: tf.math.reduce_std(t, axis=1, keepdims=True) + 1e-6,
+        name="revin_std_cons",
+    )(cons_slice)
+    cons_norm = tf.keras.layers.Lambda(
+        lambda xs: (xs[0] - xs[1]) / xs[2],
+        name="revin_norm_cons",
+    )([cons_slice, mean_cons, std_cons])
     x = tf.keras.layers.Concatenate(axis=-1, name="revin_concat")([cons_norm, cov_slice])
 
     # ── Multi-scale dilated TCN ─────────────────────────────────────────────

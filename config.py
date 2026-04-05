@@ -55,6 +55,7 @@ class Config:
     LSTM_USE_COSINE_DECAY: bool = False
     LSTM_TCN_FILTERS: int = 64        # v9: TCN filters per branch
     LSTM_HUBER_DELTA: float = 0.05    # v9: 0.10→0.05 (строже на пики)
+    LSTM_SEASONAL_BLEND_INIT: float = 0.35
 
     # Transformer (PatchTST и VanillaTransformer)
     TRANSFORMER_D_MODEL: int = 128
@@ -66,6 +67,9 @@ class Config:
     VANILLA_TRANSFORMER_LR: float = 5e-5       # v9: отдельный LR для VanillaTransformer
     TRANSFORMER_STOCHASTIC_DEPTH: float = 0.10
     PATCHTST_USE_REVIN: bool = True
+    VANILLA_USE_SEASONAL_RESIDUAL: bool = True
+    VANILLA_SEASONAL_BLEND_INIT: float = 0.40
+    VANILLA_HUBER_DELTA: float = 0.05
 
     # XGBoost
     XGB_N_ESTIMATORS: int = 500
@@ -144,11 +148,14 @@ class Config:
         cls.LSTM_UNITS_1 = 96; cls.LSTM_UNITS_2 = 48; cls.LSTM_UNITS_3 = 48
         cls.LSTM_ATTN_HEADS = 4; cls.LSTM_TCN_FILTERS = 48
         cls.DROPOUT_RATE = 0.25; cls.LSTM_LEARNING_RATE = 2e-4; cls.LSTM_USE_COSINE_DECAY = False
+        cls.LSTM_SEASONAL_BLEND_INIT = 0.30
         cls.TRANSFORMER_D_MODEL = 64; cls.TRANSFORMER_N_HEADS = 4
         cls.TRANSFORMER_N_LAYERS = 2; cls.TRANSFORMER_DFF = 128
         cls.TRANSFORMER_DROPOUT = 0.20; cls.TRANSFORMER_LEARNING_RATE = 3e-4
-        cls.VANILLA_TRANSFORMER_LR = 5e-5
+        cls.VANILLA_TRANSFORMER_LR = 8e-5
         cls.TRANSFORMER_STOCHASTIC_DEPTH = 0.05; cls.PATCHTST_USE_REVIN = True
+        cls.VANILLA_USE_SEASONAL_RESIDUAL = True; cls.VANILLA_SEASONAL_BLEND_INIT = 0.35
+        cls.VANILLA_HUBER_DELTA = 0.05
         cls.XGB_N_ESTIMATORS = 300
         logging.getLogger("smart_grid").info(
             "Fast mode v9: DAYS=%d EPOCHS=%d N_FEATURES=%d | LSTM BiLSTM=%d TCN=%d | VanTr LR=%.0e",
@@ -164,12 +171,15 @@ class Config:
         cls.LSTM_UNITS_1 = 128; cls.LSTM_UNITS_2 = 64; cls.LSTM_UNITS_3 = 64
         cls.LSTM_ATTN_HEADS = 8; cls.LSTM_TCN_FILTERS = 64
         cls.DROPOUT_RATE = 0.20; cls.LSTM_LEARNING_RATE = 2e-4; cls.LSTM_USE_COSINE_DECAY = False
+        cls.LSTM_SEASONAL_BLEND_INIT = 0.35
         cls.LSTM_HUBER_DELTA = 0.05
         cls.TRANSFORMER_D_MODEL = 128; cls.TRANSFORMER_N_HEADS = 8
         cls.TRANSFORMER_N_LAYERS = 4; cls.TRANSFORMER_DFF = 256
         cls.TRANSFORMER_DROPOUT = 0.20; cls.TRANSFORMER_LEARNING_RATE = 3e-4
         cls.VANILLA_TRANSFORMER_LR = 5e-5   # ключевое исправление
         cls.TRANSFORMER_STOCHASTIC_DEPTH = 0.10; cls.PATCHTST_USE_REVIN = True
+        cls.VANILLA_USE_SEASONAL_RESIDUAL = True; cls.VANILLA_SEASONAL_BLEND_INIT = 0.40
+        cls.VANILLA_HUBER_DELTA = 0.05
         cls.XGB_N_ESTIMATORS = 500; cls.XGB_COLSAMPLE = 0.40
         logging.getLogger("smart_grid").info(
             "Optimal mode v9: DAYS=%d EPOCHS=%d N_FEATURES=%d | "
@@ -191,12 +201,15 @@ class Config:
         cls.LSTM_UNITS_1 = 192; cls.LSTM_UNITS_2 = 96; cls.LSTM_UNITS_3 = 96
         cls.LSTM_ATTN_HEADS = 8; cls.LSTM_TCN_FILTERS = 96
         cls.DROPOUT_RATE = 0.20; cls.LSTM_LEARNING_RATE = 2e-4; cls.LSTM_USE_COSINE_DECAY = False
+        cls.LSTM_SEASONAL_BLEND_INIT = 0.35
         cls.LSTM_HUBER_DELTA = 0.05
         cls.TRANSFORMER_D_MODEL = 128; cls.TRANSFORMER_N_HEADS = 8
         cls.TRANSFORMER_N_LAYERS = 4; cls.TRANSFORMER_DFF = 512
         cls.TRANSFORMER_DROPOUT = 0.20; cls.TRANSFORMER_LEARNING_RATE = 3e-4
-        cls.VANILLA_TRANSFORMER_LR = 5e-5
+        cls.VANILLA_TRANSFORMER_LR = 8e-5
         cls.TRANSFORMER_STOCHASTIC_DEPTH = 0.10; cls.PATCHTST_USE_REVIN = True
+        cls.VANILLA_USE_SEASONAL_RESIDUAL = True; cls.VANILLA_SEASONAL_BLEND_INIT = 0.40
+        cls.VANILLA_HUBER_DELTA = 0.05
         cls.XGB_N_ESTIMATORS = 800; cls.XGB_COLSAMPLE = 0.35
         logging.getLogger("smart_grid").info(
             "Full mode v9: DAYS=%d EPOCHS=%d N_FEATURES=%d | BiLSTM=%d TCN=%d",

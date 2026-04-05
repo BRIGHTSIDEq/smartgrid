@@ -122,6 +122,7 @@ def main():
         total_steps=_total_steps,
         tcn_filters=Config.LSTM_TCN_FILTERS,       # v9
         huber_delta=Config.LSTM_HUBER_DELTA,        # v9
+        seasonal_blend_init=Config.LSTM_SEASONAL_BLEND_INIT,
     )
 
     # VanillaTransformer: сниженный LR (5e-5 вместо 3e-4)
@@ -139,6 +140,9 @@ def main():
         learning_rate=Config.VANILLA_TRANSFORMER_LR,   # v9: 5e-5 отдельный LR
         pe_type="sinusoidal",
         stochastic_depth_rate=Config.TRANSFORMER_STOCHASTIC_DEPTH,
+        use_seasonal_residual=Config.VANILLA_USE_SEASONAL_RESIDUAL,
+        seasonal_blend_init=Config.VANILLA_SEASONAL_BLEND_INIT,
+        huber_delta=Config.VANILLA_HUBER_DELTA,
     )
 
     patch_len = 8 if Config.HISTORY_LENGTH >= 48 else 6

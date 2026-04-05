@@ -117,28 +117,29 @@ class TemporalAttentionBlock(tf.keras.layers.Layer):
 
 
 class SeasonalSkipConnection(tf.keras.layers.Layer):
-    """Blend neural forecast with naive seasonal baseline using learnable alpha."""
+    """Convex blend of neural forecast and seasonal naive baseline."""
 
-    def __init__(self, init_alpha: float = 0.02, **kwargs):
+    def __init__(self, init_neural_weight: float = 0.35, **kwargs):
         super().__init__(**kwargs)
-        self.init_alpha = init_alpha
+        self.init_neural_weight = float(init_neural_weight)
 
     def build(self, input_shape):
-        self.alpha = self.add_weight(
-            name="alpha",
+        init_logit = float(tf.math.log(self.init_neural_weight / (1.0 - self.init_neural_weight)))
+        self.logit = self.add_weight(
+            name="blend_logit",
             shape=(),
-            initializer=tf.keras.initializers.Constant(self.init_alpha),
+            initializer=tf.keras.initializers.Constant(init_logit),
             trainable=True,
-            constraint=tf.keras.constraints.NonNeg(),
         )
         super().build(input_shape)
 
     def call(self, inputs):
         neural_out, naive_out = inputs
-        return neural_out + self.alpha * naive_out
+        w_neural = tf.keras.activations.sigmoid(self.logit)
+        return w_neural * neural_out + (1.0 - w_neural) * naive_out
 
     def get_config(self):
-        return {**super().get_config(), "init_alpha": self.init_alpha}
+        return {**super().get_config(), "init_neural_weight": self.init_neural_weight}
 
 
 def build_lstm_model(
@@ -157,6 +158,7 @@ def build_lstm_model(
     huber_delta: float = 0.05,
     tcn_filters: int = 64,
     use_seasonal_skip: bool = True,
+    seasonal_blend_init: float = 0.35,
 ) -> tf.keras.Model:
     del lstm_units_2, lstm_units_3, use_cosine_decay, total_steps
     training_flag: Optional[bool] = True if mc_dropout else None
@@ -247,7 +249,7 @@ def build_lstm_model(
         naive_denorm = naive_slice * kops.expand_dims(std_vec, axis=-1) + kops.expand_dims(mean_vec, axis=-1)
         neural_denorm = neural_out * kops.expand_dims(std_vec, axis=-1) + kops.expand_dims(mean_vec, axis=-1)
 
-        mixed = SeasonalSkipConnection(name="seasonal_skip")([neural_denorm, naive_denorm])
+        mixed = SeasonalSkipConnection(init_neural_weight=seasonal_blend_init, name="seasonal_skip")([neural_denorm, naive_denorm])
         final_out = (mixed - kops.expand_dims(mean_vec, axis=-1)) / kops.expand_dims(std_vec, axis=-1)
         final_out = tf.keras.layers.Lambda(lambda t: t, name="output")(final_out)
     else:
@@ -263,7 +265,7 @@ def build_lstm_model(
     logger.info(
         "TCN-BiLSTM-Attention v8 | %d params | input=(%d,%d) | "
         "TCN filters=%d | BiLSTM=%d | Attn heads=%d key_dim=%d | "
-        "Dense 256/128 drop=%.2f | SeasonalSkip=%s | lr=%.0e | Huber(δ=%.2f)",
+        "Dense 256/128 drop=%.2f | SeasonalSkip=%s blend_init=%.2f | lr=%.0e | Huber(δ=%.2f)",
         model.count_params(),
         history_length,
         n_features,
@@ -273,6 +275,7 @@ def build_lstm_model(
         key_dim,
         dropout_rate,
         use_seasonal_skip,
+        seasonal_blend_init,
         learning_rate,
         huber_delta,
     )

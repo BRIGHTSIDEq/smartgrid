@@ -134,10 +134,34 @@ def diagnose_residuals(
         "recommendations": recommendations,
     }
 
-
 # ══════════════════════════════════════════════════════════════════════════════
 # TRAINER
-# ══════════════════════════════════════════════════════════════════════════════
+
+def diagnose_training_regime(history: Dict[str, List[float]], overfit_gap: float = 0.02, underfit_floor: float = 0.08) -> Dict[str, Any]:
+    """Simple heuristic detector of overfitting/underfitting by train/val MAE."""
+    train_mae = history.get("mae") or history.get("mean_absolute_error") or []
+    val_mae = history.get("val_mae") or history.get("val_mean_absolute_error") or []
+    if not train_mae or not val_mae:
+        return {"status": "unknown", "reason": "mae_history_missing"}
+
+    train_last = float(train_mae[-1])
+    val_last = float(val_mae[-1])
+    gap = val_last - train_last
+
+    if gap >= overfit_gap and train_last < underfit_floor:
+        status = "overfitting"
+    elif train_last >= underfit_floor and val_last >= underfit_floor:
+        status = "underfitting"
+    else:
+        status = "balanced"
+
+    return {
+        "status": status,
+        "train_mae_last": train_last,
+        "val_mae_last": val_last,
+        "generalization_gap": float(gap),
+    }
+
 
 class ModelTrainer:
     """
@@ -238,6 +262,15 @@ class ModelTrainer:
             actual_epochs = len(self.history.history["loss"])
             logger.info("%s: обучение завершено за %d эпох",
                         self.model_name, actual_epochs)
+            fit_diag = diagnose_training_regime(self.history.history)
+            logger.info(
+                "%s: training regime=%s | train_mae=%.4f val_mae=%.4f gap=%.4f",
+                self.model_name,
+                fit_diag.get("status", "unknown"),
+                fit_diag.get("train_mae_last", float("nan")),
+                fit_diag.get("val_mae_last", float("nan")),
+                fit_diag.get("generalization_gap", float("nan")),
+            )
         except Exception as exc:
             logger.error("Ошибка при обучении %s: %s", self.model_name, exc)
             raise

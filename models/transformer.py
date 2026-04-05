@@ -568,6 +568,9 @@ def build_vanilla_transformer(
     pe_type: str = "sinusoidal",
     use_prob_sparse: bool = False,
     stochastic_depth_rate: float = 0.10,
+    use_seasonal_residual: bool = True,
+    seasonal_blend_init: float = 0.40,
+    huber_delta: float = 0.05,
 ) -> tf.keras.Model:
     """
     Encoder-only Transformer v4 с StochasticDepth + LearnedQueryPooling.
@@ -639,7 +642,18 @@ def build_vanilla_transformer(
     h = tf.keras.layers.Add(name="head_res")([h, skip])
     h = tf.keras.layers.LayerNormalization(epsilon=1e-6, name="head_ln")(h)
     h = tf.keras.layers.Dropout(dropout, name="head_drop")(h)
-    output = tf.keras.layers.Dense(forecast_horizon, name="output")(h)
+    neural_out = tf.keras.layers.Dense(forecast_horizon, name="neural_output")(h)
+
+    if use_seasonal_residual and history_length >= forecast_horizon:
+        naive = inp_series[:, -forecast_horizon:, 0]
+        blend_logit = tf.keras.layers.Dense(1, name="seasonal_blend_logit",
+                                            bias_initializer=tf.keras.initializers.Constant(
+                                                np.log(seasonal_blend_init/(1-seasonal_blend_init))
+                                            ))(agg)
+        blend = tf.keras.layers.Activation("sigmoid", name="seasonal_blend")(blend_logit)
+        output = blend * neural_out + (1.0 - blend) * naive
+    else:
+        output = neural_out
 
     model = tf.keras.Model(inputs=inputs, outputs=output,
                            name=f"VanillaTransformer_v4_{pe_type}")
@@ -647,13 +661,13 @@ def build_vanilla_transformer(
 
     model.compile(
         optimizer=tf.keras.optimizers.Adam(learning_rate=learning_rate, clipnorm=1.0),
-        loss=tf.keras.losses.Huber(delta=0.1),
-        metrics=["mae"],
+        loss=tf.keras.losses.Huber(delta=huber_delta),
+        metrics=["mae", "mape"],
     )
     logger.info(
-        "VanillaTransformer v4 [%s%s] d=%d h=%d L=%d sdrop=%.2f | %d params",
+        "VanillaTransformer v4 [%s%s] d=%d h=%d L=%d sdrop=%.2f seasonal_residual=%s | %d params",
         pe_type, "+ProbSparse" if use_prob_sparse else "",
-        d_model, num_heads, num_layers, stochastic_depth_rate,
+        d_model, num_heads, num_layers, stochastic_depth_rate, use_seasonal_residual,
         count_parameters(model),
     )
     return model
@@ -831,6 +845,7 @@ def build_patchtst(
     learning_rate: float = 3e-4,
     stochastic_depth_rate: float = 0.10,
     use_revin: bool = True,
+    huber_delta: float = 0.10,
 ) -> tf.keras.Model:
     """
     PatchTST v4 [Nie et al., ICLR 2023] + RevIN + StochasticDepth.
@@ -928,8 +943,8 @@ def build_patchtst(
 
     model.compile(
         optimizer=tf.keras.optimizers.Adam(learning_rate=learning_rate, clipnorm=1.0),
-        loss=tf.keras.losses.Huber(delta=0.1),
-        metrics=["mae"],
+        loss=tf.keras.losses.Huber(delta=huber_delta),
+        metrics=["mae", "mape"],
     )
     logger.info(
         "PatchTST v4 patch=%d stride=%d n_p=%d d=%d h=%d L=%d sdrop=%.2f RevIN=%s | %d params",

@@ -199,6 +199,9 @@ def generate_smartgrid_data(
     # Годовой drift
     seasonal_winter_boost: float = 0.15,
     seasonal_summer_dip:   float = 0.10,
+    ev_penetration: float = 0.28,
+    solar_penetration: float = 0.22,
+    industrial_loads: int = 4,
 ) -> pd.DataFrame:
     """
     Генерирует реалистичный почасовой ряд суммарного потребления района.
@@ -225,7 +228,8 @@ def generate_smartgrid_data(
     Колонки совместимы с preprocessing.py (v3).
     """
     rng = np.random.default_rng(seed)
-    logger.info("Генерация Smart Grid v4: %d дней, %d домохозяйств", days, households)
+    logger.info("Генерация Smart Grid v5: %d дней, %d домохозяйств | EV=%.0f%% Solar=%.0f%%",
+                days, households, 100*ev_penetration, 100*solar_penetration)
 
     hours = days * 24
     t = np.arange(hours, dtype=np.float32)
@@ -403,7 +407,7 @@ def generate_smartgrid_data(
     anomaly_factor = np.ones(hours, dtype=np.float32)
 
     # Промышленные выбросы: раз в 30–60 дней, +20–40%, длит. 3–6ч
-    n_industrial = max(2, days // int(rng.integers(30, 61)))
+    n_industrial = max(2, int(industrial_loads) * max(1, days // 365))
     for _ in range(n_industrial):
         idx = int(rng.integers(24, hours - 24))
         dur = int(rng.integers(3, 7))
@@ -458,6 +462,26 @@ def generate_smartgrid_data(
         * base_scale
     ).astype(np.float32)
 
+    # ── 12b. EV / Solar / DSR компоненты (v5) ──────────────────────────────
+    cloud_cover = np.clip(0.50 + 0.30 * np.sin(2*np.pi * t / 24 + 1.2) + rng.normal(0, 0.12, size=hours), 0.0, 1.0).astype(np.float32)
+
+    evening_ev = (_gaussian_peak(hour_of_day.astype(np.float32), center=20.0, width=2.5)
+                  + 0.45 * _gaussian_peak(hour_of_day.astype(np.float32), center=7.5, width=1.8)).astype(np.float32)
+    ev_load_norm = np.clip(ev_penetration * evening_ev / (evening_ev.max() + 1e-8), 0.0, 1.0).astype(np.float32)
+    ev_load_kw = ev_load_norm * (0.13 * base_scale)
+
+    daylight = np.clip(np.sin(np.pi * (hour_of_day.astype(np.float32) - 6.0) / 12.0), 0.0, 1.0)
+    solar_raw = daylight * (1.0 - 0.75 * cloud_cover)
+    solar_gen_norm = np.clip(solar_penetration * solar_raw / (solar_raw.max() + 1e-8), 0.0, 1.0).astype(np.float32)
+    solar_gen_kw = solar_gen_norm * (0.12 * base_scale)
+
+    dsr_active = np.zeros(hours, dtype=np.float32)
+    dsr_hours = max(24, days // 10)
+    dsr_idx = rng.choice(np.arange(24, hours - 24), size=min(dsr_hours, max(1, hours - 48)), replace=False)
+    dsr_active[dsr_idx] = 1.0
+
+    consumption = consumption + ev_load_kw - solar_gen_kw
+    consumption = consumption * (1.0 - 0.07 * dsr_active)
     consumption = np.clip(consumption, 0.0, None)
 
     # ── 13. ДОПОЛНИТЕЛЬНЫЕ ПРИЗНАКИ ───────────────────────────────────────────
@@ -517,6 +541,10 @@ def generate_smartgrid_data(
         "cooling_degree_days":   cooling_degree_days,
         "day_of_year":           day_of_year.astype(np.int16),
         "temperature_squared":   temperature_squared,
+        "cloud_cover":          cloud_cover,
+        "ev_load_norm":         ev_load_norm,
+        "solar_gen_norm":       solar_gen_norm,
+        "dsr_active":           dsr_active.astype(np.int8),
     })
 
     # Скользящие статистики (без утечки в будущее)
@@ -536,6 +564,9 @@ def generate_smartgrid_data(
         len(df), df["consumption"].min(),
         df["consumption"].mean(), df["consumption"].max(),
     )
+    logger.info("  EV нагрузка: mean=%.1f кВт (%.1f%% базовой)", float(ev_load_kw.mean()), 100.0*float(ev_load_kw.mean()/base_scale))
+    logger.info("  Solar: mean=%.1f кВт, max=%.1f кВт", float(solar_gen_kw.mean()), float(solar_gen_kw.max()))
+    logger.info("  DSR часов: %d | CV потребления: %.3f", int(dsr_active.sum()), float(df["consumption"].std()/(df["consumption"].mean()+1e-8)))
     return df
 
 

@@ -1,68 +1,5 @@
 # -*- coding: utf-8 -*-
-"""
-models/lstm.py — AttentionLSTM v6: устранение избыточной регуляризации.
-
-═══════════════════════════════════════════════════════════════════════════════
-ПРАВКА v6: train/val gap 14× → убираем источники подавления амплитуды
-═══════════════════════════════════════════════════════════════════════════════
-
-ДИАГНОЗ по логам (optimal mode, 72 эпохи):
-  train_loss финишировал ~0.0005, val_loss=0.007 → разрыв 14×.
-  EarlyStopping восстановил веса из эпохи 32 (val_loss=0.0039), когда модель
-  ещё не обучила амплитуду. Следствие: синяя кривая «прилипает к среднему»,
-  MAE=1574 против MAE=665 у LinearRegression.
-
-ИСТОЧНИК ПРОБЛЕМЫ 1: Dropout(0.20) между LSTM-1 и LSTM-2
-──────────────────────────────────────────────────────────
-  Dropout на sequence (B, T, d) разрывает _временны́е зависимости_ внутри
-  окна. В отличие от трансформера, у LSTM нет позиционного кодирования:
-  скрытое состояние ячейки h_{t} несёт контекст от h_{t-1}, и случайное
-  обнуление 20% нейронов в каждый момент эффективно «рвёт память» на
-  коротких горизонтах. Это заставляет LSTM предсказывать среднее вместо пиков.
-
-  БЫЛО: Dropout(0.20) между слоями  → 1/5 hidden dim зануляется за шаг
-  СТАЛО: Dropout(0.05) между слоями → редкий шум, не разрывает память
-
-ИСТОЧНИК ПРОБЛЕМЫ 2: L2=1e-4 на Dense-слоях
-──────────────────────────────────────────────
-  L2-регуляризация на весах head_d1 и head_d2 штрафует за большие значения
-  весов. При нормализованных целях [0,1] крупные пики потребления → большие
-  выходные активации → высокий L2 штраф → оптимизатор «сжимает» предсказания
-  к среднему вместо обучения амплитуды.
-
-  БЫЛО: L2=1e-4 на Dense(128) и Dense(64)  → амплитуда подавляется
-  СТАЛО: L2=1e-5 (×10 слабее)              → почти свободный выход
-
-ИСТОЧНИКИ ПРОБЛЕМЫ 3 (v5, оставлены без изменений):
-  CosineDecay+EarlyStopping → плоский LR=3e-4 + ReduceLROnPlateau ✓
-  Persistence prior bypass  → чистый Dense-output ✓
-  3 LSTM-слоя (~600K params) → 2 слоя (128/64, ~120K params) ✓
-
-═══════════════════════════════════════════════════════════════════════════════
-АРХИТЕКТУРА v6 (изменения относительно v5 помечены ★)
-═══════════════════════════════════════════════════════════════════════════════
-
-Input(48, 15)
-  │
-  ├─ LSTM(128, return_sequences=True) → LayerNorm → Dropout(0.05) ★
-  ├─ LSTM(64,  return_sequences=True) → LayerNorm
-  │    └─ all_hidden_states: (B, 48, 64)
-  │
-  ├─ Temporal Attention: Q=x[:,-1,:], K=V=x → MHA(4 heads, key_dim=16)
-  │    → squeeze → LN → Dropout(0.10) → context: (B, 64)
-  │
-  ├─ Concat([last_token(B,64), context(B,64)]) → (B, 128)
-  │
-  └─ Dense Head:
-       Dense(128, gelu, L2=1e-5) ★ → Dropout(0.20)
-       Dense(64,  gelu, L2=1e-5) ★ → Dropout(0.10)
-       Dense(24)
-
-Optimizer: Adam(lr=3e-4, clipnorm=1.0)
-Loss:      MSE
-Params:    ~120K (optimal) / ~50K (fast)
-═══════════════════════════════════════════════════════════════════════════════
-"""
+"""models/lstm.py — TCN-BiLSTM-Attention v8 (Keras 3 compatible)."""
 
 import logging
 from typing import Optional
@@ -71,134 +8,272 @@ import tensorflow as tf
 
 logger = logging.getLogger("smart_grid.models.lstm")
 
-__all__ = ["TemporalAttentionBlock", "build_lstm_model"]
+__all__ = [
+    "TemporalAttentionBlock",
+    "TCNBlock",
+    "build_lstm_model",
+]
+
+
+class TCNBlock(tf.keras.layers.Layer):
+    """Dilated causal Conv1D block with residual connection."""
+
+    def __init__(
+        self,
+        filters: int,
+        kernel_size: int,
+        dilation_rate: int,
+        dropout_rate: float = 0.05,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+        self.filters = filters
+        self.kernel_size = kernel_size
+        self.dilation_rate = dilation_rate
+        self.dropout_rate = dropout_rate
+
+        pad = (kernel_size - 1) * dilation_rate
+        self.pad1 = tf.keras.layers.ZeroPadding1D(padding=(pad, 0))
+        self.conv1 = tf.keras.layers.Conv1D(
+            filters,
+            kernel_size,
+            dilation_rate=dilation_rate,
+            padding="valid",
+            use_bias=False,
+        )
+        self.bn1 = tf.keras.layers.BatchNormalization()
+        self.act1 = tf.keras.layers.Activation("gelu")
+        self.drop1 = tf.keras.layers.Dropout(dropout_rate)
+
+        self.pad2 = tf.keras.layers.ZeroPadding1D(padding=(pad, 0))
+        self.conv2 = tf.keras.layers.Conv1D(
+            filters,
+            kernel_size,
+            dilation_rate=dilation_rate,
+            padding="valid",
+            use_bias=False,
+        )
+        self.bn2 = tf.keras.layers.BatchNormalization()
+        self.act2 = tf.keras.layers.Activation("gelu")
+
+        self.proj = tf.keras.layers.Conv1D(filters, 1, padding="same", use_bias=False)
+        self.bn_proj = tf.keras.layers.BatchNormalization()
+
+    def call(self, x, training=None):
+        res = self.bn_proj(self.proj(x), training=training)
+        h = self.conv1(self.pad1(x))
+        h = self.act1(self.bn1(h, training=training))
+        h = self.drop1(h, training=training)
+        h = self.conv2(self.pad2(h))
+        h = self.bn2(h, training=training)
+        return self.act2(h + res)
+
+    def get_config(self):
+        return {
+            **super().get_config(),
+            "filters": self.filters,
+            "kernel_size": self.kernel_size,
+            "dilation_rate": self.dilation_rate,
+            "dropout_rate": self.dropout_rate,
+        }
 
 
 class TemporalAttentionBlock(tf.keras.layers.Layer):
-    """
-    Temporal Self-Attention поверх LSTM hidden states.
-    Query = последний скрытый вектор, Key/Value = вся история.
-    Сохраняет _attn_weights для визуализации.
-    """
+    """Temporal Multi-Head Attention over sequence hidden states."""
 
-    def __init__(self, num_heads=4, key_dim=16, dropout=0.10, **kwargs):
+    def __init__(self, num_heads=8, key_dim=32, dropout=0.10, **kwargs):
         super().__init__(**kwargs)
         self.num_heads = num_heads
         self.key_dim = key_dim
         self.dropout_rate = dropout
         self._attn_weights = None
-        self.mha  = tf.keras.layers.MultiHeadAttention(
-            num_heads=num_heads, key_dim=key_dim, dropout=dropout)
-        self.ln   = tf.keras.layers.LayerNormalization(epsilon=1e-6)
+        self.mha = tf.keras.layers.MultiHeadAttention(
+            num_heads=num_heads,
+            key_dim=key_dim,
+            dropout=dropout,
+        )
+        self.ln = tf.keras.layers.LayerNormalization(epsilon=1e-6)
         self.drop = tf.keras.layers.Dropout(dropout)
 
     def call(self, hidden_states, training=None):
-        query = hidden_states[:, -1:, :]   # (B, 1, d)
+        query = hidden_states[:, -1:, :]
         attn_out, self._attn_weights = self.mha(
-            query=query, key=hidden_states, value=hidden_states,
-            return_attention_scores=True, training=training)
-        context = tf.squeeze(attn_out, axis=1)              # (B, d)
+            query=query,
+            key=hidden_states,
+            value=hidden_states,
+            return_attention_scores=True,
+            training=training,
+        )
+        context = tf.keras.ops.squeeze(attn_out, axis=1)
         return self.drop(self.ln(context), training=training)
 
     def get_config(self):
-        return {**super().get_config(),
-                "num_heads": self.num_heads,
-                "key_dim": self.key_dim,
-                "dropout": self.dropout_rate}
+        return {
+            **super().get_config(),
+            "num_heads": self.num_heads,
+            "key_dim": self.key_dim,
+            "dropout": self.dropout_rate,
+        }
+
+
+class SeasonalSkipConnection(tf.keras.layers.Layer):
+    """Blend neural forecast with naive seasonal baseline using learnable alpha."""
+
+    def __init__(self, init_alpha: float = 0.02, **kwargs):
+        super().__init__(**kwargs)
+        self.init_alpha = init_alpha
+
+    def build(self, input_shape):
+        self.alpha = self.add_weight(
+            name="alpha",
+            shape=(),
+            initializer=tf.keras.initializers.Constant(self.init_alpha),
+            trainable=True,
+            constraint=tf.keras.constraints.NonNeg(),
+        )
+        super().build(input_shape)
+
+    def call(self, inputs):
+        neural_out, naive_out = inputs
+        return neural_out + self.alpha * naive_out
+
+    def get_config(self):
+        return {**super().get_config(), "init_alpha": self.init_alpha}
 
 
 def build_lstm_model(
     history_length: int = 48,
     forecast_horizon: int = 24,
-    n_features: int = 11,
+    n_features: int = 26,
     lstm_units_1: int = 128,
-    lstm_units_2: int = 64,
-    lstm_units_3: int = 64,        # принимается для совместимости с config, не используется
+    lstm_units_2: int = 64,  # compat
+    lstm_units_3: int = 64,  # compat
     dropout_rate: float = 0.20,
-    learning_rate: float = 3e-4,   # v5: 3e-4 (1e-3 насыщает forget-gate в LSTM+Adam)
-    attn_heads: int = 4,
-    use_cosine_decay: bool = False, # v5: ОТКЛЮЧЁН — см. обоснование выше
-    total_steps: int = 37_000,     # принимается для совместимости, не используется
+    learning_rate: float = 2e-4,
+    attn_heads: int = 8,
+    use_cosine_decay: bool = False,  # compat
+    total_steps: int = 37_000,  # compat
     mc_dropout: bool = False,
+    huber_delta: float = 0.05,
+    tcn_filters: int = 64,
+    use_seasonal_skip: bool = True,
 ) -> tf.keras.Model:
-    """
-    AttentionLSTM v5: 2 LSTM + Temporal Attention + чистый Dense-output.
-
-    Отличия от v4:
-      - 2 LSTM-слоя (128/64) вместо 3 (256/128/64)  → ~120K vs ~600K параметров
-      - Нет CosineDecay                               → плоский LR, адаптивный ReduceLR
-      - Нет persistence prior bypass                  → прямой Dense-выход
-      - L2=1e-4 на Dense-слоях                        → сильнее регуляризация
-    """
+    del lstm_units_2, lstm_units_3, use_cosine_decay, total_steps
     training_flag: Optional[bool] = True if mc_dropout else None
+    kops = tf.keras.ops
 
     inp = tf.keras.Input(shape=(history_length, n_features), name="input_sequence")
 
-    # ── LSTM 1 ─────────────────────────────────────────────────────────────────
-    x = tf.keras.layers.LSTM(lstm_units_1, return_sequences=True,
-                              recurrent_dropout=0.0, name="lstm_1")(inp)
-    x = tf.keras.layers.LayerNormalization(epsilon=1e-6, name="ln_1")(x)
-    # v6: Dropout 0.20→0.05 между LSTM-слоями.
-    # Dropout на sequence (B,T,d) разрывает временные зависимости h_{t}→h_{t+1}.
-    # У LSTM нет позиционного кодирования — скрытое состояние IS память.
-    # 20% зануление каждые T шагов эффективно стирает контекст → предсказание среднего.
-    # 5% — редкий шум для регуляризации, не разрушающий цепочку памяти.
-    x = tf.keras.layers.Dropout(0.05, name="drop_1")(x, training=training_flag)
+    # RevIN-like per-window normalization for consumption channel.
+    cons_slice = inp[:, :, :1]
+    cov_slice = inp[:, :, 1:]
 
-    # ── LSTM 2 ─────────────────────────────────────────────────────────────────
-    x = tf.keras.layers.LSTM(lstm_units_2, return_sequences=True,
-                              recurrent_dropout=0.0, name="lstm_2")(x)
-    x = tf.keras.layers.LayerNormalization(epsilon=1e-6, name="ln_2")(x)
-    # x: (B, T, lstm_units_2)
+    mean_cons = kops.mean(cons_slice, axis=1, keepdims=True)
+    std_cons = kops.std(cons_slice, axis=1, keepdims=True) + 1e-6
+    cons_norm = (cons_slice - mean_cons) / std_cons
+    x = tf.keras.layers.Concatenate(axis=-1, name="revin_concat")([cons_norm, cov_slice])
 
-    # ── Temporal Attention ─────────────────────────────────────────────────────
-    key_dim = max(lstm_units_2 // attn_heads, 8)
+    # Multi-scale dilated TCN.
+    tcn_proj = tf.keras.layers.Conv1D(
+        tcn_filters,
+        1,
+        padding="same",
+        name="tcn_input_proj",
+    )(x)
+    branches = []
+    for d in [1, 2, 4, 8]:
+        branch = TCNBlock(
+            tcn_filters,
+            kernel_size=3,
+            dilation_rate=d,
+            dropout_rate=0.04,
+            name=f"tcn_d{d}",
+        )(tcn_proj, training=training_flag)
+        branches.append(branch)
+
+    tcn_out = tf.keras.layers.Concatenate(axis=-1, name="tcn_merge")(branches)
+    tcn_out = tf.keras.layers.LayerNormalization(epsilon=1e-6, name="tcn_ln")(tcn_out)
+    tcn_out = tf.keras.layers.Dropout(0.10, name="tcn_drop")(tcn_out, training=training_flag)
+
+    # BiLSTM encoder.
+    bilstm_out = tf.keras.layers.Bidirectional(
+        tf.keras.layers.LSTM(
+            lstm_units_1,
+            return_sequences=True,
+            recurrent_dropout=0.0,
+        ),
+        name="bilstm_1",
+    )(tcn_out)
+    bilstm_out = tf.keras.layers.LayerNormalization(epsilon=1e-6, name="bilstm_ln")(bilstm_out)
+
+    # Temporal attention.
+    key_dim = max((lstm_units_1 * 2) // attn_heads, 8)
     context = TemporalAttentionBlock(
-        num_heads=attn_heads, key_dim=key_dim,
-        dropout=dropout_rate * 0.5, name="temporal_attn",
-    )(x, training=training_flag)   # (B, lstm_units_2)
+        num_heads=attn_heads,
+        key_dim=key_dim,
+        dropout=dropout_rate * 0.5,
+        name="temporal_attn",
+    )(bilstm_out, training=training_flag)
 
-    # ── Агрегация ──────────────────────────────────────────────────────────────
-    last_token = tf.keras.layers.Dropout(
-        dropout_rate * 0.5, name="drop_last"
-    )(x[:, -1, :], training=training_flag)  # (B, lstm_units_2)
-
+    last_token = tf.keras.layers.Dropout(dropout_rate * 0.5, name="drop_last")(
+        bilstm_out[:, -1, :],
+        training=training_flag,
+    )
     agg = tf.keras.layers.Concatenate(name="agg")([last_token, context])
-    # agg: (B, lstm_units_2 * 2)
 
-    # ── Dense-голова ───────────────────────────────────────────────────────────
-    # v6: L2=1e-4→1e-5.
-    # L2=1e-4 штрафует за большие веса → выходные активации «сжимаются» к нулю
-    # при нормализованных целях [0,1] → крупные пики подавляются.
-    # L2=1e-5 — слабый сглаживающий эффект без подавления амплитуды.
-    # Dropout 0.20/0.10 в голове оставлены: здесь dropout работает правильно
-    # (на финальных представлениях, не на временных зависимостях).
+    # Dense head.
     h = tf.keras.layers.Dense(
-        128, activation="gelu",
-        kernel_regularizer=tf.keras.regularizers.l2(1e-5),  # v6: 1e-4 → 1e-5
-        name="head_d1")(agg)
+        256,
+        activation="gelu",
+        kernel_regularizer=tf.keras.regularizers.l2(5e-6),
+        name="head_d1",
+    )(agg)
     h = tf.keras.layers.Dropout(dropout_rate, name="head_drop1")(h, training=training_flag)
 
     h = tf.keras.layers.Dense(
-        64, activation="gelu",
-        kernel_regularizer=tf.keras.regularizers.l2(1e-5),  # v6: 1e-4 → 1e-5
-        name="head_d2")(h)
+        128,
+        activation="gelu",
+        kernel_regularizer=tf.keras.regularizers.l2(5e-6),
+        name="head_d2",
+    )(h)
     h = tf.keras.layers.Dropout(dropout_rate * 0.5, name="head_drop2")(h, training=training_flag)
+    neural_out = tf.keras.layers.Dense(forecast_horizon, name="neural_output")(h)
 
-    out = tf.keras.layers.Dense(forecast_horizon, name="output")(h)
+    if use_seasonal_skip and history_length >= forecast_horizon:
+        naive_slice = cons_norm[:, -forecast_horizon:, 0]
+        mean_vec = kops.squeeze(mean_cons, axis=(1, 2))
+        std_vec = kops.squeeze(std_cons, axis=(1, 2))
 
-    model = tf.keras.Model(inputs=inp, outputs=out, name="AttentionLSTM_v5")
+        naive_denorm = naive_slice * kops.expand_dims(std_vec, axis=-1) + kops.expand_dims(mean_vec, axis=-1)
+        neural_denorm = neural_out * kops.expand_dims(std_vec, axis=-1) + kops.expand_dims(mean_vec, axis=-1)
+
+        mixed = SeasonalSkipConnection(name="seasonal_skip")([neural_denorm, naive_denorm])
+        final_out = (mixed - kops.expand_dims(mean_vec, axis=-1)) / kops.expand_dims(std_vec, axis=-1)
+        final_out = tf.keras.layers.Lambda(lambda t: t, name="output")(final_out)
+    else:
+        final_out = tf.keras.layers.Lambda(lambda t: t, name="output")(neural_out)
+
+    model = tf.keras.Model(inputs=inp, outputs=final_out, name="TCN_BiLSTM_Attention_v8")
     model.compile(
         optimizer=tf.keras.optimizers.Adam(learning_rate=learning_rate, clipnorm=1.0),
-        loss="mse",
+        loss=tf.keras.losses.Huber(delta=huber_delta, name=f"huber_d{huber_delta}"),
         metrics=["mae", "mape"],
     )
 
     logger.info(
-        "AttentionLSTM v6 | %d параметров | input=(%d,%d) | "
-        "LSTM=%d/%d seq_drop=0.05 | Attn heads=%d key_dim=%d | "
-        "Dense L2=1e-5 drop=0.20/0.10 | lr=%.0e | MSE",
-        model.count_params(), history_length, n_features,
-        lstm_units_1, lstm_units_2, attn_heads, key_dim, learning_rate,
+        "TCN-BiLSTM-Attention v8 | %d params | input=(%d,%d) | "
+        "TCN filters=%d | BiLSTM=%d | Attn heads=%d key_dim=%d | "
+        "Dense 256/128 drop=%.2f | SeasonalSkip=%s | lr=%.0e | Huber(δ=%.2f)",
+        model.count_params(),
+        history_length,
+        n_features,
+        tcn_filters,
+        lstm_units_1,
+        attn_heads,
+        key_dim,
+        dropout_rate,
+        use_seasonal_skip,
+        learning_rate,
+        huber_delta,
     )
     return model

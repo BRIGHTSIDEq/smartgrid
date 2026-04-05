@@ -3,38 +3,51 @@
 optimization/storage.py — Оптимизация BESS (Battery Energy Storage System).
 
 ═══════════════════════════════════════════════════════════════════════════════
-ИСПРАВЛЕНИЕ v4 — стратегии по SOC, а не по C-rate
+ИСПРАВЛЕНИЕ v5 — два критических бага экономического расчёта
+═══════════════════════════════════════════════════════════════════════════════
 
-ДИАГНОЗ БАГА v3 (одинаковая экономия):
-  При батарее 300 кВт·ч и SOC диапазоне 10–90% (270 кВт·ч):
-    - Ночная зона: 8 ч/сутки × 7 дней = 56 ч
-    - C=0.3 → 90 кВт → заряд до SOC_max за 270/90 = 3 ч → за 56 ч = ~18 полных циклов
-    - C=1.0 → 300 кВт → заряд за 0.9 ч → за 56 ч = ~18 полных циклов
-  Итого: все стратегии успевают зарядить батарею ПОЛНОСТЬЮ каждую ночь →
-  суммарная прокачка одинакова → экономия одинакова.
+БАГ #1 (O&M скачок 3 696 → 55 441 руб, разрыв ×15):
+──────────────────────────────────────────────────────
+  Первый вызов simulate_storage() в main.py не передавал battery_cost_rub.
+  Дефолт функции = 3_000_000, тогда как Config.BATTERY_COST_RUB = 45_000_000.
+  Результат: O&M = 45_000_000 × 0.015 × (720/8766) × (3M/45M) = 3 696 руб
+  → payback = 1.2 года (нереалистично), все последующие вызовы через
+  compare_strategies() давали 55 441 руб (корректно).
 
-КОРЕНЬ ОШИБКИ: C-rate только меняет скорость, не объём.
-  Для разной экономии нужно менять ОБЪЁМ (целевой SOC).
+  БЫЛО: battery_cost_rub: float = 3_000_000.0  ← тихий дефолт
+  СТАЛО: battery_cost_rub: float — обязательный параметр без дефолта.
+         Отсутствие значения → TypeError при вызове, не в расчёте.
+         main.py передаёт Config.BATTERY_COST_RUB=45_000_000 явно.
 
-ИСПРАВЛЕНИЕ: три стратегии по целевому SOC и глубине разряда:
+БАГ #2 (Demand-charge эффект = 0.00 руб во всех стратегиях):
+──────────────────────────────────────────────────────────────
+  СИМПТОМ: все три стратегии → demand_charge_savings = 0.00 руб.
 
-  Консервативная: заряд до 60%, разряд до 40%  → ΔE = 60 кВт·ч
-  Умеренная:      заряд до 75%, разряд до 25%  → ΔE = 150 кВт·ч
-  Агрессивная:    заряд до 92%, разряд до 8%   → ΔE = 252 кВт·ч
+  ПРИЧИНА: demand-charge считался по максимуму из ВСЕХ 720 часов:
+    baseline_peak_kw  = np.max(forecast)          ← правильно
+    optimized_peak_kw = np.max(energy_from_grid)  ← НЕПРАВИЛЬНО
 
-  Экономия ∝ ΔE × (tariff_peak - tariff_night/√η):
-    Консервативная: 60  × (6.50 - 1.85) ≈  279 руб/цикл
-    Умеренная:      150 × (6.50 - 1.85) ≈  698 руб/цикл
-    Агрессивная:    252 × (6.50 - 1.85) ≈ 1172 руб/цикл
+  При зарядке ночью:
+    grid_energy = demand + grid_draw  (добавляем зарядный ток к нагрузке)
+    Пример: ночная нагрузка 5 000 кВт + зарядка 2 250 кВт = 7 250 кВт
+    → max(energy_from_grid) ≥ max(forecast)  → экономия <= 0 → clamp → 0.
 
-  НО: деградация тоже растёт:
-    Агрессивная: 252 × 0.06 = 15.1 руб/цикл (сильнее изнашивает батарею)
-    → чистая экономия у умеренной может оказаться лучше агрессивной.
+  Физически это некорректно: demand-charge в России выставляется за
+  максимальную мощность в ПИКОВЫЕ БИЛЛИНГОВЫЕ ЧАСЫ (10–17 и 21–23 в будни),
+  а не за ночные часы зарядки.
 
-ОЖИДАЕМЫЙ РЕЗУЛЬТАТ:
-  Консервативная: ~1–2% экономии
-  Умеренная:      ~4–7%
-  Агрессивная:    ~7–12%  (но срок службы батареи короче)
+  БЫЛО: np.max(energy_from_grid) по всем 720 ч → всегда >= baseline
+  СТАЛО: отдельные списки grid_peak_hours_baseline / grid_peak_hours_optimized,
+         np.max() только по zone=="peak" часам → реальное снижение пика.
+
+ОЖИДАЕМЫЙ РЕЗУЛЬТАТ ПОСЛЕ ПАТЧА:
+  Demand-charge эффект: 0 → ненулевое значение (зависит от профиля нагрузки
+  и мощности батареи). При 4500 кВт·ч, ΔE=3780 кВт·ч: ~50–200k руб/30 дней.
+  Payback агрессивной стратегии: 12 лет → 8–10 лет.
+  O&M: единообразно ~55 441 руб во всех вызовах.
+
+═══════════════════════════════════════════════════════════════════════════════
+ИСПРАВЛЕНИЕ v4 (оставлено без изменений): стратегии по SOC, не по C-rate
 ═══════════════════════════════════════════════════════════════════════════════
 """
 
@@ -123,15 +136,22 @@ def simulate_storage(
     max_power: float = 150.0,
     round_trip_efficiency: float = 0.95,
     cycle_cost_per_kwh: float = 0.06,
-    min_soc: float = 0.10,          # нижняя граница SOC (доля от capacity)
-    max_soc: float = 0.90,          # верхняя граница SOC
+    min_soc: float = 0.10,
+    max_soc: float = 0.90,
     initial_soc: float = 0.50,
     tariff_night: float = 1.80,
     tariff_half_peak: float = 4.20,
     tariff_peak: float = 6.50,
     start_hour: int = 0,
     start_weekday: int = 0,
-    battery_cost_rub: float = 3_000_000.0,
+    # ── ИСПРАВЛЕНИЕ v5 #1: убран дефолт battery_cost_rub ────────────────────
+    # БЫЛО: battery_cost_rub: float = 3_000_000.0
+    #   Дефолт молча давал O&M в 15× меньше реального значения.
+    #   3_000_000 × 0.015 × (720/8766) = 3 696 руб (вместо 55 441)
+    # СТАЛО: параметр обязателен. Отсутствие → TypeError на вызове.
+    #   Правильное значение: Config.BATTERY_COST_RUB = 45_000_000
+    battery_cost_rub: float = None,
+    # ────────────────────────────────────────────────────────────────────────
     demand_charge_rub_per_kw_month: float = 950.0,
     annual_om_share: float = 0.015,
     strategy_name: str = "",
@@ -139,21 +159,25 @@ def simulate_storage(
     """
     Симулирует BESS с умной тарифной стратегией.
 
-    ФИЗИКА (исправленная):
-      Зарядка (ночь):
-        charge_to_batt = min(max_power, soc_max_kwh - soc)   [→ в батарею]
-        grid_draw      = charge_to_batt / one_way_eff         [← из сети]
-        soc           += charge_to_batt
+    ИСПРАВЛЕНИЯ v5:
+      #1 battery_cost_rub обязателен (нет дефолта)
+      #2 demand-charge считается только в пиковые биллинговые часы
 
-      Разрядка (пик):
-        can_draw       = min(max_power, soc - soc_min_kwh)   [← из SOC]
-        delivered      = can_draw * one_way_eff               [→ в нагрузку]
-        soc           -= can_draw
-        grid_energy    = max(0, demand - delivered)
-
-    Ключевой момент: min_soc и max_soc контролируют ОБЪЁМ цикла.
-    Именно они делают стратегии экономически различимыми.
+    Parameters
+    ----------
+    battery_cost_rub : float
+        Стоимость батарейной системы в рублях. ОБЯЗАТЕЛЬНЫЙ параметр.
+        Передавайте Config.BATTERY_COST_RUB явно.
+        Типовое значение для 4500 кВт·ч BESS: 45_000_000 руб.
     """
+    # ── Защита от забытого аргумента ─────────────────────────────────────────
+    if battery_cost_rub is None:
+        raise TypeError(
+            "simulate_storage() требует явный аргумент battery_cost_rub. "
+            "Передайте Config.BATTERY_COST_RUB. "
+            "Дефолт 3_000_000 удалён в v5 — он давал O&M в 15× ниже реального."
+        )
+
     n = len(forecast)
     one_way_eff = np.sqrt(round_trip_efficiency)
 
@@ -171,6 +195,15 @@ def simulate_storage(
     energy_from_grid: List[float] = []
     hourly_costs: List[float] = []
     total_cycled = 0.0
+
+    # ── ИСПРАВЛЕНИЕ v5 #2: отдельные списки для пиковых биллинговых часов ────
+    # БЫЛО: baseline/optimized peak = np.max(forecast / energy_from_grid) по 720 ч
+    #   Зарядный ток ночью поднимал energy_from_grid выше baseline → savings = 0.
+    # СТАЛО: собираем потребление из сети ТОЛЬКО в zone=="peak" часы.
+    #   В эти часы BESS разряжается → grid_energy < demand → реальное снижение пика.
+    grid_peak_hours_baseline: List[float] = []
+    grid_peak_hours_optimized: List[float] = []
+    # ────────────────────────────────────────────────────────────────────────
 
     for i in range(n):
         demand = float(forecast[i])
@@ -205,18 +238,39 @@ def simulate_storage(
         energy_from_grid.append(grid_energy)
         hourly_costs.append(grid_energy * price)
 
-    # ── Экономика: energy + demand charge + O&M ─────────────────────────────
+        # ── Сбор пика только в биллинговые пиковые часы ─────────────────────
+        if zone == "peak":
+            grid_peak_hours_baseline.append(demand)
+            grid_peak_hours_optimized.append(grid_energy)
+        # ────────────────────────────────────────────────────────────────────
+
+    # ── Экономика ─────────────────────────────────────────────────────────────
     baseline_cost = float(np.dot(forecast, prices))
     optimized_cost = float(sum(hourly_costs))
 
     horizon_days = max(n / 24.0, 1e-9)
     months_in_horizon = horizon_days / 30.4375
-    baseline_peak_kw = float(np.max(forecast))
-    optimized_peak_kw = float(np.max(np.asarray(energy_from_grid, dtype=np.float64)))
+
+    # ── ИСПРАВЛЕНИЕ v5 #2: demand-charge по пиковым часам ────────────────────
+    if grid_peak_hours_baseline:
+        baseline_peak_kw  = float(np.max(grid_peak_hours_baseline))
+        optimized_peak_kw = float(np.max(grid_peak_hours_optimized))
+    else:
+        # Нестандартный сценарий: пиковых часов нет в горизонте
+        logger.warning(
+            "В горизонте %d ч не найдено пиковых биллинговых часов "
+            "(zone='peak', 10–17 и 21–23 в будни). "
+            "Demand-charge считается по всем часам — возможно некорректно.",
+            n
+        )
+        baseline_peak_kw  = float(np.max(forecast))
+        optimized_peak_kw = float(np.max(np.asarray(energy_from_grid, dtype=np.float64)))
+
     demand_charge_savings = max(
         0.0,
         (baseline_peak_kw - optimized_peak_kw) * demand_charge_rub_per_kw_month * months_in_horizon,
     )
+    # ────────────────────────────────────────────────────────────────────────
 
     gross_savings = (baseline_cost - optimized_cost) + demand_charge_savings
     degradation_cost = total_cycled * cycle_cost_per_kwh
@@ -238,8 +292,16 @@ def simulate_storage(
     logger.info("Валовая экономия:          %10.2f руб", gross_savings)
     logger.info("  ├─ Energy arbitrage:     %10.2f руб", baseline_cost - optimized_cost)
     logger.info("  └─ Demand-charge эффект: %10.2f руб", demand_charge_savings)
+    logger.info("     (пик-часы: baseline=%.0f кВт → opt=%.0f кВт, снижение=%.0f кВт)",
+                baseline_peak_kw, optimized_peak_kw,
+                max(0.0, baseline_peak_kw - optimized_peak_kw))
     logger.info("Стоимость деградации:      %10.2f руб", degradation_cost)
-    logger.info("O&M за горизонт:           %10.2f руб", om_cost)
+    logger.info("O&M за горизонт:           %10.2f руб  "
+                "(%.0f M × %.1f%% × %.4f лет)",
+                om_cost,
+                battery_cost_rub / 1_000_000,
+                annual_om_share * 100,
+                horizon_days / 365.25)
     logger.info("ЧИСТАЯ экономия:           %10.2f руб (%.2f%%)", net_savings, net_savings_pct)
     logger.info("Прокачано:                 %10.2f кВт·ч", total_cycled)
     logger.info("Часов заряд/разряд:        %d / %d из %d", n_ch, n_dis, n)
@@ -272,7 +334,7 @@ def simulate_storage(
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# СРАВНЕНИЕ СТРАТЕГИЙ (по SOC, не по C-rate)
+# СРАВНЕНИЕ СТРАТЕГИЙ
 # ══════════════════════════════════════════════════════════════════════════════
 
 def compare_strategies(
@@ -281,10 +343,10 @@ def compare_strategies(
     max_power: float = 150.0,
     round_trip_efficiency: float = 0.95,
     cycle_cost_per_kwh: float = 0.06,
-    battery_cost_rub: float = 3_000_000.0,
-    tariff_night: float = 1.80,       # руб/кВт·ч — ночная зона (23–07)
-    tariff_half_peak: float = 4.20,   # руб/кВт·ч — дневная зона
-    tariff_peak: float = 6.50,        # руб/кВт·ч — пиковая зона (10–17, 21–23 будни)
+    battery_cost_rub: float = None,   # v5: обязательный параметр
+    tariff_night: float = 1.80,
+    tariff_half_peak: float = 4.20,
+    tariff_peak: float = 6.50,
     demand_charge_rub_per_kw_month: float = 950.0,
     annual_om_share: float = 0.015,
 ) -> Dict[str, StorageResult]:
@@ -294,11 +356,15 @@ def compare_strategies(
     Консервативная: SOC 40%→60%  ΔE= 60 кВт·ч — минимальный износ
     Умеренная:      SOC 25%→75%  ΔE=150 кВт·ч — оптимальный баланс
     Агрессивная:    SOC  8%→92%  ΔE=252 кВт·ч — максимальная экономия, быстрый износ
-
-    ΔE определяет прокачанную энергию → разную экономию и деградацию.
     """
+    if battery_cost_rub is None:
+        raise TypeError(
+            "compare_strategies() требует явный аргумент battery_cost_rub. "
+            "Передайте Config.BATTERY_COST_RUB."
+        )
+
     strategies = [
-        ("Консервативная",  0.40, 0.60),  # (name, min_soc, max_soc)
+        ("Консервативная",  0.40, 0.60),
         ("Умеренная",       0.25, 0.75),
         ("Агрессивная",     0.08, 0.92),
     ]

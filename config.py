@@ -196,30 +196,36 @@ class Config:
 
     @classmethod
     def set_full_mode(cls):
-        """730 дней, 300 эпох. validate_data_integrity теперь не падает (v7 preprocessing)."""
-        cls.DAYS = 730; cls.HOUSEHOLDS = 500; cls.EPOCHS = 300
-        cls.PATIENCE = 30; cls.LR_PATIENCE = 10
-        cls.HISTORY_LENGTH = 72; cls.STORAGE_HORIZON = 720; cls.N_FEATURES = 26
-        # v10: 96 (было 192 — тоже было бы overfitting на 12K сэмплах)
-        cls.LSTM_UNITS_1 = 96; cls.LSTM_UNITS_2 = 96; cls.LSTM_UNITS_3 = 96
-        cls.LSTM_ATTN_HEADS = 4; cls.LSTM_TCN_FILTERS = 48
-        cls.DROPOUT_RATE = 0.20; cls.LSTM_LEARNING_RATE = 2e-4; cls.LSTM_USE_COSINE_DECAY = False
+        """Максимальное качество (full mode): больше данных + более ёмкие seq-модели."""
+        cls.DAYS = 730; cls.HOUSEHOLDS = 2500; cls.EPOCHS = 320
+        cls.PATIENCE = 35; cls.LR_PATIENCE = 12
+        cls.HISTORY_LENGTH = 96; cls.STORAGE_HORIZON = 720; cls.N_FEATURES = 26
+        cls.BATCH_SIZE = 32
+        # На 730 днях и большом количестве окон можно использовать более ёмкий LSTM.
+        cls.LSTM_UNITS_1 = 128; cls.LSTM_UNITS_2 = 128; cls.LSTM_UNITS_3 = 128
+        cls.LSTM_ATTN_HEADS = 8; cls.LSTM_TCN_FILTERS = 64
+        cls.DROPOUT_RATE = 0.18; cls.LSTM_LEARNING_RATE = 1.2e-4; cls.LSTM_USE_COSINE_DECAY = False
         cls.LSTM_SEASONAL_BLEND_INIT = 0.35; cls.LSTM_HUBER_DELTA = 0.05
-        cls.TRANSFORMER_D_MODEL = 128; cls.TRANSFORMER_N_HEADS = 8
-        cls.TRANSFORMER_N_LAYERS = 4; cls.TRANSFORMER_DFF = 512
-        cls.TRANSFORMER_DROPOUT = 0.20; cls.TRANSFORMER_LEARNING_RATE = 3e-4
-        cls.VANILLA_TRANSFORMER_LR = 8e-5; cls.TRANSFORMER_STOCHASTIC_DEPTH = 0.10
+        cls.TRANSFORMER_D_MODEL = 256; cls.TRANSFORMER_N_HEADS = 8
+        cls.TRANSFORMER_N_LAYERS = 6; cls.TRANSFORMER_DFF = 512
+        cls.TRANSFORMER_DROPOUT = 0.15; cls.TRANSFORMER_LEARNING_RATE = 1.5e-4
+        cls.VANILLA_TRANSFORMER_LR = 2.5e-5; cls.TRANSFORMER_STOCHASTIC_DEPTH = 0.08
         cls.PATCHTST_USE_REVIN = True
         cls.VANILLA_USE_SEASONAL_RESIDUAL = True; cls.VANILLA_SEASONAL_BLEND_INIT = 0.40
         cls.VANILLA_HUBER_DELTA = 0.05
-        cls.XGB_N_ESTIMATORS = 800; cls.XGB_COLSAMPLE = 0.35
-        cls.GEN_EV_PENETRATION = 0.50; cls.GEN_INDUSTRIAL_LOADS = 8; cls.GEN_CITY_DISTRICTS = 14
+        cls.XGB_N_ESTIMATORS = 900; cls.XGB_COLSAMPLE = 0.35
+        cls.GEN_AR_SIGMA = 0.035
+        cls.GEN_EV_PENETRATION = 0.55; cls.GEN_INDUSTRIAL_LOADS = 10; cls.GEN_CITY_DISTRICTS = 16
         logging.getLogger("smart_grid").info(
-            "Full mode v10: DAYS=%d EPOCHS=%d N_FEATURES=%d | "
-            "LSTM BiLSTM=%d TCN=%d | Trans d=%d h=%d L=%d | EV=%.0f%%",
-            cls.DAYS, cls.EPOCHS, cls.N_FEATURES, cls.LSTM_UNITS_1, cls.LSTM_TCN_FILTERS,
-            cls.TRANSFORMER_D_MODEL, cls.TRANSFORMER_N_HEADS, cls.TRANSFORMER_N_LAYERS,
-            cls.GEN_EV_PENETRATION*100)
+            "Full mode v11: DAYS=%d HH=%d EPOCHS=%d HIST=%d | "
+            "LSTM BiLSTM=%d TCN=%d attn=%dh lr=%.0e drop=%.2f | "
+            "Trans d=%d h=%d L=%d dff=%d lr=%.0e van_lr=%.0e | "
+            "EV=%.0f%% Districts=%d AR_sigma=%.3f",
+            cls.DAYS, cls.HOUSEHOLDS, cls.EPOCHS, cls.HISTORY_LENGTH,
+            cls.LSTM_UNITS_1, cls.LSTM_TCN_FILTERS, cls.LSTM_ATTN_HEADS, cls.LSTM_LEARNING_RATE, cls.DROPOUT_RATE,
+            cls.TRANSFORMER_D_MODEL, cls.TRANSFORMER_N_HEADS, cls.TRANSFORMER_N_LAYERS, cls.TRANSFORMER_DFF,
+            cls.TRANSFORMER_LEARNING_RATE, cls.VANILLA_TRANSFORMER_LR,
+            cls.GEN_EV_PENETRATION*100, cls.GEN_CITY_DISTRICTS, cls.GEN_AR_SIGMA)
 
     @classmethod
     def print_summary(cls):

@@ -11,6 +11,11 @@ models/trainer.py — Универсальный тренер моделей.
   4. load_keras: добавлен TemporalAttentionBlock в custom_objects.
      БЫЛО: отсутствовал → ValueError при загрузке любой LSTM-модели.
      СТАЛО: импортируется из models.lstm и передаётся в custom_objects.
+
+ИСПРАВЛЕНИЯ v4 (диагностика остатков):
+  5. evaluate(): добавлен вызов diagnose_residuals() для детальной диагностики
+     автокорреляции (DW, ACF на лагах 1/24/48/168) и тяжёлых хвостов.
+     Выводит конкретные рекомендации в лог при DW < 1.5 или ACF(24) > 0.1.
 """
 
 import logging
@@ -20,7 +25,7 @@ from typing import Any, Dict, List, Optional
 
 import numpy as np
 import matplotlib
-matplotlib.use("Agg")   # headless backend — НЕТ GUI, сразу в файл
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import tensorflow as tf
 
@@ -29,6 +34,110 @@ from data.preprocessing import inverse_scale
 
 logger = logging.getLogger("smart_grid.models.trainer")
 
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ДИАГНОСТИКА ОСТАТКОВ (v4)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def diagnose_residuals(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    model_name: str = "",
+) -> Dict[str, Any]:
+    """
+    Расширенная диагностика остатков: DW, ACF на лагах 24/48/168, кurtosis.
+
+    Вызывается автоматически из evaluate() для каждой модели.
+    Логирует рекомендации при обнаружении проблем.
+
+    Returns
+    -------
+    dict: {"DW", "ACF_1", "ACF_24", "ACF_48", "ACF_168",
+           "skewness", "kurtosis", "recommendations"}
+    """
+    residuals = y_true.flatten() - y_pred.flatten()
+    n = len(residuals)
+
+    # ── Durbin-Watson ────────────────────────────────────────────────────────
+    diff_resid = np.diff(residuals)
+    dw = float(np.sum(diff_resid ** 2) / (np.sum(residuals ** 2) + 1e-12))
+
+    # ── ACF на ключевых лагах ────────────────────────────────────────────────
+    def acf_lag(series: np.ndarray, lag: int) -> float:
+        if len(series) <= lag:
+            return float("nan")
+        s = series - series.mean()
+        var = np.var(s) + 1e-12
+        return float(np.dot(s[lag:], s[:-lag]) / (len(s) * var))
+
+    acf_1   = acf_lag(residuals, 1)
+    acf_24  = acf_lag(residuals, 24)
+    acf_48  = acf_lag(residuals, 48)
+    acf_168 = acf_lag(residuals, 168)
+
+    # ── Kurtosis и Skewness ───────────────────────────────────────────────────
+    std = np.std(residuals) + 1e-12
+    kurt = float(np.mean((residuals - residuals.mean()) ** 4) / std ** 4)
+    skew = float(np.mean((residuals - residuals.mean()) ** 3) / std ** 3)
+
+    # ── Автоматические рекомендации ───────────────────────────────────────────
+    recommendations: List[str] = []
+    if dw < 1.5:
+        recommendations.append(
+            f"DW={dw:.3f} < 1.5: сильная автокорреляция. "
+            "→ Добавить load_lag_24h, load_lag_168h как ковариаты (preprocessing.py)."
+        )
+    if abs(acf_24) > 0.10:
+        recommendations.append(
+            f"ACF(24)={acf_24:.3f} > 0.10: суточная компонента не устранена. "
+            "→ Проверить наличие load_lag_24h в feature matrix."
+        )
+    if abs(acf_168) > 0.10:
+        recommendations.append(
+            f"ACF(168)={acf_168:.3f} > 0.10: недельная компонента не устранена. "
+            "→ Добавить load_lag_168h."
+        )
+    if kurt > 5:
+        recommendations.append(
+            f"Kurtosis={kurt:.2f} > 5: очень тяжёлые хвосты. "
+            "→ Заменить Huber(delta=0.1) на Huber(delta=0.05) или QuantileLoss(q=0.9)."
+        )
+    elif kurt > 3:
+        recommendations.append(
+            f"Kurtosis={kurt:.2f} > 3: тяжёлые хвосты. "
+            "→ Убедиться что используется Huber loss, не MSE (lstm.py)."
+        )
+
+    log = logging.getLogger("smart_grid.models.trainer")
+    log.info("─ Диагностика остатков: %s (n=%d) ─────────────────────────",
+             model_name or "?", n)
+    log.info("  DW=%.4f  ACF(1)=%.4f  ACF(24)=%.4f  ACF(48)=%.4f  ACF(168)=%.4f",
+             dw, acf_1, acf_24, acf_48, acf_168)
+    log.info("  Skewness=%.4f  Kurtosis=%.4f", skew, kurt)
+    if recommendations:
+        log.info("  ⚠️  Рекомендации:")
+        for rec in recommendations:
+            log.info("    → %s", rec)
+    else:
+        log.info("  ✅ Остатки в норме (DW≥1.5, |ACF(24)|<0.10, Kurt<3).")
+
+    return {
+        "model":           model_name,
+        "n":               n,
+        "DW":              round(dw, 4),
+        "ACF_1":           round(acf_1, 4),
+        "ACF_24":          round(acf_24, 4),
+        "ACF_48":          round(acf_48, 4),
+        "ACF_168":         round(acf_168, 4),
+        "skewness":        round(skew, 4),
+        "kurtosis":        round(kurt, 4),
+        "recommendations": recommendations,
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TRAINER
+# ══════════════════════════════════════════════════════════════════════════════
 
 class ModelTrainer:
     """
@@ -84,10 +193,6 @@ class ModelTrainer:
         lr_factor: float,
         min_delta: float,
     ) -> None:
-        # ReduceLROnPlateau несовместим с LearningRateSchedule (CosineDecay).
-        # TF2.15+: нельзя использовать hasattr(...,"__call__") — float LR тоже callable.
-        #          нельзя использовать `getattr() or getattr()` — bool(KerasVariable) crash.
-        # Единственный надёжный способ — inspect конфиг оптимизатора или try/except.
         _has_schedule = False
         try:
             _opt = self.model.optimizer
@@ -138,12 +243,6 @@ class ModelTrainer:
             raise
 
     def _train_sklearn(self, data: Dict[str, Any]) -> None:
-        """
-        Для sklearn/xgboost моделей — делегируем в wrapper.fit().
-        FlattenWrapper и LagFeaturesWrapper имеют единый интерфейс fit(X, Y).
-        Никакой XGBoost-специфичной логики здесь нет — она инкапсулирована
-        в соответствующих wrapper-классах из baseline.py.
-        """
         try:
             self.model.fit(
                 data["X_train"], data["Y_train"],
@@ -167,12 +266,6 @@ class ModelTrainer:
         """
         Monte Carlo Dropout: n_samples прогонов с training=True.
 
-        Использование:
-            mean, std = trainer.mc_predict(X_test, n_samples=50)
-
-        Требует модель, построенную с mc_dropout=True (v7: параметр сохраняется
-        в логах, но training=True надо передавать явно — что здесь и делается).
-
         Returns
         -------
         mean : np.ndarray shape=(N, horizon)
@@ -184,14 +277,25 @@ class ModelTrainer:
         preds = np.stack(
             [self.model(X, training=True).numpy() for _ in range(n_samples)],
             axis=0,
-        )  # (n_samples, N, horizon)
+        )
         return preds.mean(axis=0), preds.std(axis=0)
 
     def evaluate(
         self,
         data: Dict[str, Any],
         split: str = "test",
+        run_residual_diagnostics: bool = True,
     ) -> Dict[str, float]:
+        """
+        Оценка модели на split-е с опциональной диагностикой остатков.
+
+        Parameters
+        ----------
+        run_residual_diagnostics : bool
+            Если True — запускает diagnose_residuals() и выводит
+            DW/ACF/Kurt в лог с конкретными рекомендациями.
+            По умолчанию включено для всех моделей.
+        """
         X = data[f"X_{split}"]
         Y_true_scaled = data[f"Y_{split}"]
         scaler = data["scaler"]
@@ -200,7 +304,18 @@ class ModelTrainer:
         Y_true = inverse_scale(scaler, Y_true_scaled)
         Y_pred = inverse_scale(scaler, Y_pred_scaled)
 
-        return compute_all_metrics(Y_true, Y_pred, model_name=self.model_name)
+        metrics = compute_all_metrics(Y_true, Y_pred, model_name=self.model_name)
+
+        # ── v4: диагностика остатков ──────────────────────────────────────────
+        if run_residual_diagnostics:
+            diag = diagnose_residuals(Y_true, Y_pred, model_name=self.model_name)
+            metrics["DW"]       = diag["DW"]
+            metrics["ACF_24"]   = diag["ACF_24"]
+            metrics["ACF_168"]  = diag["ACF_168"]
+            metrics["kurtosis"] = diag["kurtosis"]
+        # ────────────────────────────────────────────────────────────────────
+
+        return metrics
 
     def save(self) -> str:
         os.makedirs(self.models_dir, exist_ok=True)
@@ -228,21 +343,15 @@ class ModelTrainer:
             from models.transformer import (
                 PreLNEncoderBlock, SinusoidalPE, Time2Vec, GatedResidualNetwork,
             )
-            # ── ИСПРАВЛЕНИЕ v3 ───────────────────────────────────────────────
-            # БЫЛО: TemporalAttentionBlock отсутствовал в custom_objects.
-            # tf.keras.models.load_model() не может восстановить граф LSTM-модели
-            # без явной регистрации кастомных слоёв → ValueError при загрузке.
-            # СТАЛО: импортируем и передаём TemporalAttentionBlock явно.
             from models.lstm import TemporalAttentionBlock
-            # ────────────────────────────────────────────────────────────────
             model = tf.keras.models.load_model(
                 path,
                 custom_objects={
-                    "PreLNEncoderBlock":    PreLNEncoderBlock,
-                    "SinusoidalPE":         SinusoidalPE,
-                    "Time2Vec":             Time2Vec,
-                    "GatedResidualNetwork": GatedResidualNetwork,
-                    "TemporalAttentionBlock": TemporalAttentionBlock,  # v3: добавлен
+                    "PreLNEncoderBlock":      PreLNEncoderBlock,
+                    "SinusoidalPE":           SinusoidalPE,
+                    "Time2Vec":               Time2Vec,
+                    "GatedResidualNetwork":   GatedResidualNetwork,
+                    "TemporalAttentionBlock": TemporalAttentionBlock,
                 },
             )
             trainer = cls(model, model_name or os.path.basename(path))
@@ -264,23 +373,27 @@ def compare_trainers(
     logger.info("\n%s", "=" * 60)
     logger.info("СРАВНЕНИЕ МОДЕЛЕЙ (split=%s)", split.upper())
     logger.info("%s", "=" * 60)
-    logger.info("%-22s %8s %8s %8s %7s", "Модель", "MAE", "RMSE", "MAPE%", "R2")
-    logger.info("%s", "-" * 58)
+    logger.info("%-22s %8s %8s %8s %7s %6s %7s",
+                "Модель", "MAE", "RMSE", "MAPE%", "R2", "DW", "ACF24")
+    logger.info("%s", "-" * 70)
 
     for trainer in trainers:
         try:
-            m = trainer.evaluate(data, split=split)
+            m = trainer.evaluate(data, split=split, run_residual_diagnostics=True)
             results[trainer.model_name] = m
+            dw_str   = f"{m.get('DW', float('nan')):.3f}"
+            acf_str  = f"{m.get('ACF_24', float('nan')):.3f}"
             logger.info(
-                "%-22s %8.2f %8.2f %7.2f%% %6.4f",
-                trainer.model_name, m["MAE"], m["RMSE"], m["MAPE"], m["R2"],
+                "%-22s %8.2f %8.2f %7.2f%% %6.4f %6s %7s",
+                trainer.model_name, m["MAE"], m["RMSE"],
+                m["MAPE"], m["R2"], dw_str, acf_str,
             )
         except Exception as exc:
             logger.error("Ошибка оценки %s: %s", trainer.model_name, exc)
 
     if results:
         best = min(results, key=lambda k: results[k]["MAE"])
-        logger.info("%s", "-" * 58)
+        logger.info("%s", "-" * 70)
         logger.info("Лучшая модель по MAE: %s", best)
 
     return results

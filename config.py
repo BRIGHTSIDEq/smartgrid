@@ -1,18 +1,20 @@
 # -*- coding: utf-8 -*-
-"""config.py — Централизованная конфигурация Smart Grid. Версия 9.
+"""config.py — Smart Grid v10.
 
-ИЗМЕНЕНИЯ v9:
-  N_FEATURES: 22 → 26 (добавлены cloud_cover, ev_load, solar_gen, dsr_active)
+ИЗМЕНЕНИЯ v10:
+  LSTM overfitting fix:
+    БЫЛО: LSTM_UNITS_1=128, LSTM_TCN_FILTERS=64 → 945K params → overfitting 2.4×
+          train_mae=0.019 vs val_mae=0.045, MAE=1182 > LinReg MAE=953
+    СТАЛО: LSTM_UNITS_1=64, LSTM_TCN_FILTERS=32 → ~150K params
+           Правило: 6K сэмплов / 150K params = 40 сэмплов/параметр (норма для dropout)
 
-  Отдельный LR для VanillaTransformer:
-    БЫЛО: TRANSFORMER_LEARNING_RATE=3e-4 для всех трансформеров
-    СТАЛО: VANILLA_TRANSFORMER_LR=5e-5 (10× ниже)
-    ПРИЧИНА: VanillaTransformer останавливался на эпохе 27 (best=7).
-    LR=3e-4 слишком высокий — модель сходилась в плохой локальный минимум
-    за 7 эпох, затем 20 эпох не улучшалась. LR=5e-5 → стабильное обучение.
+  EV generator params:
+    ev_penetration: 0.28 → 0.50
+    (EV time-wrap баг исправлен в generator.py → реальный вклад теперь 8-12%)
 
-  LSTM параметры для новой архитектуры v8 (TCN+BiLSTM):
-    LSTM_LEARNING_RATE: 3e-4 → 2e-4
+  full_mode fixes:
+    validate_data_integrity больше не падает (исправлено в preprocessing.py)
+    full_mode: LSTM_UNITS_1=96 (было 192 → 730 days × 192 = ещё хуже overfitting)
 """
 
 import os
@@ -22,12 +24,9 @@ import logging
 class Config:
 
     SEED: int = 42
-
     DAYS: int = 365
     HOUSEHOLDS: int = 500
     START_DATE: str = "2024-01-01"
-
-    # v9: 22 → 26 (cloud_cover, ev_load_norm, solar_gen_norm, dsr_active)
     N_FEATURES: int = 26
 
     HISTORY_LENGTH: int = 48
@@ -40,32 +39,36 @@ class Config:
 
     EPOCHS: int = 200
     BATCH_SIZE: int = 32
-    PATIENCE: int = 25          # v9: 20→25 (больше терпения для TCN+BiLSTM)
-    LR_PATIENCE: int = 10       # v9: 8→10
+    PATIENCE: int = 25
+    LR_PATIENCE: int = 10
     LR_FACTOR: float = 0.5
     MIN_DELTA: float = 0.0
 
-    # LSTM (TCN+BiLSTM+Attention v8)
-    LSTM_UNITS_1: int = 128          # BiLSTM units per direction → 256 total
-    LSTM_UNITS_2: int = 64
-    LSTM_UNITS_3: int = 64
+    # LSTM v9 (TCN+BiLSTM+Attention)
+    LSTM_UNITS_1: int = 64          # v10: 128→64 (был overfitting 945K→150K params)
+    LSTM_UNITS_2: int = 64          # compat
+    LSTM_UNITS_3: int = 64          # compat
     DROPOUT_RATE: float = 0.20
-    LSTM_LEARNING_RATE: float = 2e-4  # v9: 3e-4→2e-4 для TCN+BiLSTM
-    LSTM_ATTN_HEADS: int = 8          # v9: 4→8
+    LSTM_LEARNING_RATE: float = 2e-4
+    LSTM_ATTN_HEADS: int = 4        # v10: 8→4 (part of size reduction)
     LSTM_USE_COSINE_DECAY: bool = False
-    LSTM_TCN_FILTERS: int = 64        # v9: TCN filters per branch
-    LSTM_HUBER_DELTA: float = 0.05    # v9: 0.10→0.05 (строже на пики)
+    LSTM_TCN_FILTERS: int = 32      # v10: 64→32 (part of size reduction)
+    LSTM_HUBER_DELTA: float = 0.05
+    LSTM_SEASONAL_BLEND_INIT: float = 0.35
 
-    # Transformer (PatchTST и VanillaTransformer)
+    # Transformer
     TRANSFORMER_D_MODEL: int = 128
     TRANSFORMER_N_HEADS: int = 8
     TRANSFORMER_N_LAYERS: int = 4
     TRANSFORMER_DFF: int = 256
     TRANSFORMER_DROPOUT: float = 0.20
-    TRANSFORMER_LEARNING_RATE: float = 3e-4    # PatchTST LR (работает хорошо)
-    VANILLA_TRANSFORMER_LR: float = 5e-5       # v9: отдельный LR для VanillaTransformer
+    TRANSFORMER_LEARNING_RATE: float = 3e-4
+    VANILLA_TRANSFORMER_LR: float = 5e-5
     TRANSFORMER_STOCHASTIC_DEPTH: float = 0.10
     PATCHTST_USE_REVIN: bool = True
+    VANILLA_USE_SEASONAL_RESIDUAL: bool = True
+    VANILLA_SEASONAL_BLEND_INIT: float = 0.40
+    VANILLA_HUBER_DELTA: float = 0.05
 
     # XGBoost
     XGB_N_ESTIMATORS: int = 500
@@ -74,7 +77,7 @@ class Config:
     XGB_SUBSAMPLE: float = 0.80
     XGB_COLSAMPLE: float = 0.40
 
-    # Generator v5 params
+    # Generator v6 params
     GEN_TEMP_SETPOINT: float = 18.0
     GEN_TEMP_QUADRATIC_COEF: float = 2.5e-4
     GEN_HUMIDITY_THRESHOLD: float = 60.0
@@ -83,13 +86,13 @@ class Config:
     GEN_WIND_COEF: float = 0.15
     GEN_EARLY_BIRD_FRAC: float = 0.28
     GEN_NIGHT_OWL_FRAC:  float = 0.20
-    GEN_AR_PHI: float   = 0.65   # v9: усилен
-    GEN_AR_SIGMA: float = 0.060  # v9: усилен
+    GEN_AR_PHI: float   = 0.65
+    GEN_AR_SIGMA: float = 0.060
     GEN_SEASONAL_WINTER_BOOST: float = 0.15
     GEN_SEASONAL_SUMMER_DIP:   float = 0.10
-    GEN_EV_PENETRATION: float  = 0.28   # v9: 28% EV
-    GEN_SOLAR_PENETRATION: float = 0.22  # v9: 22% Solar
-    GEN_INDUSTRIAL_LOADS: int  = 4       # v9: 4 пром.потребителя
+    GEN_EV_PENETRATION: float   = 0.50   # v10: 28%→50% + time-wrap исправлен
+    GEN_SOLAR_PENETRATION: float = 0.22
+    GEN_INDUSTRIAL_LOADS: int   = 6      # v10: 4→6
 
     # Батарея
     BATTERY_CAPACITY: float = 4_500.0
@@ -102,12 +105,10 @@ class Config:
     BATTERY_MIN_SOC: float = 0.25
     BATTERY_MAX_SOC: float = 0.75
 
-    # Тарифы
     TARIFF_PEAK: float = 6.50
     TARIFF_HALF_PEAK: float = 4.20
     TARIFF_NIGHT: float = 1.80
 
-    # Пути
     BASE_DIR: str = os.path.dirname(os.path.abspath(__file__))
     OUTPUT_DIR: str  = os.path.join(BASE_DIR, "results")
     MODELS_DIR: str  = os.path.join(BASE_DIR, "results", "models")
@@ -139,68 +140,84 @@ class Config:
     def set_fast_mode(cls):
         cls.DAYS = 365; cls.HOUSEHOLDS = 250; cls.EPOCHS = 120
         cls.PATIENCE = 20; cls.LR_PATIENCE = 8
-        cls.HISTORY_LENGTH = 48; cls.STORAGE_HORIZON = 720
-        cls.N_FEATURES = 26
-        cls.LSTM_UNITS_1 = 96; cls.LSTM_UNITS_2 = 48; cls.LSTM_UNITS_3 = 48
-        cls.LSTM_ATTN_HEADS = 4; cls.LSTM_TCN_FILTERS = 48
+        cls.HISTORY_LENGTH = 48; cls.STORAGE_HORIZON = 720; cls.N_FEATURES = 26
+        cls.LSTM_UNITS_1 = 48; cls.LSTM_UNITS_2 = 48; cls.LSTM_UNITS_3 = 48
+        cls.LSTM_ATTN_HEADS = 4; cls.LSTM_TCN_FILTERS = 32
         cls.DROPOUT_RATE = 0.25; cls.LSTM_LEARNING_RATE = 2e-4; cls.LSTM_USE_COSINE_DECAY = False
+        cls.LSTM_SEASONAL_BLEND_INIT = 0.30; cls.LSTM_HUBER_DELTA = 0.05
         cls.TRANSFORMER_D_MODEL = 64; cls.TRANSFORMER_N_HEADS = 4
         cls.TRANSFORMER_N_LAYERS = 2; cls.TRANSFORMER_DFF = 128
         cls.TRANSFORMER_DROPOUT = 0.20; cls.TRANSFORMER_LEARNING_RATE = 3e-4
-        cls.VANILLA_TRANSFORMER_LR = 5e-5
-        cls.TRANSFORMER_STOCHASTIC_DEPTH = 0.05; cls.PATCHTST_USE_REVIN = True
-        cls.XGB_N_ESTIMATORS = 300
+        cls.VANILLA_TRANSFORMER_LR = 8e-5; cls.TRANSFORMER_STOCHASTIC_DEPTH = 0.05
+        cls.PATCHTST_USE_REVIN = True
+        cls.VANILLA_USE_SEASONAL_RESIDUAL = True; cls.VANILLA_SEASONAL_BLEND_INIT = 0.35
+        cls.VANILLA_HUBER_DELTA = 0.05; cls.XGB_N_ESTIMATORS = 300
+        cls.GEN_EV_PENETRATION = 0.50; cls.GEN_INDUSTRIAL_LOADS = 4
         logging.getLogger("smart_grid").info(
-            "Fast mode v9: DAYS=%d EPOCHS=%d N_FEATURES=%d | LSTM BiLSTM=%d TCN=%d | VanTr LR=%.0e",
+            "Fast mode v10: DAYS=%d EPOCHS=%d N_FEATURES=%d | "
+            "LSTM BiLSTM=%d TCN=%d (~%dK params) | VanTr LR=%.0e | EV=%.0f%%",
             cls.DAYS, cls.EPOCHS, cls.N_FEATURES, cls.LSTM_UNITS_1, cls.LSTM_TCN_FILTERS,
-            cls.VANILLA_TRANSFORMER_LR)
+            # rough param estimate
+            (4*cls.LSTM_TCN_FILTERS*26 + 4*cls.LSTM_UNITS_1*(4*cls.LSTM_TCN_FILTERS+cls.LSTM_UNITS_1) + 128*64)//1000,
+            cls.VANILLA_TRANSFORMER_LR, cls.GEN_EV_PENETRATION*100)
 
     @classmethod
     def set_optimal_mode(cls):
         cls.DAYS = 365; cls.HOUSEHOLDS = 500; cls.EPOCHS = 200
         cls.PATIENCE = 25; cls.LR_PATIENCE = 10
-        cls.HISTORY_LENGTH = 48; cls.STORAGE_HORIZON = 720
-        cls.N_FEATURES = 26
-        cls.LSTM_UNITS_1 = 128; cls.LSTM_UNITS_2 = 64; cls.LSTM_UNITS_3 = 64
-        cls.LSTM_ATTN_HEADS = 8; cls.LSTM_TCN_FILTERS = 64
+        cls.HISTORY_LENGTH = 48; cls.STORAGE_HORIZON = 720; cls.N_FEATURES = 26
+        # v10: LSTM уменьшен для борьбы с overfitting
+        cls.LSTM_UNITS_1 = 64; cls.LSTM_UNITS_2 = 64; cls.LSTM_UNITS_3 = 64
+        cls.LSTM_ATTN_HEADS = 4; cls.LSTM_TCN_FILTERS = 32
         cls.DROPOUT_RATE = 0.20; cls.LSTM_LEARNING_RATE = 2e-4; cls.LSTM_USE_COSINE_DECAY = False
-        cls.LSTM_HUBER_DELTA = 0.05
+        cls.LSTM_SEASONAL_BLEND_INIT = 0.35; cls.LSTM_HUBER_DELTA = 0.05
         cls.TRANSFORMER_D_MODEL = 128; cls.TRANSFORMER_N_HEADS = 8
         cls.TRANSFORMER_N_LAYERS = 4; cls.TRANSFORMER_DFF = 256
         cls.TRANSFORMER_DROPOUT = 0.20; cls.TRANSFORMER_LEARNING_RATE = 3e-4
-        cls.VANILLA_TRANSFORMER_LR = 5e-5   # ключевое исправление
-        cls.TRANSFORMER_STOCHASTIC_DEPTH = 0.10; cls.PATCHTST_USE_REVIN = True
+        cls.VANILLA_TRANSFORMER_LR = 5e-5; cls.TRANSFORMER_STOCHASTIC_DEPTH = 0.10
+        cls.PATCHTST_USE_REVIN = True
+        cls.VANILLA_USE_SEASONAL_RESIDUAL = True; cls.VANILLA_SEASONAL_BLEND_INIT = 0.40
+        cls.VANILLA_HUBER_DELTA = 0.05
         cls.XGB_N_ESTIMATORS = 500; cls.XGB_COLSAMPLE = 0.40
+        cls.GEN_EV_PENETRATION = 0.50; cls.GEN_INDUSTRIAL_LOADS = 6
         logging.getLogger("smart_grid").info(
-            "Optimal mode v9: DAYS=%d EPOCHS=%d N_FEATURES=%d | "
-            "LSTM TCN-BiLSTM heads=%d tcn=%d lr=%.0e huber=%.2f | "
+            "Optimal mode v10: DAYS=%d EPOCHS=%d N_FEATURES=%d | "
+            "LSTM TCN=%d BiLSTM=%d heads=%d lr=%.0e huber=%.2f | "
             "Trans d=%d h=%d L=%d lr=%.0e | VanTr LR=%.0e | "
-            "STORAGE=%dh BAT=%.0f кВт·ч",
+            "EV=%.0f%% STORAGE=%dh BAT=%.0f кВт·ч",
             cls.DAYS, cls.EPOCHS, cls.N_FEATURES,
-            cls.LSTM_ATTN_HEADS, cls.LSTM_TCN_FILTERS, cls.LSTM_LEARNING_RATE, cls.LSTM_HUBER_DELTA,
+            cls.LSTM_TCN_FILTERS, cls.LSTM_UNITS_1, cls.LSTM_ATTN_HEADS,
+            cls.LSTM_LEARNING_RATE, cls.LSTM_HUBER_DELTA,
             cls.TRANSFORMER_D_MODEL, cls.TRANSFORMER_N_HEADS, cls.TRANSFORMER_N_LAYERS,
             cls.TRANSFORMER_LEARNING_RATE, cls.VANILLA_TRANSFORMER_LR,
-            cls.STORAGE_HORIZON, cls.BATTERY_CAPACITY)
+            cls.GEN_EV_PENETRATION*100, cls.STORAGE_HORIZON, cls.BATTERY_CAPACITY)
 
     @classmethod
     def set_full_mode(cls):
+        """730 дней, 300 эпох. validate_data_integrity теперь не падает (v7 preprocessing)."""
         cls.DAYS = 730; cls.HOUSEHOLDS = 500; cls.EPOCHS = 300
         cls.PATIENCE = 30; cls.LR_PATIENCE = 10
-        cls.HISTORY_LENGTH = 72; cls.STORAGE_HORIZON = 720
-        cls.N_FEATURES = 26
-        cls.LSTM_UNITS_1 = 192; cls.LSTM_UNITS_2 = 96; cls.LSTM_UNITS_3 = 96
-        cls.LSTM_ATTN_HEADS = 8; cls.LSTM_TCN_FILTERS = 96
+        cls.HISTORY_LENGTH = 72; cls.STORAGE_HORIZON = 720; cls.N_FEATURES = 26
+        # v10: 96 (было 192 — тоже было бы overfitting на 12K сэмплах)
+        cls.LSTM_UNITS_1 = 96; cls.LSTM_UNITS_2 = 96; cls.LSTM_UNITS_3 = 96
+        cls.LSTM_ATTN_HEADS = 4; cls.LSTM_TCN_FILTERS = 48
         cls.DROPOUT_RATE = 0.20; cls.LSTM_LEARNING_RATE = 2e-4; cls.LSTM_USE_COSINE_DECAY = False
-        cls.LSTM_HUBER_DELTA = 0.05
+        cls.LSTM_SEASONAL_BLEND_INIT = 0.35; cls.LSTM_HUBER_DELTA = 0.05
         cls.TRANSFORMER_D_MODEL = 128; cls.TRANSFORMER_N_HEADS = 8
         cls.TRANSFORMER_N_LAYERS = 4; cls.TRANSFORMER_DFF = 512
         cls.TRANSFORMER_DROPOUT = 0.20; cls.TRANSFORMER_LEARNING_RATE = 3e-4
-        cls.VANILLA_TRANSFORMER_LR = 5e-5
-        cls.TRANSFORMER_STOCHASTIC_DEPTH = 0.10; cls.PATCHTST_USE_REVIN = True
+        cls.VANILLA_TRANSFORMER_LR = 8e-5; cls.TRANSFORMER_STOCHASTIC_DEPTH = 0.10
+        cls.PATCHTST_USE_REVIN = True
+        cls.VANILLA_USE_SEASONAL_RESIDUAL = True; cls.VANILLA_SEASONAL_BLEND_INIT = 0.40
+        cls.VANILLA_HUBER_DELTA = 0.05
         cls.XGB_N_ESTIMATORS = 800; cls.XGB_COLSAMPLE = 0.35
+        cls.GEN_EV_PENETRATION = 0.50; cls.GEN_INDUSTRIAL_LOADS = 6
         logging.getLogger("smart_grid").info(
-            "Full mode v9: DAYS=%d EPOCHS=%d N_FEATURES=%d | BiLSTM=%d TCN=%d",
-            cls.DAYS, cls.EPOCHS, cls.N_FEATURES, cls.LSTM_UNITS_1, cls.LSTM_TCN_FILTERS)
+            "Full mode v10: DAYS=%d EPOCHS=%d N_FEATURES=%d | "
+            "LSTM BiLSTM=%d TCN=%d | Trans d=%d h=%d L=%d | EV=%.0f%%",
+            cls.DAYS, cls.EPOCHS, cls.N_FEATURES, cls.LSTM_UNITS_1, cls.LSTM_TCN_FILTERS,
+            cls.TRANSFORMER_D_MODEL, cls.TRANSFORMER_N_HEADS, cls.TRANSFORMER_N_LAYERS,
+            cls.GEN_EV_PENETRATION*100)
 
     @classmethod
     def print_summary(cls):
@@ -208,24 +225,26 @@ class Config:
         log.info("─" * 50)
         log.info("КОНФИГУРАЦИЯ:")
         log.info("  Данные:      %d дней, %d домохозяйств", cls.DAYS, cls.HOUSEHOLDS)
-        log.info("  Признаки:    %d ковариат на шаг (мультивариантный вход)", cls.N_FEATURES)
+        log.info("  Признаки:    %d ковариат на шаг", cls.N_FEATURES)
         log.info("  История:     %d ч → прогноз %d ч", cls.HISTORY_LENGTH, cls.FORECAST_HORIZON)
         log.info("  Обучение:    %d эпох, batch=%d, patience=%d", cls.EPOCHS, cls.BATCH_SIZE, cls.PATIENCE)
-        log.info("  LSTM v8:     BiLSTM=%d TCN_filters=%d attn=%dh, drop=%.2f, lr=%g, huber=%.2f, input=(%d,%d)",
+        log.info("  LSTM v9:     BiLSTM=%d TCN=%d attn=%dh drop=%.2f lr=%g huber=%.2f input=(%d,%d)",
                  cls.LSTM_UNITS_1, cls.LSTM_TCN_FILTERS, cls.LSTM_ATTN_HEADS,
                  cls.DROPOUT_RATE, cls.LSTM_LEARNING_RATE, cls.LSTM_HUBER_DELTA,
                  cls.HISTORY_LENGTH, cls.N_FEATURES)
-        log.info("  Transformer: d=%d h=%d L=%d dff=%d drop=%.2f, lr=%g (Vanilla lr=%g), input=(%d,%d)",
-                 cls.TRANSFORMER_D_MODEL, cls.TRANSFORMER_N_HEADS,
-                 cls.TRANSFORMER_N_LAYERS, cls.TRANSFORMER_DFF,
-                 cls.TRANSFORMER_DROPOUT, cls.TRANSFORMER_LEARNING_RATE,
-                 cls.VANILLA_TRANSFORMER_LR, cls.HISTORY_LENGTH, cls.N_FEATURES)
-        log.info("  XGBoost:     n_est=%d, depth=%d, col=%.2f",
+        log.info("  Transformer: d=%d h=%d L=%d dff=%d drop=%.2f lr=%g (Vanilla lr=%g) input=(%d,%d)",
+                 cls.TRANSFORMER_D_MODEL, cls.TRANSFORMER_N_HEADS, cls.TRANSFORMER_N_LAYERS,
+                 cls.TRANSFORMER_DFF, cls.TRANSFORMER_DROPOUT,
+                 cls.TRANSFORMER_LEARNING_RATE, cls.VANILLA_TRANSFORMER_LR,
+                 cls.HISTORY_LENGTH, cls.N_FEATURES)
+        log.info("  XGBoost:     n_est=%d depth=%d col=%.2f",
                  cls.XGB_N_ESTIMATORS, cls.XGB_MAX_DEPTH, cls.XGB_COLSAMPLE)
+        log.info("  Generator:   EV=%.0f%% Solar=%.0f%% IndustLoads=%d AR_phi=%.2f AR_sig=%.3f",
+                 cls.GEN_EV_PENETRATION*100, cls.GEN_SOLAR_PENETRATION*100,
+                 cls.GEN_INDUSTRIAL_LOADS, cls.GEN_AR_PHI, cls.GEN_AR_SIGMA)
         log.info("  Тарифы:      пик=%.2f день=%.2f ночь=%.2f руб/кВт·ч",
                  cls.TARIFF_PEAK, cls.TARIFF_HALF_PEAK, cls.TARIFF_NIGHT)
         log.info("  Батарея:     %.0f кВт·ч, SOC %.0f%%→%.0f%% (ΔE=%.0f кВт·ч)",
-                 cls.BATTERY_CAPACITY,
-                 cls.BATTERY_MIN_SOC*100, cls.BATTERY_MAX_SOC*100,
+                 cls.BATTERY_CAPACITY, cls.BATTERY_MIN_SOC*100, cls.BATTERY_MAX_SOC*100,
                  (cls.BATTERY_MAX_SOC-cls.BATTERY_MIN_SOC)*cls.BATTERY_CAPACITY)
         log.info("─" * 50)

@@ -1,250 +1,432 @@
 # -*- coding: utf-8 -*-
-"""config.py — Smart Grid v10.
+"""
+models/trainer.py — Универсальный тренер моделей.
 
-ИЗМЕНЕНИЯ v10:
-  LSTM overfitting fix:
-    БЫЛО: LSTM_UNITS_1=128, LSTM_TCN_FILTERS=64 → 945K params → overfitting 2.4×
-          train_mae=0.019 vs val_mae=0.045, MAE=1182 > LinReg MAE=953
-    СТАЛО: LSTM_UNITS_1=64, LSTM_TCN_FILTERS=32 → ~150K params
-           Правило: 6K сэмплов / 150K params = 40 сэмплов/параметр (норма для dropout)
+ИСПРАВЛЕНИЯ v2:
+  1. EarlyStopping: добавлен min_delta=Config.MIN_DELTA
+  2. XGBoost: передаём eval_set для early_stopping_rounds
+  3. plt.show() → plt.savefig() без show() в headless-режиме
 
-  EV generator params:
-    ev_penetration: 0.28 → 0.50
-    (EV time-wrap баг исправлен в generator.py → реальный вклад теперь 8-12%)
+ИСПРАВЛЕНИЯ v3 (баги из code review):
+  4. load_keras: добавлен TemporalAttentionBlock в custom_objects.
+     БЫЛО: отсутствовал → ValueError при загрузке любой LSTM-модели.
+     СТАЛО: импортируется из models.lstm и передаётся в custom_objects.
 
-  full_mode fixes:
-    validate_data_integrity больше не падает (исправлено в preprocessing.py)
-    full_mode: LSTM_UNITS_1=96 (было 192 → 730 days × 192 = ещё хуже overfitting)
+ИСПРАВЛЕНИЯ v4 (диагностика остатков):
+  5. evaluate(): добавлен вызов diagnose_residuals() для детальной диагностики
+     автокорреляции (DW, ACF на лагах 1/24/48/168) и тяжёлых хвостов.
+     Выводит конкретные рекомендации в лог при DW < 1.5 или ACF(24) > 0.1.
 """
 
-import os
 import logging
+import os
+import time
+from typing import Any, Dict, List, Optional
+
+import numpy as np
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import tensorflow as tf
+
+from utils.metrics import compute_all_metrics
+from data.preprocessing import inverse_scale
+
+logger = logging.getLogger("smart_grid.models.trainer")
 
 
-class Config:
+# ══════════════════════════════════════════════════════════════════════════════
+# ДИАГНОСТИКА ОСТАТКОВ (v4)
+# ══════════════════════════════════════════════════════════════════════════════
 
-    SEED: int = 42
-    DAYS: int = 365
-    HOUSEHOLDS: int = 500
-    START_DATE: str = "2024-01-01"
-    N_FEATURES: int = 26
+def diagnose_residuals(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    model_name: str = "",
+) -> Dict[str, Any]:
+    """
+    Расширенная диагностика остатков: DW, ACF на лагах 24/48/168, кurtosis.
 
-    HISTORY_LENGTH: int = 48
-    FORECAST_HORIZON: int = 24
-    STORAGE_HORIZON: int = 720
+    Вызывается автоматически из evaluate() для каждой модели.
+    Логирует рекомендации при обнаружении проблем.
 
-    TRAIN_RATIO: float = 0.70
-    VAL_RATIO: float = 0.15
-    TEST_RATIO: float = 0.15
+    Returns
+    -------
+    dict: {"DW", "ACF_1", "ACF_24", "ACF_48", "ACF_168",
+           "skewness", "kurtosis", "recommendations"}
+    """
+    residuals = y_true.flatten() - y_pred.flatten()
+    n = len(residuals)
 
-    EPOCHS: int = 200
-    BATCH_SIZE: int = 32
-    PATIENCE: int = 25
-    LR_PATIENCE: int = 10
-    LR_FACTOR: float = 0.5
-    MIN_DELTA: float = 0.0
+    # ── Durbin-Watson ────────────────────────────────────────────────────────
+    diff_resid = np.diff(residuals)
+    dw = float(np.sum(diff_resid ** 2) / (np.sum(residuals ** 2) + 1e-12))
 
-    # LSTM v9 (TCN+BiLSTM+Attention)
-    LSTM_UNITS_1: int = 64          # v10: 128→64 (был overfitting 945K→150K params)
-    LSTM_UNITS_2: int = 64          # compat
-    LSTM_UNITS_3: int = 64          # compat
-    DROPOUT_RATE: float = 0.20
-    LSTM_LEARNING_RATE: float = 2e-4
-    LSTM_ATTN_HEADS: int = 4        # v10: 8→4 (part of size reduction)
-    LSTM_USE_COSINE_DECAY: bool = False
-    LSTM_TCN_FILTERS: int = 32      # v10: 64→32 (part of size reduction)
-    LSTM_HUBER_DELTA: float = 0.05
-    LSTM_SEASONAL_BLEND_INIT: float = 0.35
+    # ── ACF на ключевых лагах ────────────────────────────────────────────────
+    def acf_lag(series: np.ndarray, lag: int) -> float:
+        if len(series) <= lag:
+            return float("nan")
+        s = series - series.mean()
+        var = np.var(s) + 1e-12
+        return float(np.dot(s[lag:], s[:-lag]) / (len(s) * var))
 
-    # Transformer
-    TRANSFORMER_D_MODEL: int = 128
-    TRANSFORMER_N_HEADS: int = 8
-    TRANSFORMER_N_LAYERS: int = 4
-    TRANSFORMER_DFF: int = 256
-    TRANSFORMER_DROPOUT: float = 0.20
-    TRANSFORMER_LEARNING_RATE: float = 3e-4
-    VANILLA_TRANSFORMER_LR: float = 5e-5
-    TRANSFORMER_STOCHASTIC_DEPTH: float = 0.10
-    PATCHTST_USE_REVIN: bool = True
-    VANILLA_USE_SEASONAL_RESIDUAL: bool = True
-    VANILLA_SEASONAL_BLEND_INIT: float = 0.40
-    VANILLA_HUBER_DELTA: float = 0.05
+    acf_1   = acf_lag(residuals, 1)
+    acf_24  = acf_lag(residuals, 24)
+    acf_48  = acf_lag(residuals, 48)
+    acf_168 = acf_lag(residuals, 168)
 
-    # XGBoost
-    XGB_N_ESTIMATORS: int = 500
-    XGB_MAX_DEPTH: int = 5
-    XGB_LR: float = 0.05
-    XGB_SUBSAMPLE: float = 0.80
-    XGB_COLSAMPLE: float = 0.40
+    # ── Kurtosis и Skewness ───────────────────────────────────────────────────
+    std = np.std(residuals) + 1e-12
+    kurt = float(np.mean((residuals - residuals.mean()) ** 4) / std ** 4)
+    skew = float(np.mean((residuals - residuals.mean()) ** 3) / std ** 3)
 
-    # Generator v6 params
-    GEN_TEMP_SETPOINT: float = 18.0
-    GEN_TEMP_QUADRATIC_COEF: float = 2.5e-4
-    GEN_HUMIDITY_THRESHOLD: float = 60.0
-    GEN_HUMIDITY_COEF: float = 0.30
-    GEN_WIND_TEMP_THRESHOLD: float = 10.0
-    GEN_WIND_COEF: float = 0.15
-    GEN_EARLY_BIRD_FRAC: float = 0.28
-    GEN_NIGHT_OWL_FRAC:  float = 0.20
-    GEN_AR_PHI: float   = 0.65
-    GEN_AR_SIGMA: float = 0.060
-    GEN_SEASONAL_WINTER_BOOST: float = 0.15
-    GEN_SEASONAL_SUMMER_DIP:   float = 0.10
-    GEN_EV_PENETRATION: float   = 0.50   # v10: 28%→50% + time-wrap исправлен
-    GEN_SOLAR_PENETRATION: float = 0.22
-    GEN_INDUSTRIAL_LOADS: int   = 6      # v10: 4→6
-
-    # Батарея
-    BATTERY_CAPACITY: float = 4_500.0
-    BATTERY_MAX_POWER: float = 2_250.0
-    BATTERY_EFFICIENCY: float = 0.95
-    BATTERY_CYCLE_COST: float = 0.06
-    BATTERY_COST_RUB: float = 45_000_000.0
-    BATTERY_OM_SHARE: float = 0.015
-    DEMAND_CHARGE_RUB_PER_KW_MONTH: float = 950.0
-    BATTERY_MIN_SOC: float = 0.25
-    BATTERY_MAX_SOC: float = 0.75
-
-    TARIFF_PEAK: float = 6.50
-    TARIFF_HALF_PEAK: float = 4.20
-    TARIFF_NIGHT: float = 1.80
-
-    BASE_DIR: str = os.path.dirname(os.path.abspath(__file__))
-    OUTPUT_DIR: str  = os.path.join(BASE_DIR, "results")
-    MODELS_DIR: str  = os.path.join(BASE_DIR, "results", "models")
-    PLOTS_DIR: str   = os.path.join(BASE_DIR, "results", "plots")
-    LOGS_DIR: str    = os.path.join(BASE_DIR, "results", "logs")
-
-    LOG_LEVEL: int = logging.INFO
-    LOG_FORMAT: str = "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"
-    LOG_DATE_FMT: str = "%Y-%m-%d %H:%M:%S"
-
-    @classmethod
-    def create_dirs(cls):
-        for d in (cls.OUTPUT_DIR, cls.MODELS_DIR, cls.PLOTS_DIR, cls.LOGS_DIR):
-            os.makedirs(d, exist_ok=True)
-
-    @classmethod
-    def setup_logging(cls):
-        cls.create_dirs()
-        logging.basicConfig(
-            level=cls.LOG_LEVEL, format=cls.LOG_FORMAT, datefmt=cls.LOG_DATE_FMT,
-            handlers=[
-                logging.StreamHandler(),
-                logging.FileHandler(os.path.join(cls.LOGS_DIR, "run.log"), encoding="utf-8"),
-            ],
+    # ── Автоматические рекомендации ───────────────────────────────────────────
+    recommendations: List[str] = []
+    if dw < 1.5:
+        recommendations.append(
+            f"DW={dw:.3f} < 1.5: сильная автокорреляция. "
+            "→ Добавить load_lag_24h, load_lag_168h как ковариаты (preprocessing.py)."
         )
-        return logging.getLogger("smart_grid")
+    if abs(acf_24) > 0.10:
+        recommendations.append(
+            f"ACF(24)={acf_24:.3f} > 0.10: суточная компонента не устранена. "
+            "→ Проверить наличие load_lag_24h в feature matrix."
+        )
+    if abs(acf_168) > 0.10:
+        recommendations.append(
+            f"ACF(168)={acf_168:.3f} > 0.10: недельная компонента не устранена. "
+            "→ Добавить load_lag_168h."
+        )
+    if kurt > 5:
+        recommendations.append(
+            f"Kurtosis={kurt:.2f} > 5: очень тяжёлые хвосты. "
+            "→ Заменить Huber(delta=0.1) на Huber(delta=0.05) или QuantileLoss(q=0.9)."
+        )
+    elif kurt > 3:
+        recommendations.append(
+            f"Kurtosis={kurt:.2f} > 3: тяжёлые хвосты. "
+            "→ Убедиться что используется Huber loss, не MSE (lstm.py)."
+        )
+
+    log = logging.getLogger("smart_grid.models.trainer")
+    log.info("─ Диагностика остатков: %s (n=%d) ─────────────────────────",
+             model_name or "?", n)
+    log.info("  DW=%.4f  ACF(1)=%.4f  ACF(24)=%.4f  ACF(48)=%.4f  ACF(168)=%.4f",
+             dw, acf_1, acf_24, acf_48, acf_168)
+    log.info("  Skewness=%.4f  Kurtosis=%.4f", skew, kurt)
+    if recommendations:
+        log.info("  ⚠️  Рекомендации:")
+        for rec in recommendations:
+            log.info("    → %s", rec)
+    else:
+        log.info("  ✅ Остатки в норме (DW≥1.5, |ACF(24)|<0.10, Kurt<3).")
+
+    return {
+        "model":           model_name,
+        "n":               n,
+        "DW":              round(dw, 4),
+        "ACF_1":           round(acf_1, 4),
+        "ACF_24":          round(acf_24, 4),
+        "ACF_48":          round(acf_48, 4),
+        "ACF_168":         round(acf_168, 4),
+        "skewness":        round(skew, 4),
+        "kurtosis":        round(kurt, 4),
+        "recommendations": recommendations,
+    }
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TRAINER
+
+def diagnose_training_regime(history: Dict[str, List[float]], overfit_gap: float = 0.02, underfit_floor: float = 0.08) -> Dict[str, Any]:
+    """Simple heuristic detector of overfitting/underfitting by train/val MAE."""
+    train_mae = history.get("mae") or history.get("mean_absolute_error") or []
+    val_mae = history.get("val_mae") or history.get("val_mean_absolute_error") or []
+    if not train_mae or not val_mae:
+        return {"status": "unknown", "reason": "mae_history_missing"}
+
+    train_last = float(train_mae[-1])
+    val_last = float(val_mae[-1])
+    gap = val_last - train_last
+
+    if gap >= overfit_gap and train_last < underfit_floor:
+        status = "overfitting"
+    elif train_last >= underfit_floor and val_last >= underfit_floor:
+        status = "underfitting"
+    else:
+        status = "balanced"
+
+    return {
+        "status": status,
+        "train_mae_last": train_last,
+        "val_mae_last": val_last,
+        "generalization_gap": float(gap),
+    }
+
+
+class ModelTrainer:
+    """
+    Универсальный тренер: Keras + sklearn/xgboost через единый интерфейс.
+    """
+
+    def __init__(
+        self,
+        model: Any,
+        model_name: str,
+        models_dir: str = "results/models",
+        plots_dir: str = "results/plots",
+    ) -> None:
+        self.model = model
+        self.model_name = model_name
+        self.models_dir = models_dir
+        self.plots_dir = plots_dir
+        self.history: Optional[tf.keras.callbacks.History] = None
+        self.train_time: float = 0.0
+
+    def train(
+        self,
+        data: Dict[str, Any],
+        epochs: int = 200,
+        batch_size: int = 32,
+        patience: int = 25,
+        lr_patience: int = 10,
+        lr_factor: float = 0.5,
+        min_delta: float = 1e-5,
+    ) -> "ModelTrainer":
+        logger.info("=" * 60)
+        logger.info("Обучение модели: %s", self.model_name)
+        logger.info("=" * 60)
+
+        t0 = time.time()
+        if isinstance(self.model, tf.keras.Model):
+            self._train_keras(data, epochs, batch_size, patience,
+                              lr_patience, lr_factor, min_delta)
+        else:
+            self._train_sklearn(data)
+
+        self.train_time = time.time() - t0
+        logger.info("%s обучена за %.1f сек", self.model_name, self.train_time)
+        return self
+
+    def _train_keras(
+        self,
+        data: Dict[str, Any],
+        epochs: int,
+        batch_size: int,
+        patience: int,
+        lr_patience: int,
+        lr_factor: float,
+        min_delta: float,
+    ) -> None:
+        _has_schedule = False
+        try:
+            _opt = self.model.optimizer
+            _lr_cfg = _opt.get_config().get("learning_rate", None)
+            if isinstance(_lr_cfg, dict) and "class_name" in _lr_cfg:
+                _has_schedule = True
+            elif isinstance(_lr_cfg, tf.keras.optimizers.schedules.LearningRateSchedule):
+                _has_schedule = True
+        except Exception:
+            _has_schedule = False
+
+        callbacks: List[tf.keras.callbacks.Callback] = [
+            tf.keras.callbacks.EarlyStopping(
+                monitor="val_loss",
+                patience=patience,
+                min_delta=min_delta,
+                restore_best_weights=True,
+                verbose=1,
+            ),
+        ]
+        if not _has_schedule:
+            callbacks.append(tf.keras.callbacks.ReduceLROnPlateau(
+                monitor="val_loss",
+                factor=lr_factor,
+                patience=lr_patience,
+                min_delta=min_delta,
+                min_lr=1e-6,
+                verbose=1,
+            ))
+        else:
+            logger.info("%s: LR schedule обнаружен → ReduceLROnPlateau отключён",
+                        self.model_name)
+
+        try:
+            self.history = self.model.fit(
+                data["X_train"], data["Y_train"],
+                validation_data=(data["X_val"], data["Y_val"]),
+                epochs=epochs,
+                batch_size=batch_size,
+                callbacks=callbacks,
+                verbose=1,
+            )
+            actual_epochs = len(self.history.history["loss"])
+            logger.info("%s: обучение завершено за %d эпох",
+                        self.model_name, actual_epochs)
+            fit_diag = diagnose_training_regime(self.history.history)
+            logger.info(
+                "%s: training regime=%s | train_mae=%.4f val_mae=%.4f gap=%.4f",
+                self.model_name,
+                fit_diag.get("status", "unknown"),
+                fit_diag.get("train_mae_last", float("nan")),
+                fit_diag.get("val_mae_last", float("nan")),
+                fit_diag.get("generalization_gap", float("nan")),
+            )
+        except Exception as exc:
+            logger.error("Ошибка при обучении %s: %s", self.model_name, exc)
+            raise
+
+    def _train_sklearn(self, data: Dict[str, Any]) -> None:
+        try:
+            self.model.fit(
+                data["X_train"], data["Y_train"],
+                X_val=data.get("X_val"),
+                Y_val=data.get("Y_val"),
+            )
+        except Exception as exc:
+            logger.error("Ошибка при обучении %s: %s", self.model_name, exc)
+            raise
+
+    def predict(self, X: np.ndarray) -> np.ndarray:
+        if isinstance(self.model, tf.keras.Model):
+            return self.model.predict(X, verbose=0)
+        return self.model.predict(X)
+
+    def mc_predict(
+        self,
+        X: np.ndarray,
+        n_samples: int = 50,
+    ) -> tuple:
+        """
+        Monte Carlo Dropout: n_samples прогонов с training=True.
+
+        Returns
+        -------
+        mean : np.ndarray shape=(N, horizon)
+        std  : np.ndarray shape=(N, horizon)
+        """
+        if not isinstance(self.model, tf.keras.Model):
+            raise TypeError("mc_predict доступен только для Keras-моделей")
+
+        preds = np.stack(
+            [self.model(X, training=True).numpy() for _ in range(n_samples)],
+            axis=0,
+        )
+        return preds.mean(axis=0), preds.std(axis=0)
+
+    def evaluate(
+        self,
+        data: Dict[str, Any],
+        split: str = "test",
+        run_residual_diagnostics: bool = True,
+    ) -> Dict[str, float]:
+        """
+        Оценка модели на split-е с опциональной диагностикой остатков.
+
+        Parameters
+        ----------
+        run_residual_diagnostics : bool
+            Если True — запускает diagnose_residuals() и выводит
+            DW/ACF/Kurt в лог с конкретными рекомендациями.
+            По умолчанию включено для всех моделей.
+        """
+        X = data[f"X_{split}"]
+        Y_true_scaled = data[f"Y_{split}"]
+        scaler = data["scaler"]
+
+        Y_pred_scaled = self.predict(X)
+        Y_true = inverse_scale(scaler, Y_true_scaled)
+        Y_pred = inverse_scale(scaler, Y_pred_scaled)
+
+        metrics = compute_all_metrics(Y_true, Y_pred, model_name=self.model_name)
+
+        # ── v4: диагностика остатков ──────────────────────────────────────────
+        if run_residual_diagnostics:
+            diag = diagnose_residuals(Y_true, Y_pred, model_name=self.model_name)
+            metrics["DW"]       = diag["DW"]
+            metrics["ACF_24"]   = diag["ACF_24"]
+            metrics["ACF_168"]  = diag["ACF_168"]
+            metrics["kurtosis"] = diag["kurtosis"]
+        # ────────────────────────────────────────────────────────────────────
+
+        return metrics
+
+    def save(self) -> str:
+        os.makedirs(self.models_dir, exist_ok=True)
+        path = os.path.join(self.models_dir, self.model_name)
+        try:
+            if isinstance(self.model, tf.keras.Model):
+                save_path = path + ".keras"
+                self.model.save(save_path)
+                logger.info("Keras-модель сохранена: %s", save_path)
+                return save_path
+            else:
+                import pickle
+                save_path = path + ".pkl"
+                with open(save_path, "wb") as f:
+                    pickle.dump(self.model, f)
+                logger.info("Sklearn-модель сохранена: %s", save_path)
+                return save_path
+        except Exception as exc:
+            logger.error("Ошибка сохранения %s: %s", self.model_name, exc)
+            raise
 
     @classmethod
-    def set_fast_mode(cls):
-        cls.DAYS = 365; cls.HOUSEHOLDS = 250; cls.EPOCHS = 120
-        cls.PATIENCE = 20; cls.LR_PATIENCE = 8
-        cls.HISTORY_LENGTH = 48; cls.STORAGE_HORIZON = 720; cls.N_FEATURES = 26
-        cls.LSTM_UNITS_1 = 48; cls.LSTM_UNITS_2 = 48; cls.LSTM_UNITS_3 = 48
-        cls.LSTM_ATTN_HEADS = 4; cls.LSTM_TCN_FILTERS = 32
-        cls.DROPOUT_RATE = 0.25; cls.LSTM_LEARNING_RATE = 2e-4; cls.LSTM_USE_COSINE_DECAY = False
-        cls.LSTM_SEASONAL_BLEND_INIT = 0.30; cls.LSTM_HUBER_DELTA = 0.05
-        cls.TRANSFORMER_D_MODEL = 64; cls.TRANSFORMER_N_HEADS = 4
-        cls.TRANSFORMER_N_LAYERS = 2; cls.TRANSFORMER_DFF = 128
-        cls.TRANSFORMER_DROPOUT = 0.20; cls.TRANSFORMER_LEARNING_RATE = 3e-4
-        cls.VANILLA_TRANSFORMER_LR = 8e-5; cls.TRANSFORMER_STOCHASTIC_DEPTH = 0.05
-        cls.PATCHTST_USE_REVIN = True
-        cls.VANILLA_USE_SEASONAL_RESIDUAL = True; cls.VANILLA_SEASONAL_BLEND_INIT = 0.35
-        cls.VANILLA_HUBER_DELTA = 0.05; cls.XGB_N_ESTIMATORS = 300
-        cls.GEN_EV_PENETRATION = 0.50; cls.GEN_INDUSTRIAL_LOADS = 4
-        logging.getLogger("smart_grid").info(
-            "Fast mode v10: DAYS=%d EPOCHS=%d N_FEATURES=%d | "
-            "LSTM BiLSTM=%d TCN=%d (~%dK params) | VanTr LR=%.0e | EV=%.0f%%",
-            cls.DAYS, cls.EPOCHS, cls.N_FEATURES, cls.LSTM_UNITS_1, cls.LSTM_TCN_FILTERS,
-            # rough param estimate
-            (4*cls.LSTM_TCN_FILTERS*26 + 4*cls.LSTM_UNITS_1*(4*cls.LSTM_TCN_FILTERS+cls.LSTM_UNITS_1) + 128*64)//1000,
-            cls.VANILLA_TRANSFORMER_LR, cls.GEN_EV_PENETRATION*100)
+    def load_keras(cls, path: str, model_name: str = "") -> "ModelTrainer":
+        try:
+            from models.transformer import (
+                PreLNEncoderBlock, SinusoidalPE, Time2Vec, GatedResidualNetwork,
+            )
+            from models.lstm import TemporalAttentionBlock
+            model = tf.keras.models.load_model(
+                path,
+                custom_objects={
+                    "PreLNEncoderBlock":      PreLNEncoderBlock,
+                    "SinusoidalPE":           SinusoidalPE,
+                    "Time2Vec":               Time2Vec,
+                    "GatedResidualNetwork":   GatedResidualNetwork,
+                    "TemporalAttentionBlock": TemporalAttentionBlock,
+                },
+            )
+            trainer = cls(model, model_name or os.path.basename(path))
+            logger.info("Загружена модель: %s", path)
+            return trainer
+        except Exception as exc:
+            logger.error("Ошибка загрузки %s: %s", path, exc)
+            raise
 
-    @classmethod
-    def set_optimal_mode(cls):
-        cls.DAYS = 365; cls.HOUSEHOLDS = 500; cls.EPOCHS = 200
-        cls.PATIENCE = 25; cls.LR_PATIENCE = 10
-        cls.HISTORY_LENGTH = 48; cls.STORAGE_HORIZON = 720; cls.N_FEATURES = 26
-        # v10: LSTM уменьшен для борьбы с overfitting
-        cls.LSTM_UNITS_1 = 64; cls.LSTM_UNITS_2 = 64; cls.LSTM_UNITS_3 = 64
-        cls.LSTM_ATTN_HEADS = 4; cls.LSTM_TCN_FILTERS = 32
-        cls.DROPOUT_RATE = 0.20; cls.LSTM_LEARNING_RATE = 2e-4; cls.LSTM_USE_COSINE_DECAY = False
-        cls.LSTM_SEASONAL_BLEND_INIT = 0.35; cls.LSTM_HUBER_DELTA = 0.05
-        cls.TRANSFORMER_D_MODEL = 128; cls.TRANSFORMER_N_HEADS = 8
-        cls.TRANSFORMER_N_LAYERS = 4; cls.TRANSFORMER_DFF = 256
-        cls.TRANSFORMER_DROPOUT = 0.20; cls.TRANSFORMER_LEARNING_RATE = 3e-4
-        cls.VANILLA_TRANSFORMER_LR = 5e-5; cls.TRANSFORMER_STOCHASTIC_DEPTH = 0.10
-        cls.PATCHTST_USE_REVIN = True
-        cls.VANILLA_USE_SEASONAL_RESIDUAL = True; cls.VANILLA_SEASONAL_BLEND_INIT = 0.40
-        cls.VANILLA_HUBER_DELTA = 0.05
-        cls.XGB_N_ESTIMATORS = 500; cls.XGB_COLSAMPLE = 0.40
-        cls.GEN_EV_PENETRATION = 0.50; cls.GEN_INDUSTRIAL_LOADS = 6
-        logging.getLogger("smart_grid").info(
-            "Optimal mode v10: DAYS=%d EPOCHS=%d N_FEATURES=%d | "
-            "LSTM TCN=%d BiLSTM=%d heads=%d lr=%.0e huber=%.2f | "
-            "Trans d=%d h=%d L=%d lr=%.0e | VanTr LR=%.0e | "
-            "EV=%.0f%% STORAGE=%dh BAT=%.0f кВт·ч",
-            cls.DAYS, cls.EPOCHS, cls.N_FEATURES,
-            cls.LSTM_TCN_FILTERS, cls.LSTM_UNITS_1, cls.LSTM_ATTN_HEADS,
-            cls.LSTM_LEARNING_RATE, cls.LSTM_HUBER_DELTA,
-            cls.TRANSFORMER_D_MODEL, cls.TRANSFORMER_N_HEADS, cls.TRANSFORMER_N_LAYERS,
-            cls.TRANSFORMER_LEARNING_RATE, cls.VANILLA_TRANSFORMER_LR,
-            cls.GEN_EV_PENETRATION*100, cls.STORAGE_HORIZON, cls.BATTERY_CAPACITY)
 
-    @classmethod
-    def set_full_mode(cls):
-        """730 дней, 300 эпох. validate_data_integrity теперь не падает (v7 preprocessing)."""
-        cls.DAYS = 730; cls.HOUSEHOLDS = 500; cls.EPOCHS = 300
-        cls.PATIENCE = 30; cls.LR_PATIENCE = 10
-        cls.HISTORY_LENGTH = 72; cls.STORAGE_HORIZON = 720; cls.N_FEATURES = 26
-        # v10: 96 (было 192 — тоже было бы overfitting на 12K сэмплах)
-        cls.LSTM_UNITS_1 = 96; cls.LSTM_UNITS_2 = 96; cls.LSTM_UNITS_3 = 96
-        cls.LSTM_ATTN_HEADS = 4; cls.LSTM_TCN_FILTERS = 48
-        cls.DROPOUT_RATE = 0.20; cls.LSTM_LEARNING_RATE = 2e-4; cls.LSTM_USE_COSINE_DECAY = False
-        cls.LSTM_SEASONAL_BLEND_INIT = 0.35; cls.LSTM_HUBER_DELTA = 0.05
-        cls.TRANSFORMER_D_MODEL = 128; cls.TRANSFORMER_N_HEADS = 8
-        cls.TRANSFORMER_N_LAYERS = 4; cls.TRANSFORMER_DFF = 512
-        cls.TRANSFORMER_DROPOUT = 0.20; cls.TRANSFORMER_LEARNING_RATE = 3e-4
-        cls.VANILLA_TRANSFORMER_LR = 8e-5; cls.TRANSFORMER_STOCHASTIC_DEPTH = 0.10
-        cls.PATCHTST_USE_REVIN = True
-        cls.VANILLA_USE_SEASONAL_RESIDUAL = True; cls.VANILLA_SEASONAL_BLEND_INIT = 0.40
-        cls.VANILLA_HUBER_DELTA = 0.05
-        cls.XGB_N_ESTIMATORS = 800; cls.XGB_COLSAMPLE = 0.35
-        cls.GEN_EV_PENETRATION = 0.50; cls.GEN_INDUSTRIAL_LOADS = 6
-        logging.getLogger("smart_grid").info(
-            "Full mode v10: DAYS=%d EPOCHS=%d N_FEATURES=%d | "
-            "LSTM BiLSTM=%d TCN=%d | Trans d=%d h=%d L=%d | EV=%.0f%%",
-            cls.DAYS, cls.EPOCHS, cls.N_FEATURES, cls.LSTM_UNITS_1, cls.LSTM_TCN_FILTERS,
-            cls.TRANSFORMER_D_MODEL, cls.TRANSFORMER_N_HEADS, cls.TRANSFORMER_N_LAYERS,
-            cls.GEN_EV_PENETRATION*100)
+# ── Сравнение тренеров ────────────────────────────────────────────────────────
 
-    @classmethod
-    def print_summary(cls):
-        log = logging.getLogger("smart_grid")
-        log.info("─" * 50)
-        log.info("КОНФИГУРАЦИЯ:")
-        log.info("  Данные:      %d дней, %d домохозяйств", cls.DAYS, cls.HOUSEHOLDS)
-        log.info("  Признаки:    %d ковариат на шаг", cls.N_FEATURES)
-        log.info("  История:     %d ч → прогноз %d ч", cls.HISTORY_LENGTH, cls.FORECAST_HORIZON)
-        log.info("  Обучение:    %d эпох, batch=%d, patience=%d", cls.EPOCHS, cls.BATCH_SIZE, cls.PATIENCE)
-        log.info("  LSTM v9:     BiLSTM=%d TCN=%d attn=%dh drop=%.2f lr=%g huber=%.2f input=(%d,%d)",
-                 cls.LSTM_UNITS_1, cls.LSTM_TCN_FILTERS, cls.LSTM_ATTN_HEADS,
-                 cls.DROPOUT_RATE, cls.LSTM_LEARNING_RATE, cls.LSTM_HUBER_DELTA,
-                 cls.HISTORY_LENGTH, cls.N_FEATURES)
-        log.info("  Transformer: d=%d h=%d L=%d dff=%d drop=%.2f lr=%g (Vanilla lr=%g) input=(%d,%d)",
-                 cls.TRANSFORMER_D_MODEL, cls.TRANSFORMER_N_HEADS, cls.TRANSFORMER_N_LAYERS,
-                 cls.TRANSFORMER_DFF, cls.TRANSFORMER_DROPOUT,
-                 cls.TRANSFORMER_LEARNING_RATE, cls.VANILLA_TRANSFORMER_LR,
-                 cls.HISTORY_LENGTH, cls.N_FEATURES)
-        log.info("  XGBoost:     n_est=%d depth=%d col=%.2f",
-                 cls.XGB_N_ESTIMATORS, cls.XGB_MAX_DEPTH, cls.XGB_COLSAMPLE)
-        log.info("  Generator:   EV=%.0f%% Solar=%.0f%% IndustLoads=%d AR_phi=%.2f AR_sig=%.3f",
-                 cls.GEN_EV_PENETRATION*100, cls.GEN_SOLAR_PENETRATION*100,
-                 cls.GEN_INDUSTRIAL_LOADS, cls.GEN_AR_PHI, cls.GEN_AR_SIGMA)
-        log.info("  Тарифы:      пик=%.2f день=%.2f ночь=%.2f руб/кВт·ч",
-                 cls.TARIFF_PEAK, cls.TARIFF_HALF_PEAK, cls.TARIFF_NIGHT)
-        log.info("  Батарея:     %.0f кВт·ч, SOC %.0f%%→%.0f%% (ΔE=%.0f кВт·ч)",
-                 cls.BATTERY_CAPACITY, cls.BATTERY_MIN_SOC*100, cls.BATTERY_MAX_SOC*100,
-                 (cls.BATTERY_MAX_SOC-cls.BATTERY_MIN_SOC)*cls.BATTERY_CAPACITY)
-        log.info("─" * 50)
+def compare_trainers(
+    trainers: List[ModelTrainer],
+    data: Dict[str, Any],
+    split: str = "test",
+) -> Dict[str, Dict[str, float]]:
+    results: Dict[str, Dict[str, float]] = {}
+    logger.info("\n%s", "=" * 60)
+    logger.info("СРАВНЕНИЕ МОДЕЛЕЙ (split=%s)", split.upper())
+    logger.info("%s", "=" * 60)
+    logger.info("%-22s %8s %8s %8s %7s %6s %7s",
+                "Модель", "MAE", "RMSE", "MAPE%", "R2", "DW", "ACF24")
+    logger.info("%s", "-" * 70)
+
+    for trainer in trainers:
+        try:
+            m = trainer.evaluate(data, split=split, run_residual_diagnostics=True)
+            results[trainer.model_name] = m
+            dw_str   = f"{m.get('DW', float('nan')):.3f}"
+            acf_str  = f"{m.get('ACF_24', float('nan')):.3f}"
+            logger.info(
+                "%-22s %8.2f %8.2f %7.2f%% %6.4f %6s %7s",
+                trainer.model_name, m["MAE"], m["RMSE"],
+                m["MAPE"], m["R2"], dw_str, acf_str,
+            )
+        except Exception as exc:
+            logger.error("Ошибка оценки %s: %s", trainer.model_name, exc)
+
+    if results:
+        best = min(results, key=lambda k: results[k]["MAE"])
+        logger.info("%s", "-" * 70)
+        logger.info("Лучшая модель по MAE: %s", best)
+
+    return results

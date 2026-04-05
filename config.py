@@ -15,7 +15,7 @@ class Config:
     START_DATE: str = "2024-01-01"
 
     # ── Признаки ─────────────────────────────────────────────────────────────
-    N_FEATURES: int = 15           # v4: +humidity, +wind_speed, +rolling_mean_24h, +rolling_std_24h
+    N_FEATURES: int = 19           # v4.2: +load_lag_24h/+48h/+168h + load_diff_24h
 
     # ── Временные окна ────────────────────────────────────────────────────────
     HISTORY_LENGTH: int = 48
@@ -45,8 +45,8 @@ class Config:
     MIN_DELTA: float = 0.0           # v6: было 1e-4 — принимаем любое улучшение
 
     # ── LSTM ──────────────────────────────────────────────────────────────────
-    LSTM_UNITS_1: int = 128          # v5: снижено (было 256) — 128/64 под ~6100 сэмплов
-    LSTM_UNITS_2: int = 64           # v5: снижено (было 128)
+    LSTM_UNITS_1: int = 160
+    LSTM_UNITS_2: int = 96
     LSTM_UNITS_3: int = 64           # не используется в v7, оставлен для совместимости
     DROPOUT_RATE: float = 0.20
     LSTM_LEARNING_RATE: float = 3e-4         # v5: 3e-4 (1e-3 насыщает forget-gate в LSTM+Adam)
@@ -54,10 +54,10 @@ class Config:
     LSTM_USE_COSINE_DECAY: bool = False      # v5: ОТКЛЮЧЁН (несовместим с EarlyStopping)
 
     # ── Transformer ───────────────────────────────────────────────────────────
-    TRANSFORMER_D_MODEL: int = 128
+    TRANSFORMER_D_MODEL: int = 160
     TRANSFORMER_N_HEADS: int = 8
     TRANSFORMER_N_LAYERS: int = 4
-    TRANSFORMER_DFF: int = 256
+    TRANSFORMER_DFF: int = 320
     TRANSFORMER_DROPOUT: float = 0.20
     TRANSFORMER_LEARNING_RATE: float = 3e-4   # v4: 1e-4→3e-4
     TRANSFORMER_STOCHASTIC_DEPTH: float = 0.10  # v4: DropPath rate (последний блок)
@@ -160,18 +160,18 @@ class Config:
         # ────────────────────────────────────────────────────────────────────
         cls.STORAGE_HORIZON = 720
         # LSTM v7: 2 слоя
-        cls.LSTM_UNITS_1 = 96
-        cls.LSTM_UNITS_2 = 48
+        cls.LSTM_UNITS_1 = 128
+        cls.LSTM_UNITS_2 = 64
         cls.LSTM_UNITS_3 = 48
         cls.LSTM_ATTN_HEADS = 4          # key_dim = 48//4 = 12
         cls.DROPOUT_RATE = 0.25
         cls.LSTM_LEARNING_RATE = 3e-4
         cls.LSTM_USE_COSINE_DECAY = False
         # Transformer
-        cls.TRANSFORMER_D_MODEL = 64
+        cls.TRANSFORMER_D_MODEL = 96
         cls.TRANSFORMER_N_HEADS = 4
         cls.TRANSFORMER_N_LAYERS = 2
-        cls.TRANSFORMER_DFF = 128
+        cls.TRANSFORMER_DFF = 192
         cls.TRANSFORMER_DROPOUT = 0.20
         cls.TRANSFORMER_LEARNING_RATE = 3e-4
         cls.TRANSFORMER_STOCHASTIC_DEPTH = 0.05
@@ -198,18 +198,18 @@ class Config:
         cls.HISTORY_LENGTH = 48
         cls.STORAGE_HORIZON = 720
         # LSTM v7: 2 слоя 128/64
-        cls.LSTM_UNITS_1 = 128
-        cls.LSTM_UNITS_2 = 64
+        cls.LSTM_UNITS_1 = 160
+        cls.LSTM_UNITS_2 = 96
         cls.LSTM_UNITS_3 = 64
         cls.LSTM_ATTN_HEADS = 4          # key_dim = 64//4 = 16
         cls.DROPOUT_RATE = 0.20
         cls.LSTM_LEARNING_RATE = 3e-4
         cls.LSTM_USE_COSINE_DECAY = False
         # Transformer
-        cls.TRANSFORMER_D_MODEL = 128
+        cls.TRANSFORMER_D_MODEL = 160
         cls.TRANSFORMER_N_HEADS = 8
         cls.TRANSFORMER_N_LAYERS = 4
-        cls.TRANSFORMER_DFF = 256
+        cls.TRANSFORMER_DFF = 320
         cls.TRANSFORMER_DROPOUT = 0.20
         cls.TRANSFORMER_LEARNING_RATE = 3e-4
         cls.TRANSFORMER_STOCHASTIC_DEPTH = 0.10

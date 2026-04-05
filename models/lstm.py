@@ -110,7 +110,7 @@ class TemporalAttentionBlock(tf.keras.layers.Layer):
 def build_lstm_model(
     history_length: int = 48,
     forecast_horizon: int = 24,
-    n_features: int = 11,
+    n_features: int = 19,
     lstm_units_1: int = 128,
     lstm_units_2: int = 64,
     lstm_units_3: int = 64,        # принимается для совместимости с config, не используется
@@ -187,17 +187,22 @@ def build_lstm_model(
 
     out = tf.keras.layers.Dense(forecast_horizon, name="output")(h)
 
-    model = tf.keras.Model(inputs=inp, outputs=out, name="AttentionLSTM_v5")
+    # Сезонный skip: последняя суточная траектория (t-24..t-1) как baseline.
+    # Модель учит остаток (delta), что резко снижает автокорреляцию остатков.
+    seasonal_base = inp[:, -forecast_horizon:, 0]
+    out = tf.keras.layers.Add(name="seasonal_skip")([out, seasonal_base])
+
+    model = tf.keras.Model(inputs=inp, outputs=out, name="AttentionLSTM_v7")
     model.compile(
         optimizer=tf.keras.optimizers.Adam(learning_rate=learning_rate, clipnorm=1.0),
-        loss="mse",
+        loss=tf.keras.losses.Huber(delta=0.05),
         metrics=["mae", "mape"],
     )
 
     logger.info(
-        "AttentionLSTM v6 | %d параметров | input=(%d,%d) | "
+        "AttentionLSTM v7 | %d параметров | input=(%d,%d) | "
         "LSTM=%d/%d seq_drop=0.05 | Attn heads=%d key_dim=%d | "
-        "Dense L2=1e-5 drop=0.20/0.10 | lr=%.0e | MSE",
+        "Dense L2=1e-5 drop=0.20/0.10 | SeasonalSkip=True | lr=%.0e | Huber(δ=0.05)",
         model.count_params(), history_length, n_features,
         lstm_units_1, lstm_units_2, attn_heads, key_dim, learning_rate,
     )

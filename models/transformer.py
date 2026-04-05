@@ -558,7 +558,7 @@ class PreLNEncoderBlock(tf.keras.layers.Layer):
 def build_vanilla_transformer(
     history_length: int = 48,
     forecast_horizon: int = 24,
-    n_features: int = 11,
+    n_features: int = 19,
     d_model: int = 128,
     num_heads: int = 8,
     num_layers: int = 4,
@@ -639,7 +639,9 @@ def build_vanilla_transformer(
     h = tf.keras.layers.Add(name="head_res")([h, skip])
     h = tf.keras.layers.LayerNormalization(epsilon=1e-6, name="head_ln")(h)
     h = tf.keras.layers.Dropout(dropout, name="head_drop")(h)
-    output = tf.keras.layers.Dense(forecast_horizon, name="output")(h)
+    delta = tf.keras.layers.Dense(forecast_horizon, name="output_delta")(h)
+    seasonal_base = inp_series[:, -forecast_horizon:, 0]
+    output = tf.keras.layers.Add(name="seasonal_skip")([delta, seasonal_base])
 
     model = tf.keras.Model(inputs=inputs, outputs=output,
                            name=f"VanillaTransformer_v4_{pe_type}")
@@ -647,7 +649,7 @@ def build_vanilla_transformer(
 
     model.compile(
         optimizer=tf.keras.optimizers.Adam(learning_rate=learning_rate, clipnorm=1.0),
-        loss=tf.keras.losses.Huber(delta=0.1),
+        loss=tf.keras.losses.Huber(delta=0.05),
         metrics=["mae"],
     )
     logger.info(
@@ -822,7 +824,7 @@ def build_patchtst(
     forecast_horizon: int = 24,
     patch_len: int = 8,
     stride: int = 4,
-    n_features: int = 11,
+    n_features: int = 19,
     d_model: int = 128,
     num_heads: int = 8,
     num_layers: int = 4,

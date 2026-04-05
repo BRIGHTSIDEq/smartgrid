@@ -58,7 +58,7 @@ from sklearn.preprocessing import MinMaxScaler
 
 logger = logging.getLogger("smart_grid.data.preprocessing")
 
-N_FEATURES: int = 15
+N_FEATURES: int = 19
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -114,7 +114,7 @@ def _build_feature_matrix(
 
     Returns
     -------
-    np.ndarray shape=(N, 15), dtype=float32
+    np.ndarray shape=(N, 19), dtype=float32
     """
     N = len(df)
 
@@ -214,11 +214,36 @@ def _build_feature_matrix(
     else:
         rolling_std = np.zeros(N, dtype=np.float32)
 
-    # ── Сборка (N, 15) ────────────────────────────────────────────────────────
+    # ── 15–18. Сезонные лаги нагрузки ────────────────────────────────────────
+    if "load_lag_24h" in df.columns:
+        lag24 = cons_scaler.transform(
+            df["load_lag_24h"].values.reshape(-1, 1)
+        ).flatten().clip(0.0, 1.0).astype(np.float32)
+    else:
+        lag24 = cons.copy()
+
+    if "load_lag_48h" in df.columns:
+        lag48 = cons_scaler.transform(
+            df["load_lag_48h"].values.reshape(-1, 1)
+        ).flatten().clip(0.0, 1.0).astype(np.float32)
+    else:
+        lag48 = cons.copy()
+
+    if "load_lag_168h" in df.columns:
+        lag168 = cons_scaler.transform(
+            df["load_lag_168h"].values.reshape(-1, 1)
+        ).flatten().clip(0.0, 1.0).astype(np.float32)
+    else:
+        lag168 = cons.copy()
+
+    load_diff_24h = (cons - lag24).astype(np.float32)
+
+    # ── Сборка (N, 19) ────────────────────────────────────────────────────────
     return np.stack(
         [cons, hour_sin, hour_cos, is_peak, is_night,
          is_weekend, is_holiday, temp, temp_sq, tariff_enc, doy_norm,
-         humidity, wind, rolling_mean, rolling_std],
+         humidity, wind, rolling_mean, rolling_std,
+         lag24, lag48, lag168, load_diff_24h],
         axis=1,
     ).astype(np.float32)
 
@@ -288,14 +313,15 @@ def prepare_data(
     val_ratio: float = 0.15,
 ) -> Dict[str, Any]:
     """
-    Полный пайплайн подготовки мультивариантных данных (v4.1: 15 признаков).
+    Полный пайплайн подготовки мультивариантных данных (v4.2: 19 признаков).
 
     Шаги:
     1. Хронологическое разделение train / val / test
     2. Fit скалеров ТОЛЬКО на train: cons, temp, humidity, wind, rolling_std
     3. Вычисление temp_sq_max на train (для корректного fallback в val/test)
-    4. Сборка матриц признаков (N, 15) для каждого сплита
-    5. Нарезка скользящими окнами → (samples, history, 15)
+    4. Добавление лаговых ковариат load_lag_24h/48h/168h и load_diff_24h
+    5. Сборка матриц признаков (N, 19) для каждого сплита
+    6. Нарезка скользящими окнами → (samples, history, 19)
 
     Returns
     -------
@@ -308,11 +334,21 @@ def prepare_data(
         humidity_scaler   — MinMaxScaler humidity  (None если колонки нет)
         wind_scaler       — MinMaxScaler wind_speed (None если колонки нет)
         rolling_std_scaler— MinMaxScaler rolling_std_24h (None если нет)
-        n_features        — 15
+        n_features        — 19
         raw_*/scaled_*    — сырые и нормализованные ряды потребления
         train_end_idx, val_end_idx, test_start_idx
         timestamps        — np.ndarray дат
     """
+    df = df.copy()
+    for lag_h in (24, 48, 168):
+        col = f"load_lag_{lag_h}h"
+        if col not in df.columns:
+            df[col] = df["consumption"].shift(lag_h)
+    df["load_diff_24h"] = df["consumption"] - df["load_lag_24h"]
+    lag_cols = ["load_lag_24h", "load_lag_48h", "load_lag_168h", "load_diff_24h"]
+    df[lag_cols] = df[lag_cols].bfill().ffill()
+    logger.info("Лаговые колонки добавлены: load_lag_24h, load_lag_48h, load_lag_168h")
+
     total      = len(df)
     train_end  = int(total * train_ratio)
     val_end    = int(total * (train_ratio + val_ratio))
@@ -365,7 +401,7 @@ def prepare_data(
     scaled_val   = cons_scaler.transform(raw_val.reshape(-1,   1)).flatten()
     scaled_test  = cons_scaler.transform(raw_test.reshape(-1,  1)).flatten()
 
-    # ── Матрицы признаков (N, 15) ─────────────────────────────────────────────
+    # ── Матрицы признаков (N, 19) ─────────────────────────────────────────────
     _scaler_kwargs = dict(
         humidity_scaler    = humidity_scaler,
         wind_scaler        = wind_scaler,
@@ -384,7 +420,7 @@ def prepare_data(
     X_test,  Y_test  = _make_multivariate_windows(feat_test,  history_length, forecast_horizon)
 
     logger.info(
-        "Данные подготовлены v4.1 | train=%d val=%d test=%d | n_features=%d",
+        "Данные подготовлены v4.2 | train=%d val=%d test=%d | n_features=%d",
         len(X_train), len(X_val), len(X_test), actual_n_features,
     )
     logger.info(

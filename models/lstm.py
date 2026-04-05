@@ -1,279 +1,250 @@
 # -*- coding: utf-8 -*-
-"""models/lstm.py — TCN-BiLSTM-Attention v8 (Keras 3 compatible)."""
+"""config.py — Smart Grid v10.
 
+ИЗМЕНЕНИЯ v10:
+  LSTM overfitting fix:
+    БЫЛО: LSTM_UNITS_1=128, LSTM_TCN_FILTERS=64 → 945K params → overfitting 2.4×
+          train_mae=0.019 vs val_mae=0.045, MAE=1182 > LinReg MAE=953
+    СТАЛО: LSTM_UNITS_1=64, LSTM_TCN_FILTERS=32 → ~150K params
+           Правило: 6K сэмплов / 150K params = 40 сэмплов/параметр (норма для dropout)
+
+  EV generator params:
+    ev_penetration: 0.28 → 0.50
+    (EV time-wrap баг исправлен в generator.py → реальный вклад теперь 8-12%)
+
+  full_mode fixes:
+    validate_data_integrity больше не падает (исправлено в preprocessing.py)
+    full_mode: LSTM_UNITS_1=96 (было 192 → 730 days × 192 = ещё хуже overfitting)
+"""
+
+import os
 import logging
-from typing import Optional
-
-import tensorflow as tf
-
-logger = logging.getLogger("smart_grid.models.lstm")
-
-__all__ = [
-    "TemporalAttentionBlock",
-    "TCNBlock",
-    "build_lstm_model",
-]
 
 
-class TCNBlock(tf.keras.layers.Layer):
-    """Dilated causal Conv1D block with residual connection."""
+class Config:
 
-    def __init__(
-        self,
-        filters: int,
-        kernel_size: int,
-        dilation_rate: int,
-        dropout_rate: float = 0.05,
-        **kwargs,
-    ):
-        super().__init__(**kwargs)
-        self.filters = filters
-        self.kernel_size = kernel_size
-        self.dilation_rate = dilation_rate
-        self.dropout_rate = dropout_rate
+    SEED: int = 42
+    DAYS: int = 365
+    HOUSEHOLDS: int = 500
+    START_DATE: str = "2024-01-01"
+    N_FEATURES: int = 26
 
-        pad = (kernel_size - 1) * dilation_rate
-        self.pad1 = tf.keras.layers.ZeroPadding1D(padding=(pad, 0))
-        self.conv1 = tf.keras.layers.Conv1D(
-            filters,
-            kernel_size,
-            dilation_rate=dilation_rate,
-            padding="valid",
-            use_bias=False,
+    HISTORY_LENGTH: int = 48
+    FORECAST_HORIZON: int = 24
+    STORAGE_HORIZON: int = 720
+
+    TRAIN_RATIO: float = 0.70
+    VAL_RATIO: float = 0.15
+    TEST_RATIO: float = 0.15
+
+    EPOCHS: int = 200
+    BATCH_SIZE: int = 32
+    PATIENCE: int = 25
+    LR_PATIENCE: int = 10
+    LR_FACTOR: float = 0.5
+    MIN_DELTA: float = 0.0
+
+    # LSTM v9 (TCN+BiLSTM+Attention)
+    LSTM_UNITS_1: int = 64          # v10: 128→64 (был overfitting 945K→150K params)
+    LSTM_UNITS_2: int = 64          # compat
+    LSTM_UNITS_3: int = 64          # compat
+    DROPOUT_RATE: float = 0.20
+    LSTM_LEARNING_RATE: float = 2e-4
+    LSTM_ATTN_HEADS: int = 4        # v10: 8→4 (part of size reduction)
+    LSTM_USE_COSINE_DECAY: bool = False
+    LSTM_TCN_FILTERS: int = 32      # v10: 64→32 (part of size reduction)
+    LSTM_HUBER_DELTA: float = 0.05
+    LSTM_SEASONAL_BLEND_INIT: float = 0.35
+
+    # Transformer
+    TRANSFORMER_D_MODEL: int = 128
+    TRANSFORMER_N_HEADS: int = 8
+    TRANSFORMER_N_LAYERS: int = 4
+    TRANSFORMER_DFF: int = 256
+    TRANSFORMER_DROPOUT: float = 0.20
+    TRANSFORMER_LEARNING_RATE: float = 3e-4
+    VANILLA_TRANSFORMER_LR: float = 5e-5
+    TRANSFORMER_STOCHASTIC_DEPTH: float = 0.10
+    PATCHTST_USE_REVIN: bool = True
+    VANILLA_USE_SEASONAL_RESIDUAL: bool = True
+    VANILLA_SEASONAL_BLEND_INIT: float = 0.40
+    VANILLA_HUBER_DELTA: float = 0.05
+
+    # XGBoost
+    XGB_N_ESTIMATORS: int = 500
+    XGB_MAX_DEPTH: int = 5
+    XGB_LR: float = 0.05
+    XGB_SUBSAMPLE: float = 0.80
+    XGB_COLSAMPLE: float = 0.40
+
+    # Generator v6 params
+    GEN_TEMP_SETPOINT: float = 18.0
+    GEN_TEMP_QUADRATIC_COEF: float = 2.5e-4
+    GEN_HUMIDITY_THRESHOLD: float = 60.0
+    GEN_HUMIDITY_COEF: float = 0.30
+    GEN_WIND_TEMP_THRESHOLD: float = 10.0
+    GEN_WIND_COEF: float = 0.15
+    GEN_EARLY_BIRD_FRAC: float = 0.28
+    GEN_NIGHT_OWL_FRAC:  float = 0.20
+    GEN_AR_PHI: float   = 0.65
+    GEN_AR_SIGMA: float = 0.060
+    GEN_SEASONAL_WINTER_BOOST: float = 0.15
+    GEN_SEASONAL_SUMMER_DIP:   float = 0.10
+    GEN_EV_PENETRATION: float   = 0.50   # v10: 28%→50% + time-wrap исправлен
+    GEN_SOLAR_PENETRATION: float = 0.22
+    GEN_INDUSTRIAL_LOADS: int   = 6      # v10: 4→6
+
+    # Батарея
+    BATTERY_CAPACITY: float = 4_500.0
+    BATTERY_MAX_POWER: float = 2_250.0
+    BATTERY_EFFICIENCY: float = 0.95
+    BATTERY_CYCLE_COST: float = 0.06
+    BATTERY_COST_RUB: float = 45_000_000.0
+    BATTERY_OM_SHARE: float = 0.015
+    DEMAND_CHARGE_RUB_PER_KW_MONTH: float = 950.0
+    BATTERY_MIN_SOC: float = 0.25
+    BATTERY_MAX_SOC: float = 0.75
+
+    TARIFF_PEAK: float = 6.50
+    TARIFF_HALF_PEAK: float = 4.20
+    TARIFF_NIGHT: float = 1.80
+
+    BASE_DIR: str = os.path.dirname(os.path.abspath(__file__))
+    OUTPUT_DIR: str  = os.path.join(BASE_DIR, "results")
+    MODELS_DIR: str  = os.path.join(BASE_DIR, "results", "models")
+    PLOTS_DIR: str   = os.path.join(BASE_DIR, "results", "plots")
+    LOGS_DIR: str    = os.path.join(BASE_DIR, "results", "logs")
+
+    LOG_LEVEL: int = logging.INFO
+    LOG_FORMAT: str = "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"
+    LOG_DATE_FMT: str = "%Y-%m-%d %H:%M:%S"
+
+    @classmethod
+    def create_dirs(cls):
+        for d in (cls.OUTPUT_DIR, cls.MODELS_DIR, cls.PLOTS_DIR, cls.LOGS_DIR):
+            os.makedirs(d, exist_ok=True)
+
+    @classmethod
+    def setup_logging(cls):
+        cls.create_dirs()
+        logging.basicConfig(
+            level=cls.LOG_LEVEL, format=cls.LOG_FORMAT, datefmt=cls.LOG_DATE_FMT,
+            handlers=[
+                logging.StreamHandler(),
+                logging.FileHandler(os.path.join(cls.LOGS_DIR, "run.log"), encoding="utf-8"),
+            ],
         )
-        self.bn1 = tf.keras.layers.BatchNormalization()
-        self.act1 = tf.keras.layers.Activation("gelu")
-        self.drop1 = tf.keras.layers.Dropout(dropout_rate)
+        return logging.getLogger("smart_grid")
 
-        self.pad2 = tf.keras.layers.ZeroPadding1D(padding=(pad, 0))
-        self.conv2 = tf.keras.layers.Conv1D(
-            filters,
-            kernel_size,
-            dilation_rate=dilation_rate,
-            padding="valid",
-            use_bias=False,
-        )
-        self.bn2 = tf.keras.layers.BatchNormalization()
-        self.act2 = tf.keras.layers.Activation("gelu")
+    @classmethod
+    def set_fast_mode(cls):
+        cls.DAYS = 365; cls.HOUSEHOLDS = 250; cls.EPOCHS = 120
+        cls.PATIENCE = 20; cls.LR_PATIENCE = 8
+        cls.HISTORY_LENGTH = 48; cls.STORAGE_HORIZON = 720; cls.N_FEATURES = 26
+        cls.LSTM_UNITS_1 = 48; cls.LSTM_UNITS_2 = 48; cls.LSTM_UNITS_3 = 48
+        cls.LSTM_ATTN_HEADS = 4; cls.LSTM_TCN_FILTERS = 32
+        cls.DROPOUT_RATE = 0.25; cls.LSTM_LEARNING_RATE = 2e-4; cls.LSTM_USE_COSINE_DECAY = False
+        cls.LSTM_SEASONAL_BLEND_INIT = 0.30; cls.LSTM_HUBER_DELTA = 0.05
+        cls.TRANSFORMER_D_MODEL = 64; cls.TRANSFORMER_N_HEADS = 4
+        cls.TRANSFORMER_N_LAYERS = 2; cls.TRANSFORMER_DFF = 128
+        cls.TRANSFORMER_DROPOUT = 0.20; cls.TRANSFORMER_LEARNING_RATE = 3e-4
+        cls.VANILLA_TRANSFORMER_LR = 8e-5; cls.TRANSFORMER_STOCHASTIC_DEPTH = 0.05
+        cls.PATCHTST_USE_REVIN = True
+        cls.VANILLA_USE_SEASONAL_RESIDUAL = True; cls.VANILLA_SEASONAL_BLEND_INIT = 0.35
+        cls.VANILLA_HUBER_DELTA = 0.05; cls.XGB_N_ESTIMATORS = 300
+        cls.GEN_EV_PENETRATION = 0.50; cls.GEN_INDUSTRIAL_LOADS = 4
+        logging.getLogger("smart_grid").info(
+            "Fast mode v10: DAYS=%d EPOCHS=%d N_FEATURES=%d | "
+            "LSTM BiLSTM=%d TCN=%d (~%dK params) | VanTr LR=%.0e | EV=%.0f%%",
+            cls.DAYS, cls.EPOCHS, cls.N_FEATURES, cls.LSTM_UNITS_1, cls.LSTM_TCN_FILTERS,
+            # rough param estimate
+            (4*cls.LSTM_TCN_FILTERS*26 + 4*cls.LSTM_UNITS_1*(4*cls.LSTM_TCN_FILTERS+cls.LSTM_UNITS_1) + 128*64)//1000,
+            cls.VANILLA_TRANSFORMER_LR, cls.GEN_EV_PENETRATION*100)
 
-        self.proj = tf.keras.layers.Conv1D(filters, 1, padding="same", use_bias=False)
-        self.bn_proj = tf.keras.layers.BatchNormalization()
+    @classmethod
+    def set_optimal_mode(cls):
+        cls.DAYS = 365; cls.HOUSEHOLDS = 500; cls.EPOCHS = 200
+        cls.PATIENCE = 25; cls.LR_PATIENCE = 10
+        cls.HISTORY_LENGTH = 48; cls.STORAGE_HORIZON = 720; cls.N_FEATURES = 26
+        # v10: LSTM уменьшен для борьбы с overfitting
+        cls.LSTM_UNITS_1 = 64; cls.LSTM_UNITS_2 = 64; cls.LSTM_UNITS_3 = 64
+        cls.LSTM_ATTN_HEADS = 4; cls.LSTM_TCN_FILTERS = 32
+        cls.DROPOUT_RATE = 0.20; cls.LSTM_LEARNING_RATE = 2e-4; cls.LSTM_USE_COSINE_DECAY = False
+        cls.LSTM_SEASONAL_BLEND_INIT = 0.35; cls.LSTM_HUBER_DELTA = 0.05
+        cls.TRANSFORMER_D_MODEL = 128; cls.TRANSFORMER_N_HEADS = 8
+        cls.TRANSFORMER_N_LAYERS = 4; cls.TRANSFORMER_DFF = 256
+        cls.TRANSFORMER_DROPOUT = 0.20; cls.TRANSFORMER_LEARNING_RATE = 3e-4
+        cls.VANILLA_TRANSFORMER_LR = 5e-5; cls.TRANSFORMER_STOCHASTIC_DEPTH = 0.10
+        cls.PATCHTST_USE_REVIN = True
+        cls.VANILLA_USE_SEASONAL_RESIDUAL = True; cls.VANILLA_SEASONAL_BLEND_INIT = 0.40
+        cls.VANILLA_HUBER_DELTA = 0.05
+        cls.XGB_N_ESTIMATORS = 500; cls.XGB_COLSAMPLE = 0.40
+        cls.GEN_EV_PENETRATION = 0.50; cls.GEN_INDUSTRIAL_LOADS = 6
+        logging.getLogger("smart_grid").info(
+            "Optimal mode v10: DAYS=%d EPOCHS=%d N_FEATURES=%d | "
+            "LSTM TCN=%d BiLSTM=%d heads=%d lr=%.0e huber=%.2f | "
+            "Trans d=%d h=%d L=%d lr=%.0e | VanTr LR=%.0e | "
+            "EV=%.0f%% STORAGE=%dh BAT=%.0f кВт·ч",
+            cls.DAYS, cls.EPOCHS, cls.N_FEATURES,
+            cls.LSTM_TCN_FILTERS, cls.LSTM_UNITS_1, cls.LSTM_ATTN_HEADS,
+            cls.LSTM_LEARNING_RATE, cls.LSTM_HUBER_DELTA,
+            cls.TRANSFORMER_D_MODEL, cls.TRANSFORMER_N_HEADS, cls.TRANSFORMER_N_LAYERS,
+            cls.TRANSFORMER_LEARNING_RATE, cls.VANILLA_TRANSFORMER_LR,
+            cls.GEN_EV_PENETRATION*100, cls.STORAGE_HORIZON, cls.BATTERY_CAPACITY)
 
-    def call(self, x, training=None):
-        res = self.bn_proj(self.proj(x), training=training)
-        h = self.conv1(self.pad1(x))
-        h = self.act1(self.bn1(h, training=training))
-        h = self.drop1(h, training=training)
-        h = self.conv2(self.pad2(h))
-        h = self.bn2(h, training=training)
-        return self.act2(h + res)
+    @classmethod
+    def set_full_mode(cls):
+        """730 дней, 300 эпох. validate_data_integrity теперь не падает (v7 preprocessing)."""
+        cls.DAYS = 730; cls.HOUSEHOLDS = 500; cls.EPOCHS = 300
+        cls.PATIENCE = 30; cls.LR_PATIENCE = 10
+        cls.HISTORY_LENGTH = 72; cls.STORAGE_HORIZON = 720; cls.N_FEATURES = 26
+        # v10: 96 (было 192 — тоже было бы overfitting на 12K сэмплах)
+        cls.LSTM_UNITS_1 = 96; cls.LSTM_UNITS_2 = 96; cls.LSTM_UNITS_3 = 96
+        cls.LSTM_ATTN_HEADS = 4; cls.LSTM_TCN_FILTERS = 48
+        cls.DROPOUT_RATE = 0.20; cls.LSTM_LEARNING_RATE = 2e-4; cls.LSTM_USE_COSINE_DECAY = False
+        cls.LSTM_SEASONAL_BLEND_INIT = 0.35; cls.LSTM_HUBER_DELTA = 0.05
+        cls.TRANSFORMER_D_MODEL = 128; cls.TRANSFORMER_N_HEADS = 8
+        cls.TRANSFORMER_N_LAYERS = 4; cls.TRANSFORMER_DFF = 512
+        cls.TRANSFORMER_DROPOUT = 0.20; cls.TRANSFORMER_LEARNING_RATE = 3e-4
+        cls.VANILLA_TRANSFORMER_LR = 8e-5; cls.TRANSFORMER_STOCHASTIC_DEPTH = 0.10
+        cls.PATCHTST_USE_REVIN = True
+        cls.VANILLA_USE_SEASONAL_RESIDUAL = True; cls.VANILLA_SEASONAL_BLEND_INIT = 0.40
+        cls.VANILLA_HUBER_DELTA = 0.05
+        cls.XGB_N_ESTIMATORS = 800; cls.XGB_COLSAMPLE = 0.35
+        cls.GEN_EV_PENETRATION = 0.50; cls.GEN_INDUSTRIAL_LOADS = 6
+        logging.getLogger("smart_grid").info(
+            "Full mode v10: DAYS=%d EPOCHS=%d N_FEATURES=%d | "
+            "LSTM BiLSTM=%d TCN=%d | Trans d=%d h=%d L=%d | EV=%.0f%%",
+            cls.DAYS, cls.EPOCHS, cls.N_FEATURES, cls.LSTM_UNITS_1, cls.LSTM_TCN_FILTERS,
+            cls.TRANSFORMER_D_MODEL, cls.TRANSFORMER_N_HEADS, cls.TRANSFORMER_N_LAYERS,
+            cls.GEN_EV_PENETRATION*100)
 
-    def get_config(self):
-        return {
-            **super().get_config(),
-            "filters": self.filters,
-            "kernel_size": self.kernel_size,
-            "dilation_rate": self.dilation_rate,
-            "dropout_rate": self.dropout_rate,
-        }
-
-
-class TemporalAttentionBlock(tf.keras.layers.Layer):
-    """Temporal Multi-Head Attention over sequence hidden states."""
-
-    def __init__(self, num_heads=8, key_dim=32, dropout=0.10, **kwargs):
-        super().__init__(**kwargs)
-        self.num_heads = num_heads
-        self.key_dim = key_dim
-        self.dropout_rate = dropout
-        self._attn_weights = None
-        self.mha = tf.keras.layers.MultiHeadAttention(
-            num_heads=num_heads,
-            key_dim=key_dim,
-            dropout=dropout,
-        )
-        self.ln = tf.keras.layers.LayerNormalization(epsilon=1e-6)
-        self.drop = tf.keras.layers.Dropout(dropout)
-
-    def call(self, hidden_states, training=None):
-        query = hidden_states[:, -1:, :]
-        attn_out, self._attn_weights = self.mha(
-            query=query,
-            key=hidden_states,
-            value=hidden_states,
-            return_attention_scores=True,
-            training=training,
-        )
-        context = tf.keras.ops.squeeze(attn_out, axis=1)
-        return self.drop(self.ln(context), training=training)
-
-    def get_config(self):
-        return {
-            **super().get_config(),
-            "num_heads": self.num_heads,
-            "key_dim": self.key_dim,
-            "dropout": self.dropout_rate,
-        }
-
-
-class SeasonalSkipConnection(tf.keras.layers.Layer):
-    """Blend neural forecast with naive seasonal baseline using learnable alpha."""
-
-    def __init__(self, init_alpha: float = 0.02, **kwargs):
-        super().__init__(**kwargs)
-        self.init_alpha = init_alpha
-
-    def build(self, input_shape):
-        self.alpha = self.add_weight(
-            name="alpha",
-            shape=(),
-            initializer=tf.keras.initializers.Constant(self.init_alpha),
-            trainable=True,
-            constraint=tf.keras.constraints.NonNeg(),
-        )
-        super().build(input_shape)
-
-    def call(self, inputs):
-        neural_out, naive_out = inputs
-        return neural_out + self.alpha * naive_out
-
-    def get_config(self):
-        return {**super().get_config(), "init_alpha": self.init_alpha}
-
-
-def build_lstm_model(
-    history_length: int = 48,
-    forecast_horizon: int = 24,
-    n_features: int = 26,
-    lstm_units_1: int = 128,
-    lstm_units_2: int = 64,  # compat
-    lstm_units_3: int = 64,  # compat
-    dropout_rate: float = 0.20,
-    learning_rate: float = 2e-4,
-    attn_heads: int = 8,
-    use_cosine_decay: bool = False,  # compat
-    total_steps: int = 37_000,  # compat
-    mc_dropout: bool = False,
-    huber_delta: float = 0.05,
-    tcn_filters: int = 64,
-    use_seasonal_skip: bool = True,
-) -> tf.keras.Model:
-    del lstm_units_2, lstm_units_3, use_cosine_decay, total_steps
-    training_flag: Optional[bool] = True if mc_dropout else None
-    kops = tf.keras.ops
-
-    inp = tf.keras.Input(shape=(history_length, n_features), name="input_sequence")
-
-    # RevIN-like per-window normalization for consumption channel.
-    cons_slice = inp[:, :, :1]
-    cov_slice = inp[:, :, 1:]
-
-    mean_cons = kops.mean(cons_slice, axis=1, keepdims=True)
-    std_cons = kops.std(cons_slice, axis=1, keepdims=True) + 1e-6
-    cons_norm = (cons_slice - mean_cons) / std_cons
-    x = tf.keras.layers.Concatenate(axis=-1, name="revin_concat")([cons_norm, cov_slice])
-
-    # Multi-scale dilated TCN.
-    tcn_proj = tf.keras.layers.Conv1D(
-        tcn_filters,
-        1,
-        padding="same",
-        name="tcn_input_proj",
-    )(x)
-    branches = []
-    for d in [1, 2, 4, 8]:
-        branch = TCNBlock(
-            tcn_filters,
-            kernel_size=3,
-            dilation_rate=d,
-            dropout_rate=0.04,
-            name=f"tcn_d{d}",
-        )(tcn_proj, training=training_flag)
-        branches.append(branch)
-
-    tcn_out = tf.keras.layers.Concatenate(axis=-1, name="tcn_merge")(branches)
-    tcn_out = tf.keras.layers.LayerNormalization(epsilon=1e-6, name="tcn_ln")(tcn_out)
-    tcn_out = tf.keras.layers.Dropout(0.10, name="tcn_drop")(tcn_out, training=training_flag)
-
-    # BiLSTM encoder.
-    bilstm_out = tf.keras.layers.Bidirectional(
-        tf.keras.layers.LSTM(
-            lstm_units_1,
-            return_sequences=True,
-            recurrent_dropout=0.0,
-        ),
-        name="bilstm_1",
-    )(tcn_out)
-    bilstm_out = tf.keras.layers.LayerNormalization(epsilon=1e-6, name="bilstm_ln")(bilstm_out)
-
-    # Temporal attention.
-    key_dim = max((lstm_units_1 * 2) // attn_heads, 8)
-    context = TemporalAttentionBlock(
-        num_heads=attn_heads,
-        key_dim=key_dim,
-        dropout=dropout_rate * 0.5,
-        name="temporal_attn",
-    )(bilstm_out, training=training_flag)
-
-    last_token = tf.keras.layers.Dropout(dropout_rate * 0.5, name="drop_last")(
-        bilstm_out[:, -1, :],
-        training=training_flag,
-    )
-    agg = tf.keras.layers.Concatenate(name="agg")([last_token, context])
-
-    # Dense head.
-    h = tf.keras.layers.Dense(
-        256,
-        activation="gelu",
-        kernel_regularizer=tf.keras.regularizers.l2(5e-6),
-        name="head_d1",
-    )(agg)
-    h = tf.keras.layers.Dropout(dropout_rate, name="head_drop1")(h, training=training_flag)
-
-    h = tf.keras.layers.Dense(
-        128,
-        activation="gelu",
-        kernel_regularizer=tf.keras.regularizers.l2(5e-6),
-        name="head_d2",
-    )(h)
-    h = tf.keras.layers.Dropout(dropout_rate * 0.5, name="head_drop2")(h, training=training_flag)
-    neural_out = tf.keras.layers.Dense(forecast_horizon, name="neural_output")(h)
-
-    if use_seasonal_skip and history_length >= forecast_horizon:
-        naive_slice = cons_norm[:, -forecast_horizon:, 0]
-        mean_vec = kops.squeeze(mean_cons, axis=(1, 2))
-        std_vec = kops.squeeze(std_cons, axis=(1, 2))
-
-        naive_denorm = naive_slice * kops.expand_dims(std_vec, axis=-1) + kops.expand_dims(mean_vec, axis=-1)
-        neural_denorm = neural_out * kops.expand_dims(std_vec, axis=-1) + kops.expand_dims(mean_vec, axis=-1)
-
-        mixed = SeasonalSkipConnection(name="seasonal_skip")([neural_denorm, naive_denorm])
-        final_out = (mixed - kops.expand_dims(mean_vec, axis=-1)) / kops.expand_dims(std_vec, axis=-1)
-        final_out = tf.keras.layers.Lambda(lambda t: t, name="output")(final_out)
-    else:
-        final_out = tf.keras.layers.Lambda(lambda t: t, name="output")(neural_out)
-
-    model = tf.keras.Model(inputs=inp, outputs=final_out, name="TCN_BiLSTM_Attention_v8")
-    model.compile(
-        optimizer=tf.keras.optimizers.Adam(learning_rate=learning_rate, clipnorm=1.0),
-        loss=tf.keras.losses.Huber(delta=huber_delta, name=f"huber_d{huber_delta}"),
-        metrics=["mae", "mape"],
-    )
-
-    logger.info(
-        "TCN-BiLSTM-Attention v8 | %d params | input=(%d,%d) | "
-        "TCN filters=%d | BiLSTM=%d | Attn heads=%d key_dim=%d | "
-        "Dense 256/128 drop=%.2f | SeasonalSkip=%s | lr=%.0e | Huber(δ=%.2f)",
-        model.count_params(),
-        history_length,
-        n_features,
-        tcn_filters,
-        lstm_units_1,
-        attn_heads,
-        key_dim,
-        dropout_rate,
-        use_seasonal_skip,
-        learning_rate,
-        huber_delta,
-    )
-    return model
+    @classmethod
+    def print_summary(cls):
+        log = logging.getLogger("smart_grid")
+        log.info("─" * 50)
+        log.info("КОНФИГУРАЦИЯ:")
+        log.info("  Данные:      %d дней, %d домохозяйств", cls.DAYS, cls.HOUSEHOLDS)
+        log.info("  Признаки:    %d ковариат на шаг", cls.N_FEATURES)
+        log.info("  История:     %d ч → прогноз %d ч", cls.HISTORY_LENGTH, cls.FORECAST_HORIZON)
+        log.info("  Обучение:    %d эпох, batch=%d, patience=%d", cls.EPOCHS, cls.BATCH_SIZE, cls.PATIENCE)
+        log.info("  LSTM v9:     BiLSTM=%d TCN=%d attn=%dh drop=%.2f lr=%g huber=%.2f input=(%d,%d)",
+                 cls.LSTM_UNITS_1, cls.LSTM_TCN_FILTERS, cls.LSTM_ATTN_HEADS,
+                 cls.DROPOUT_RATE, cls.LSTM_LEARNING_RATE, cls.LSTM_HUBER_DELTA,
+                 cls.HISTORY_LENGTH, cls.N_FEATURES)
+        log.info("  Transformer: d=%d h=%d L=%d dff=%d drop=%.2f lr=%g (Vanilla lr=%g) input=(%d,%d)",
+                 cls.TRANSFORMER_D_MODEL, cls.TRANSFORMER_N_HEADS, cls.TRANSFORMER_N_LAYERS,
+                 cls.TRANSFORMER_DFF, cls.TRANSFORMER_DROPOUT,
+                 cls.TRANSFORMER_LEARNING_RATE, cls.VANILLA_TRANSFORMER_LR,
+                 cls.HISTORY_LENGTH, cls.N_FEATURES)
+        log.info("  XGBoost:     n_est=%d depth=%d col=%.2f",
+                 cls.XGB_N_ESTIMATORS, cls.XGB_MAX_DEPTH, cls.XGB_COLSAMPLE)
+        log.info("  Generator:   EV=%.0f%% Solar=%.0f%% IndustLoads=%d AR_phi=%.2f AR_sig=%.3f",
+                 cls.GEN_EV_PENETRATION*100, cls.GEN_SOLAR_PENETRATION*100,
+                 cls.GEN_INDUSTRIAL_LOADS, cls.GEN_AR_PHI, cls.GEN_AR_SIGMA)
+        log.info("  Тарифы:      пик=%.2f день=%.2f ночь=%.2f руб/кВт·ч",
+                 cls.TARIFF_PEAK, cls.TARIFF_HALF_PEAK, cls.TARIFF_NIGHT)
+        log.info("  Батарея:     %.0f кВт·ч, SOC %.0f%%→%.0f%% (ΔE=%.0f кВт·ч)",
+                 cls.BATTERY_CAPACITY, cls.BATTERY_MIN_SOC*100, cls.BATTERY_MAX_SOC*100,
+                 (cls.BATTERY_MAX_SOC-cls.BATTERY_MIN_SOC)*cls.BATTERY_CAPACITY)
+        log.info("─" * 50)

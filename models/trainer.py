@@ -21,6 +21,7 @@ models/trainer.py — Универсальный тренер моделей.
 import logging
 import os
 import time
+import gc
 from typing import Any, Dict, List, Optional
 
 import numpy as np
@@ -250,30 +251,59 @@ class ModelTrainer:
             logger.info("%s: LR schedule обнаружен → ReduceLROnPlateau отключён",
                         self.model_name)
 
-        try:
-            self.history = self.model.fit(
-                data["X_train"], data["Y_train"],
-                validation_data=(data["X_val"], data["Y_val"]),
-                epochs=epochs,
-                batch_size=batch_size,
-                callbacks=callbacks,
-                verbose=1,
-            )
-            actual_epochs = len(self.history.history["loss"])
-            logger.info("%s: обучение завершено за %d эпох",
-                        self.model_name, actual_epochs)
-            fit_diag = diagnose_training_regime(self.history.history)
-            logger.info(
-                "%s: training regime=%s | train_mae=%.4f val_mae=%.4f gap=%.4f",
-                self.model_name,
-                fit_diag.get("status", "unknown"),
-                fit_diag.get("train_mae_last", float("nan")),
-                fit_diag.get("val_mae_last", float("nan")),
-                fit_diag.get("generalization_gap", float("nan")),
-            )
-        except Exception as exc:
-            logger.error("Ошибка при обучении %s: %s", self.model_name, exc)
-            raise
+        current_batch = int(batch_size)
+        last_exc: Optional[Exception] = None
+        while current_batch >= 4:
+            try:
+                logger.info("%s: старт fit с batch_size=%d", self.model_name, current_batch)
+                self.history = self.model.fit(
+                    data["X_train"], data["Y_train"],
+                    validation_data=(data["X_val"], data["Y_val"]),
+                    epochs=epochs,
+                    batch_size=current_batch,
+                    callbacks=callbacks,
+                    verbose=1,
+                )
+                actual_epochs = len(self.history.history["loss"])
+                logger.info("%s: обучение завершено за %d эпох",
+                            self.model_name, actual_epochs)
+                fit_diag = diagnose_training_regime(self.history.history)
+                logger.info(
+                    "%s: training regime=%s | train_mae=%.4f val_mae=%.4f gap=%.4f",
+                    self.model_name,
+                    fit_diag.get("status", "unknown"),
+                    fit_diag.get("train_mae_last", float("nan")),
+                    fit_diag.get("val_mae_last", float("nan")),
+                    fit_diag.get("generalization_gap", float("nan")),
+                )
+                return
+            except tf.errors.ResourceExhaustedError as exc:
+                last_exc = exc
+                next_batch = current_batch // 2
+                logger.warning(
+                    "%s: ResourceExhausted/OOM при batch_size=%d. Повтор с batch_size=%d",
+                    self.model_name, current_batch, next_batch
+                )
+                gc.collect()
+                current_batch = next_batch
+            except Exception as exc:
+                if "out of memory" in str(exc).lower() or "oom" in str(exc).lower():
+                    last_exc = exc
+                    next_batch = current_batch // 2
+                    logger.warning(
+                        "%s: OOM-подобная ошибка при batch_size=%d. Повтор с batch_size=%d",
+                        self.model_name, current_batch, next_batch
+                    )
+                    gc.collect()
+                    current_batch = next_batch
+                else:
+                    logger.error("Ошибка при обучении %s: %s", self.model_name, exc)
+                    raise
+
+        logger.error("%s: не удалось обучить модель даже с batch_size=4", self.model_name)
+        if last_exc is not None:
+            raise last_exc
+        raise RuntimeError(f"{self.model_name}: training failed for unknown reason")
 
     def _train_sklearn(self, data: Dict[str, Any]) -> None:
         try:

@@ -199,8 +199,8 @@ class Config:
         """Максимальное качество (full mode): больше данных + более ёмкие seq-модели."""
         cls.DAYS = 730; cls.HOUSEHOLDS = 2500; cls.EPOCHS = 320
         cls.PATIENCE = 35; cls.LR_PATIENCE = 12
-        cls.HISTORY_LENGTH = 96; cls.STORAGE_HORIZON = 720; cls.N_FEATURES = 26
-        cls.BATCH_SIZE = 16
+        cls.HISTORY_LENGTH = 192; cls.STORAGE_HORIZON = 720; cls.N_FEATURES = 26
+        cls.BATCH_SIZE = 8
         # На 730 днях и большом количестве окон можно использовать более ёмкий LSTM.
         cls.LSTM_UNITS_1 = 128; cls.LSTM_UNITS_2 = 128; cls.LSTM_UNITS_3 = 128
         cls.LSTM_ATTN_HEADS = 8; cls.LSTM_TCN_FILTERS = 64
@@ -208,8 +208,8 @@ class Config:
         cls.LSTM_SEASONAL_BLEND_INIT = 0.35; cls.LSTM_HUBER_DELTA = 0.05
         cls.TRANSFORMER_D_MODEL = 192; cls.TRANSFORMER_N_HEADS = 8
         cls.TRANSFORMER_N_LAYERS = 5; cls.TRANSFORMER_DFF = 384
-        cls.TRANSFORMER_DROPOUT = 0.15; cls.TRANSFORMER_LEARNING_RATE = 2e-4
-        cls.VANILLA_TRANSFORMER_LR = 3e-5; cls.TRANSFORMER_STOCHASTIC_DEPTH = 0.08
+        cls.TRANSFORMER_DROPOUT = 0.12; cls.TRANSFORMER_LEARNING_RATE = 2e-4
+        cls.VANILLA_TRANSFORMER_LR = 5e-5; cls.TRANSFORMER_STOCHASTIC_DEPTH = 0.08
         cls.PATCHTST_USE_REVIN = True
         cls.VANILLA_USE_SEASONAL_RESIDUAL = True; cls.VANILLA_SEASONAL_BLEND_INIT = 0.40
         cls.VANILLA_HUBER_DELTA = 0.05

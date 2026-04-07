@@ -17,6 +17,7 @@ main.py — Точка входа Smart Grid v9.
 
 import logging
 import random
+import os
 
 import numpy as np
 import matplotlib
@@ -56,9 +57,14 @@ def main():
     logger.info("  СИСТЕМА ПРОГНОЗИРОВАНИЯ ЭНЕРГОПОТРЕБЛЕНИЯ — SMART GRID")
     logger.info("=" * 70)
 
-    # Config.set_fast_mode()
-    Config.set_optimal_mode()
-    # Config.set_full_mode()
+    run_mode = os.getenv("SMARTGRID_MODE", "optimal").strip().lower()
+    if run_mode == "fast":
+        Config.set_fast_mode()
+    elif run_mode == "full":
+        Config.set_full_mode()
+    else:
+        Config.set_optimal_mode()
+    logger.info("Режим запуска: SMARTGRID_MODE=%s", run_mode)
     Config.create_dirs()
 
     # [1/10] Генерация данных
@@ -146,7 +152,14 @@ def main():
         huber_delta=Config.VANILLA_HUBER_DELTA,
     )
 
-    patch_len = 8 if Config.HISTORY_LENGTH >= 48 else 6
+    if Config.HISTORY_LENGTH >= 192:
+        patch_len = 16
+    elif Config.HISTORY_LENGTH >= 96:
+        patch_len = 12
+    elif Config.HISTORY_LENGTH >= 48:
+        patch_len = 8
+    else:
+        patch_len = 6
     stride    = patch_len // 2
     patchtst  = build_patchtst(
         history_length=Config.HISTORY_LENGTH,

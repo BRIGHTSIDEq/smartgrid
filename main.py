@@ -17,7 +17,6 @@ main.py — Точка входа Smart Grid v9.
 
 import logging
 import random
-import os
 
 import numpy as np
 import matplotlib
@@ -57,14 +56,9 @@ def main():
     logger.info("  СИСТЕМА ПРОГНОЗИРОВАНИЯ ЭНЕРГОПОТРЕБЛЕНИЯ — SMART GRID")
     logger.info("=" * 70)
 
-    run_mode = os.getenv("SMARTGRID_MODE", "optimal").strip().lower()
-    if run_mode == "fast":
-        Config.set_fast_mode()
-    elif run_mode == "full":
-        Config.set_full_mode()
-    else:
-        Config.set_optimal_mode()
-    logger.info("Режим запуска: SMARTGRID_MODE=%s", run_mode)
+    # Config.set_fast_mode()
+    Config.set_optimal_mode()
+    # Config.set_full_mode()
     Config.create_dirs()
 
     # [1/10] Генерация данных

@@ -48,8 +48,8 @@ class Config:
     LSTM_UNITS_1: int = 96          # больше ёмкость на 12k+ train-сэмплов
     LSTM_UNITS_2: int = 64          # compat
     LSTM_UNITS_3: int = 64          # compat
-    DROPOUT_RATE: float = 0.15
-    LSTM_LEARNING_RATE: float = 1.5e-4
+    DROPOUT_RATE: float = 0.12
+    LSTM_LEARNING_RATE: float = 2.0e-4
     LSTM_ATTN_HEADS: int = 4        # v10: 8→4 (part of size reduction)
     LSTM_USE_COSINE_DECAY: bool = False
     LSTM_TCN_FILTERS: int = 48
@@ -61,9 +61,9 @@ class Config:
     TRANSFORMER_N_HEADS: int = 8
     TRANSFORMER_N_LAYERS: int = 5
     TRANSFORMER_DFF: int = 384
-    TRANSFORMER_DROPOUT: float = 0.15
+    TRANSFORMER_DROPOUT: float = 0.10
     TRANSFORMER_LEARNING_RATE: float = 2e-4
-    VANILLA_TRANSFORMER_LR: float = 3e-5
+    VANILLA_TRANSFORMER_LR: float = 7e-5
     TRANSFORMER_STOCHASTIC_DEPTH: float = 0.06
     PATCHTST_USE_REVIN: bool = True
     VANILLA_USE_SEASONAL_RESIDUAL: bool = True
@@ -170,12 +170,12 @@ class Config:
         cls.HISTORY_LENGTH = 48; cls.STORAGE_HORIZON = 720; cls.N_FEATURES = 26
         cls.LSTM_UNITS_1 = 96; cls.LSTM_UNITS_2 = 96; cls.LSTM_UNITS_3 = 96
         cls.LSTM_ATTN_HEADS = 4; cls.LSTM_TCN_FILTERS = 48
-        cls.DROPOUT_RATE = 0.15; cls.LSTM_LEARNING_RATE = 1.5e-4; cls.LSTM_USE_COSINE_DECAY = False
+        cls.DROPOUT_RATE = 0.12; cls.LSTM_LEARNING_RATE = 2.0e-4; cls.LSTM_USE_COSINE_DECAY = False
         cls.LSTM_SEASONAL_BLEND_INIT = 0.35; cls.LSTM_HUBER_DELTA = 0.05
         cls.TRANSFORMER_D_MODEL = 192; cls.TRANSFORMER_N_HEADS = 8
         cls.TRANSFORMER_N_LAYERS = 5; cls.TRANSFORMER_DFF = 384
-        cls.TRANSFORMER_DROPOUT = 0.15; cls.TRANSFORMER_LEARNING_RATE = 2e-4
-        cls.VANILLA_TRANSFORMER_LR = 3e-5; cls.TRANSFORMER_STOCHASTIC_DEPTH = 0.06
+        cls.TRANSFORMER_DROPOUT = 0.10; cls.TRANSFORMER_LEARNING_RATE = 2e-4
+        cls.VANILLA_TRANSFORMER_LR = 7e-5; cls.TRANSFORMER_STOCHASTIC_DEPTH = 0.05
         cls.PATCHTST_USE_REVIN = True
         cls.VANILLA_USE_SEASONAL_RESIDUAL = True; cls.VANILLA_SEASONAL_BLEND_INIT = 0.40
         cls.VANILLA_HUBER_DELTA = 0.05

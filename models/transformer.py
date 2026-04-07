@@ -571,6 +571,7 @@ def build_vanilla_transformer(
     use_seasonal_residual: bool = True,
     seasonal_blend_init: float = 0.40,
     huber_delta: float = 0.05,
+    use_autoregressive_shortcut: bool = True,
 ) -> tf.keras.Model:
     """
     Encoder-only Transformer v4 с StochasticDepth + LearnedQueryPooling.
@@ -644,6 +645,15 @@ def build_vanilla_transformer(
     h = tf.keras.layers.Dropout(dropout, name="head_drop")(h)
     neural_out = tf.keras.layers.Dense(forecast_horizon, name="neural_output")(h)
 
+    # Линейный AR-shortcut из последнего шага входа.
+    # Помогает на рядах с сильной автокорреляцией (ACF24/ACF168).
+    if use_autoregressive_shortcut:
+        last_features = inp_series[:, -1, :]
+        ar_shortcut = tf.keras.layers.Dense(
+            forecast_horizon, use_bias=False, name="ar_shortcut"
+        )(last_features)
+        neural_out = tf.keras.layers.Add(name="neural_plus_ar")([neural_out, ar_shortcut])
+
     if use_seasonal_residual and history_length >= forecast_horizon:
         naive = inp_series[:, -forecast_horizon:, 0]
         blend_logit = tf.keras.layers.Dense(1, name="seasonal_blend_logit",
@@ -652,6 +662,14 @@ def build_vanilla_transformer(
                                             ))(agg)
         blend = tf.keras.layers.Activation("sigmoid", name="seasonal_blend")(blend_logit)
         output = blend * neural_out + (1.0 - blend) * naive
+
+        # Weekly residual blend при длинной истории.
+        if history_length >= (168 + forecast_horizon):
+            weekly = inp_series[:, -168:-168 + forecast_horizon, 0]
+            w2_logit = tf.keras.layers.Dense(1, name="weekly_blend_logit",
+                                             bias_initializer=tf.keras.initializers.Constant(np.log(0.80/0.20)))(agg)
+            w2 = tf.keras.layers.Activation("sigmoid", name="weekly_blend")(w2_logit)
+            output = w2 * output + (1.0 - w2) * weekly
     else:
         output = neural_out
 

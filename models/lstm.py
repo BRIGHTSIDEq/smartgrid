@@ -174,6 +174,7 @@ def build_lstm_model(
     tcn_filters=32,           # v9: 64→32
     use_seasonal_skip=True,
     seasonal_blend_init=0.35,
+    use_autoregressive_shortcut=True,
 ):
     """
     TCN-BiLSTM-Attention v9.
@@ -247,6 +248,17 @@ def build_lstm_model(
                                name="head_d2")(h)
     h = tf.keras.layers.Dropout(dropout_rate * 0.5, name="head_drop2")(h, training=training_flag)
     neural_out = tf.keras.layers.Dense(forecast_horizon, name="neural_output")(h)
+
+    # ── AR-shortcut: линейная проекция последних автокорреляционных признаков ──
+    # Идея: дать нейросети "быстрый путь" для сильной сезонности (lag24/48/168),
+    # чтобы снять систематический хвост в остатках (высокий ACF24/ACF168).
+    if use_autoregressive_shortcut:
+        # последние признаки окна: consumption + календарь/погода + lag-каналы
+        last_features = inp[:, -1, :]
+        ar_shortcut = tf.keras.layers.Dense(
+            forecast_horizon, use_bias=False, name="ar_shortcut"
+        )(last_features)
+        neural_out = tf.keras.layers.Add(name="neural_plus_ar")([neural_out, ar_shortcut])
     # neural_out предсказывает в [0,1] MinMaxScaler пространстве
 
     # ── SeasonalSkip (v9 FIX) ───────────────────────────────────────────────
@@ -264,6 +276,14 @@ def build_lstm_model(
         final_out = SeasonalSkipConnection(
             init_neural_weight=seasonal_blend_init, name="seasonal_skip"
         )([neural_out, naive_slice_minmax])
+
+        # Дополнительный weekly-skip, если история длинная (>= 168+горизонт).
+        # Это улучшает недельную сезонность без изменения целевого пространства.
+        if history_length >= (168 + forecast_horizon):
+            weekly_slice_minmax = inp[:, -168:-168 + forecast_horizon, 0]  # shape (B, horizon)
+            final_out = SeasonalSkipConnection(
+                init_neural_weight=0.80, name="seasonal_weekly_skip"
+            )([final_out, weekly_slice_minmax])
     else:
         final_out = neural_out
 

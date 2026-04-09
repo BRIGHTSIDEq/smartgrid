@@ -258,7 +258,17 @@ def build_lstm_model(
         ar_shortcut = tf.keras.layers.Dense(
             forecast_horizon, use_bias=False, name="ar_shortcut"
         )(last_features)
-        neural_out = tf.keras.layers.Add(name="neural_plus_ar")([neural_out, ar_shortcut])
+        add_terms = [neural_out, ar_shortcut]
+
+        # Усиленный seasonal shortcut из lag24/48/168 (каналы 15:18 в preprocessing.py).
+        if n_features >= 18:
+            lag_features = inp[:, -1, 15:18]
+            lag_shortcut = tf.keras.layers.Dense(
+                forecast_horizon, use_bias=False, name="lag_shortcut"
+            )(lag_features)
+            add_terms.append(lag_shortcut)
+
+        neural_out = tf.keras.layers.Add(name="neural_plus_ar")(add_terms)
     # neural_out предсказывает в [0,1] MinMaxScaler пространстве
 
     # ── SeasonalSkip (v9 FIX) ───────────────────────────────────────────────

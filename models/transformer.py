@@ -572,6 +572,7 @@ def build_vanilla_transformer(
     seasonal_blend_init: float = 0.40,
     huber_delta: float = 0.05,
     use_autoregressive_shortcut: bool = True,
+    use_local_conv: bool = True,
 ) -> tf.keras.Model:
     """
     Encoder-only Transformer v4 с StochasticDepth + LearnedQueryPooling.
@@ -607,6 +608,11 @@ def build_vanilla_transformer(
     inputs = [inp_series]
 
     x = tf.keras.layers.Dense(d_model, name="input_proj")(inp_series)
+    if use_local_conv:
+        local_conv = tf.keras.layers.Conv1D(
+            d_model, kernel_size=3, padding="causal", activation="gelu", name="local_conv"
+        )(inp_series)
+        x = tf.keras.layers.Add(name="input_plus_local")([x, local_conv])
 
     if pe_type == "sinusoidal":
         x = SinusoidalPE(d_model, max_len=max(history_length + 4, 256), name="sin_pe")(x)

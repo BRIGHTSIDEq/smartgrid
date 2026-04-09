@@ -373,6 +373,46 @@ def generate_smartgrid_data(
             cascade_state = max(cascade_state - 0.04, 0.0)
         cascade_factor[h] = 1.0 + cascade_state
 
+    # ── НЕЛИНЕЙНОЕ "СОСТОЯНИЕ СЕТИ" (v7): память + пороги + взаимодействия ──
+    # Цель: сделать задачу менее линейной, но физически правдоподобной.
+    # Компонент зависит от:
+    #   1) экстремальной температуры,
+    #   2) пиковых часов,
+    #   3) EV-нагрузки,
+    #   4) собственной инерции (latent state).
+    grid_stress = np.zeros(hours, np.float32)
+    ev_norm_proxy = ev_load_raw / (float(ev_load_raw.max()) + 1e-6)
+    temp_extreme = np.clip(np.abs(temperature - temp_setpoint) / 22.0, 0.0, 1.4).astype(np.float32)
+    peak_hours = (((hour_of_day >= 7) & (hour_of_day < 10)) | ((hour_of_day >= 18) & (hour_of_day < 22))).astype(np.float32)
+    stress_state = 0.0
+    for h in range(hours):
+        trigger = (
+            0.40 * float(temp_extreme[h]) +
+            0.25 * float(peak_hours[h]) +
+            0.25 * float(ev_norm_proxy[h]) +
+            0.10 * float(cloud_cover[h])
+        )
+        stress_state = 0.90 * stress_state + 0.10 * trigger + float(rng.normal(0.0, 0.015))
+        stress_state = float(np.clip(stress_state, 0.0, 1.4))
+        grid_stress[h] = stress_state
+    stress_nonlinear = (
+        1.0
+        + 0.18 * _sigmoid(6.0 * (grid_stress - 0.55))
+        + 0.06 * (grid_stress ** 2)
+    ).astype(np.float32)
+
+    # ── DSR rebound (v7): после снятия ограничения часть спроса возвращается ──
+    dsr_rebound = np.zeros(hours, np.float32)
+    for h in range(1, hours):
+        if dsr_active[h - 1] > 0 and dsr_active[h] == 0:
+            rebound_amp = rng.uniform(0.08, 0.16)
+            rebound_len = int(rng.integers(2, 5))
+            for k in range(rebound_len):
+                idx = h + k
+                if idx >= hours:
+                    break
+                dsr_rebound[idx] += rebound_amp * np.exp(-0.65 * k)
+
     # Праздничные спайки
     holiday_spike = np.ones(hours, np.float32)
     for i in range(days):
@@ -388,10 +428,11 @@ def generate_smartgrid_data(
 
     # ── ИТОГОВОЕ ПОТРЕБЛЕНИЕ ──────────────────────────────────────────────
     consumption = (
-        base_consumption * holiday_spike * cascade_factor * (1.0 - dsr_strength)
+        base_consumption * holiday_spike * cascade_factor * stress_nonlinear * (1.0 - dsr_strength)
         + ev_load_raw
         + industrial_load_raw
         - solar_gen_raw
+        + base_consumption * dsr_rebound
     ).astype(np.float32)
     consumption = np.clip(consumption, 200.0, None)
 
@@ -404,6 +445,8 @@ def generate_smartgrid_data(
     logger.info("  Solar: mean=%.1f кВт, max=%.1f кВт", float(solar_gen_raw.mean()), float(solar_gen_raw.max()))
     logger.info("  DSR событий активно: %d ч | Industrial: %d заводов | Cascade max=%.2f",
                 int(dsr_active.sum()), industrial_loads, float(cascade_factor.max()))
+    logger.info("  Grid stress max=%.2f | DSR rebound max=%.2f",
+                float(stress_nonlinear.max()), float(dsr_rebound.max()))
     logger.info("  CV потребления: %.3f", float(consumption.std()/consumption.mean()))
 
     # Нормализованные новые признаки

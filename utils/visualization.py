@@ -14,10 +14,11 @@ import seaborn as sns
 
 from data.preprocessing import inverse_scale
 from optimization.storage import StorageResult
+from utils.plot_style import apply_publication_style, get_palette, save_figure
 
 logger = logging.getLogger("smart_grid.utils.visualization")
-
-plt.style.use("seaborn-v0_8-darkgrid")
+apply_publication_style()
+PALETTE = get_palette()
 
 
 # ── Кривые обучения Keras ─────────────────────────────────────────────────────
@@ -41,18 +42,15 @@ def plot_training_history(
         ax.plot(h[m], label=f"Train {m.upper()}")
         if f"val_{m}" in h:
             ax.plot(h[f"val_{m}"], label=f"Val {m.upper()}")
-        ax.set_title(f"{model_name} — {m.upper()}", fontweight="bold")
-        ax.set_xlabel("Epoch")
+        unit = "[%]" if m == "mape" else "[кВт·ч]" if m in ("loss", "mae") else "[-]"
+        ax.set_title(f"{model_name} — {m.upper()} {unit}")
+        ax.set_xlabel("Эпоха [-]")
+        ax.set_ylabel(f"{m.upper()} {unit}")
         ax.legend()
         ax.grid(True, alpha=0.3)
 
     plt.tight_layout()
-    if save:
-        fig.savefig(
-            os.path.join(plots_dir, f"training_{model_name.replace(' ', '_')}.png"),
-            dpi=150, bbox_inches="tight",
-        )
-    pass  # plt.show() убран: headless Agg backend
+    save_figure(fig, os.path.join(plots_dir, f"training_{model_name.replace(' ', '_')}.png"), save=save)
     plt.close(fig)
 
 
@@ -69,21 +67,18 @@ def plot_predictions_comparison(
     os.makedirs(plots_dir, exist_ok=True)
     fig, ax = plt.subplots(figsize=(16, 5))
     t = np.arange(n_steps)
-    ax.plot(t, y_true.flatten()[:n_steps], "k-", lw=2, label="Факт")
-    colors = plt.cm.tab10.colors
+    ax.plot(t, y_true.flatten()[:n_steps], color=PALETTE["baseline"], lw=2, label="Факт")
+    colors = sns.color_palette("colorblind", max(10, len(predictions)))
     for i, (name, pred) in enumerate(predictions.items()):
         ax.plot(t, pred.flatten()[:n_steps], lw=1.5,
                 color=colors[i % 10], label=name, alpha=0.85)
-    ax.set_title("Сравнение прогнозов моделей", fontweight="bold")
-    ax.set_xlabel("Шаг прогноза")
-    ax.set_ylabel("Потребление (кВт·ч)")
+    ax.set_title("Сравнение прогнозов моделей [кВт·ч]")
+    ax.set_xlabel("Шаг прогноза [ч]")
+    ax.set_ylabel("Потребление [кВт·ч]")
     ax.legend()
     ax.grid(True, alpha=0.3)
     plt.tight_layout()
-    if save:
-        fig.savefig(os.path.join(plots_dir, "predictions_comparison.png"),
-                    dpi=150, bbox_inches="tight")
-    pass  # plt.show() убран: headless Agg backend
+    save_figure(fig, os.path.join(plots_dir, "predictions_comparison.png"), save=save)
     plt.close(fig)
 
 
@@ -100,13 +95,15 @@ def plot_metrics_comparison(
     metric_names = ["MAE", "RMSE", "MAPE", "R2"]
 
     fig, axes = plt.subplots(1, 4, figsize=(20, 5))
-    fig.suptitle("Сравнение метрик моделей", fontsize=14, fontweight="bold")
-    colors = sns.color_palette("husl", len(model_names))
+    fig.suptitle("Сравнение метрик моделей")
+    colors = sns.color_palette("colorblind", len(model_names))
 
     for ax, m in zip(axes, metric_names):
         values = [metrics[n].get(m, 0) for n in model_names]
         bars = ax.bar(model_names, values, color=colors, alpha=0.8, edgecolor="black")
-        ax.set_title(m, fontweight="bold")
+        unit = "[%]" if m == "MAPE" else "[-]" if m == "R2" else "[кВт·ч]"
+        ax.set_title(f"{m} {unit}")
+        ax.set_ylabel(unit)
         ax.set_xticks(range(len(model_names)))
         ax.set_xticklabels(model_names, rotation=20, ha="right")
         ax.grid(True, alpha=0.3, axis="y")
@@ -115,10 +112,7 @@ def plot_metrics_comparison(
                     f"{v:.2f}", ha="center", va="bottom", fontsize=9)
 
     plt.tight_layout()
-    if save:
-        fig.savefig(os.path.join(plots_dir, "metrics_comparison.png"),
-                    dpi=150, bbox_inches="tight")
-    pass  # plt.show() убран: headless Agg backend
+    save_figure(fig, os.path.join(plots_dir, "metrics_comparison.png"), save=save)
     plt.close(fig)
 
 
@@ -134,43 +128,46 @@ def plot_storage_result(
     os.makedirs(plots_dir, exist_ok=True)
     hours = np.arange(len(forecast))
     fig, axes = plt.subplots(4, 1, figsize=(16, 14))
-    fig.suptitle("Оптимизация накопителя энергии", fontsize=14, fontweight="bold")
+    fig.suptitle("Оптимизация накопителя энергии")
 
     # 1. Цены и действия
     ax = axes[0]
-    ax.plot(hours, result.prices, lw=2, color="black", label="Цена руб/кВт·ч")
+    ax.plot(hours, result.prices, lw=2, color=PALETTE["baseline"], label="Цена [руб/кВт·ч]")
     for i, act in enumerate(result.actions):
         if act == "charge":
-            ax.axvspan(i, i + 1, alpha=0.25, color="green")
+            ax.axvspan(i, i + 1, alpha=0.25, color=PALETTE["positive"])
         elif act == "discharge":
-            ax.axvspan(i, i + 1, alpha=0.25, color="red")
+            ax.axvspan(i, i + 1, alpha=0.25, color=PALETTE["negative"])
     ax.set_title("Тарифные зоны и действия накопителя (зелёный=заряд, красный=разряд)")
-    ax.set_ylabel("Руб/кВт·ч")
+    ax.set_xlabel("Час [ч]")
+    ax.set_ylabel("Тариф [руб/кВт·ч]")
     ax.legend()
     ax.grid(True, alpha=0.3)
 
     # 2. SOC
     ax = axes[1]
     soc_arr = np.array(result.battery_levels[:-1])
-    ax.plot(hours, soc_arr, lw=2.5, color="purple", marker="o", ms=3)
-    ax.fill_between(hours, 0, soc_arr, alpha=0.3, color="purple")
+    ax.plot(hours, soc_arr, lw=2.5, color=PALETTE["highlight"], marker="o", ms=3)
+    ax.fill_between(hours, 0, soc_arr, alpha=0.3, color=PALETTE["highlight"])
     ax.set_title("State of Charge накопителя")
-    ax.set_ylabel("кВт·ч")
+    ax.set_xlabel("Час [ч]")
+    ax.set_ylabel("SOC [кВт·ч]")
     ax.grid(True, alpha=0.3)
 
     # 3. Энергопотоки
     ax = axes[2]
-    ax.plot(hours, forecast, lw=2, color="blue", label="Спрос", alpha=0.8)
-    ax.plot(hours, result.energy_from_grid, lw=1.5, color="green",
+    ax.plot(hours, forecast, lw=2, color=PALETTE["primary"], label="Спрос [кВт·ч]", alpha=0.8)
+    ax.plot(hours, result.energy_from_grid, lw=1.5, color=PALETTE["secondary"],
             ls="--", label="Из сети (с накопителем)")
     ax.fill_between(hours, result.energy_from_grid, forecast,
                     where=(np.array(result.energy_from_grid) < forecast),
-                    alpha=0.3, color="green", label="Разряд → экономия")
+                    alpha=0.3, color=PALETTE["positive"], label="Разряд → экономия")
     ax.fill_between(hours, forecast, result.energy_from_grid,
                     where=(np.array(result.energy_from_grid) > forecast),
-                    alpha=0.3, color="red", label="Зарядка (+нагрузка)")
+                    alpha=0.3, color=PALETTE["negative"], label="Зарядка (+нагрузка)")
     ax.set_title("Энергопотоки")
-    ax.set_ylabel("кВт·ч")
+    ax.set_xlabel("Час [ч]")
+    ax.set_ylabel("Энергия [кВт·ч]")
     ax.legend(fontsize=8)
     ax.grid(True, alpha=0.3)
 
@@ -178,25 +175,22 @@ def plot_storage_result(
     ax = axes[3]
     baseline_costs = forecast * result.prices
     w = 0.4
-    ax.bar(hours - w / 2, baseline_costs, w, alpha=0.6, label="Без накопителя", color="coral")
-    ax.bar(hours + w / 2, result.hourly_costs, w, alpha=0.8, label="С накопителем", color="lightgreen")
+    ax.bar(hours - w / 2, baseline_costs, w, alpha=0.6, label="Без накопителя", color=PALETTE["accent"])
+    ax.bar(hours + w / 2, result.hourly_costs, w, alpha=0.8, label="С накопителем", color=PALETTE["secondary"])
     cumulative_net = np.cumsum(baseline_costs - np.array(result.hourly_costs))
     ax2 = ax.twinx()
-    ax2.plot(hours, cumulative_net, color="darkgreen", lw=2.5, label="Накопленная экономия")
-    ax2.set_ylabel("Накопленная экономия (руб)", color="darkgreen")
+    ax2.plot(hours, cumulative_net, color=PALETTE["primary"], lw=2.5, label="Накопленная экономия")
+    ax2.set_ylabel("Накопленная экономия [руб]", color=PALETTE["primary"])
     ax.set_title(
         f"Затраты: чистая экономия = {result.net_savings:.1f} руб"
         f" ({result.net_savings_pct:.1f}%)"
     )
-    ax.set_xlabel("Час")
-    ax.set_ylabel("Руб")
+    ax.set_xlabel("Час [ч]")
+    ax.set_ylabel("Затраты [руб]")
     ax.legend(loc="upper left", fontsize=8)
     ax2.legend(loc="upper right", fontsize=8)
     ax.grid(True, alpha=0.3, axis="y")
 
     plt.tight_layout()
-    if save:
-        fig.savefig(os.path.join(plots_dir, "storage_optimization.png"),
-                    dpi=150, bbox_inches="tight")
-    pass  # plt.show() убран: headless Agg backend
+    save_figure(fig, os.path.join(plots_dir, "storage_optimization.png"), save=save)
     plt.close(fig)

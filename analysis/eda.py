@@ -13,11 +13,11 @@ import pandas as pd
 import seaborn as sns
 from statsmodels.graphics.tsaplots import plot_acf, plot_pacf
 from statsmodels.tsa.seasonal import seasonal_decompose
+from utils.plot_style import apply_publication_style, get_palette, save_figure
 
 logger = logging.getLogger("smart_grid.analysis.eda")
-
-plt.style.use("seaborn-v0_8-darkgrid")
-sns.set_palette("husl")
+apply_publication_style()
+PALETTE = get_palette()
 
 
 def run_eda(
@@ -49,48 +49,56 @@ def run_eda(
     )
 
     # ── 1. Временные паттерны ─────────────────────────────────────────────────
-    fig, axes = plt.subplots(3, 1, figsize=(16, 10))
-    axes[0].plot(df["timestamp"][: 24 * 30], c[: 24 * 30], lw=0.8)
-    axes[0].set_title("Потребление: первый месяц", fontweight="bold")
-    axes[0].set_ylabel("кВт·ч")
-    axes[1].plot(df["timestamp"][: 24 * 7], c[: 24 * 7], lw=1.2, color="orange")
-    axes[1].set_title("Недельный паттерн", fontweight="bold")
-    axes[1].set_ylabel("кВт·ч")
-    axes[2].plot(df["timestamp"][:24], c[:24], lw=2, color="green", marker="o")
-    axes[2].set_title("Суточный паттерн", fontweight="bold")
-    axes[2].set_xlabel("Время")
-    axes[2].set_ylabel("кВт·ч")
+    fig, axes = plt.subplots(3, 1, figsize=(14, 10))
+    axes[0].plot(df["timestamp"][: 24 * 30], c[: 24 * 30], color=PALETTE["primary"])
+    axes[0].set_title("Потребление электроэнергии: первый месяц [кВт·ч]")
+    axes[0].set_xlabel("Время [timestamp]")
+    axes[0].set_ylabel("Потребление [кВт·ч]")
+    axes[1].plot(df["timestamp"][: 24 * 7], c[: 24 * 7], color=PALETTE["warning"])
+    axes[1].set_title("Недельный паттерн потребления [кВт·ч]")
+    axes[1].set_xlabel("Время [timestamp]")
+    axes[1].set_ylabel("Потребление [кВт·ч]")
+    axes[2].plot(df["timestamp"][:24], c[:24], color=PALETTE["secondary"], marker="o")
+    axes[2].set_title("Суточный паттерн потребления [кВт·ч]")
+    axes[2].set_xlabel("Время [timestamp]")
+    axes[2].set_ylabel("Потребление [кВт·ч]")
     for ax in axes:
         ax.grid(True, alpha=0.3)
     plt.tight_layout()
     _save(fig, plots_dir, "01_timeseries_patterns.png", save)
 
     # ── 2. Профили ────────────────────────────────────────────────────────────
-    fig, axes = plt.subplots(2, 2, figsize=(16, 10))
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
     hp = df.groupby("hour")["consumption"].mean()
     axes[0, 0].plot(hp.index, hp.values, marker="o", lw=2)
     axes[0, 0].fill_between(hp.index, hp.values, alpha=0.3)
-    axes[0, 0].set_title("Суточный профиль (среднее)", fontweight="bold")
-    axes[0, 0].set_xlabel("Час")
-    axes[0, 0].set_ylabel("кВт·ч")
+    axes[0, 0].set_title("Суточный профиль (среднее) [кВт·ч]")
+    axes[0, 0].set_xlabel("Час суток [ч]")
+    axes[0, 0].set_ylabel("Потребление [кВт·ч]")
     axes[0, 0].grid(True, alpha=0.3)
 
     wp = df.groupby("weekday")["consumption"].mean()
     day_names = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
-    axes[0, 1].bar(range(7), wp.values, color="steelblue", alpha=0.7)
+    axes[0, 1].bar(range(7), wp.values, color=PALETTE["primary"], alpha=0.85)
     axes[0, 1].set_xticks(range(7))
     axes[0, 1].set_xticklabels(day_names)
-    axes[0, 1].set_title("Недельный профиль (среднее)", fontweight="bold")
+    axes[0, 1].set_title("Недельный профиль (среднее) [кВт·ч]")
+    axes[0, 1].set_xlabel("День недели")
+    axes[0, 1].set_ylabel("Потребление [кВт·ч]")
     axes[0, 1].grid(True, alpha=0.3, axis="y")
 
     pivot = df.pivot_table(values="consumption", index="hour", columns="weekday", aggfunc="mean")
-    sns.heatmap(pivot, cmap="YlOrRd", ax=axes[1, 0], cbar_kws={"label": "кВт·ч"})
-    axes[1, 0].set_title("Тепловая карта: час × день недели", fontweight="bold")
+    sns.heatmap(pivot, cmap="viridis", ax=axes[1, 0], cbar_kws={"label": "Потребление [кВт·ч]"})
+    axes[1, 0].set_title("Тепловая карта: час × день недели [кВт·ч]")
+    axes[1, 0].set_xlabel("День недели")
+    axes[1, 0].set_ylabel("Час суток [ч]")
 
-    axes[1, 1].hist(c, bins=60, color="purple", alpha=0.7, edgecolor="black")
-    axes[1, 1].axvline(np.mean(c), color="red", ls="--", lw=2, label="Среднее")
-    axes[1, 1].axvline(np.median(c), color="green", ls="--", lw=2, label="Медиана")
-    axes[1, 1].set_title("Распределение потребления", fontweight="bold")
+    axes[1, 1].hist(c, bins=60, color=PALETTE["highlight"], alpha=0.7, edgecolor=PALETTE["baseline"])
+    axes[1, 1].axvline(np.mean(c), color=PALETTE["negative"], ls="--", lw=1.5, label="Среднее")
+    axes[1, 1].axvline(np.median(c), color=PALETTE["positive"], ls="--", lw=1.5, label="Медиана")
+    axes[1, 1].set_title("Распределение потребления [кВт·ч]")
+    axes[1, 1].set_xlabel("Потребление [кВт·ч]")
+    axes[1, 1].set_ylabel("Плотность [1/кВт·ч]")
     axes[1, 1].legend()
     axes[1, 1].grid(True, alpha=0.3, axis="y")
     plt.tight_layout()
@@ -101,14 +109,16 @@ def run_eda(
     n_decomp = min(len(c), 24 * 365)
     try:
         decomp = seasonal_decompose(c[:n_decomp], model="additive", period=24)
-        fig, axes = plt.subplots(4, 1, figsize=(16, 12))
+        fig, axes = plt.subplots(4, 1, figsize=(14, 12))
         for ax, series, title in zip(
             axes,
             [decomp.observed, decomp.trend, decomp.seasonal[: 24 * 7], decomp.resid],
             ["Исходный ряд", "Тренд", "Сезонность (первая неделя)", "Остатки"],
         ):
             ax.plot(series, lw=0.8)
-            ax.set_title(title, fontweight="bold")
+            ax.set_title(f"{title} [кВт·ч]")
+            ax.set_xlabel("Временной индекс [ч]")
+            ax.set_ylabel("Амплитуда [кВт·ч]")
             ax.grid(True, alpha=0.3)
         plt.tight_layout()
         _save(fig, plots_dir, "03_decomposition.png", save)
@@ -116,12 +126,16 @@ def run_eda(
         logger.warning("Декомпозиция не удалась: %s", exc)
 
     # ── 4. ACF / PACF ─────────────────────────────────────────────────────────
-    fig, axes = plt.subplots(2, 1, figsize=(16, 8))
+    fig, axes = plt.subplots(2, 1, figsize=(14, 8))
     n_acf = min(len(c), 24 * 60)
     plot_acf(c[:n_acf], lags=200, ax=axes[0])
-    axes[0].set_title("ACF (автокорреляционная функция)", fontweight="bold")
+    axes[0].set_title("ACF: автокорреляционная функция")
+    axes[0].set_xlabel("Лаг [ч]")
+    axes[0].set_ylabel("ACF [-]")
     plot_pacf(c[:n_acf], lags=50, ax=axes[1])
-    axes[1].set_title("PACF (частичная автокорреляция)", fontweight="bold")
+    axes[1].set_title("PACF: частичная автокорреляция")
+    axes[1].set_xlabel("Лаг [ч]")
+    axes[1].set_ylabel("PACF [-]")
     plt.tight_layout()
     _save(fig, plots_dir, "04_acf_pacf.png", save)
 
@@ -132,10 +146,10 @@ def run_eda(
             df["temperature"], c,
             c=df["hour"], cmap="viridis", alpha=0.4, s=1,
         )
-        plt.colorbar(sc, label="Час суток")
+        plt.colorbar(sc, label="Час суток [ч]")
         ax.set_xlabel("Температура (°C)")
-        ax.set_ylabel("Потребление (кВт·ч)")
-        ax.set_title("Зависимость потребления от температуры", fontweight="bold")
+        ax.set_ylabel("Потребление [кВт·ч]")
+        ax.set_title("Зависимость потребления от температуры")
         ax.grid(True, alpha=0.3)
         _save(fig, plots_dir, "05_temperature_dependency.png", save)
 
@@ -143,9 +157,8 @@ def run_eda(
 
 
 def _save(fig: plt.Figure, plots_dir: str, name: str, save: bool) -> None:
+    path = os.path.join(plots_dir, name)
+    png_path, pdf_path, svg_path = save_figure(fig, path, save=save)
     if save:
-        path = os.path.join(plots_dir, name)
-        fig.savefig(path, dpi=150, bbox_inches="tight")
-        logger.debug("График сохранён: %s", path)
-    plt.show()
+        logger.debug("График сохранён: %s | %s | %s", png_path, pdf_path, svg_path)
     plt.close(fig)

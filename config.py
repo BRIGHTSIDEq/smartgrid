@@ -19,6 +19,27 @@
 
 import os
 import logging
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class GeneratorCoefficients:
+    temp_setpoint: float
+    temp_quadratic_coef: float
+    humidity_threshold: float
+    humidity_coef: float
+    wind_temp_threshold: float
+    wind_coef: float
+    early_bird_frac: float
+    night_owl_frac: float
+    ar_phi: float
+    ar_sigma: float
+    seasonal_winter_boost: float
+    seasonal_summer_dip: float
+    ev_penetration: float
+    solar_penetration: float
+    industrial_loads: int
+    city_districts: int
 
 
 class Config:
@@ -231,6 +252,28 @@ class Config:
     def print_summary(cls):
         log = logging.getLogger("smart_grid")
         log.info("─" * 50)
+
+    @classmethod
+    def get_generator_coefficients(cls) -> GeneratorCoefficients:
+        """Return generator coefficients as a typed dataclass."""
+        return GeneratorCoefficients(
+            temp_setpoint=cls.GEN_TEMP_SETPOINT,
+            temp_quadratic_coef=cls.GEN_TEMP_QUADRATIC_COEF,
+            humidity_threshold=cls.GEN_HUMIDITY_THRESHOLD,
+            humidity_coef=cls.GEN_HUMIDITY_COEF,
+            wind_temp_threshold=cls.GEN_WIND_TEMP_THRESHOLD,
+            wind_coef=cls.GEN_WIND_COEF,
+            early_bird_frac=cls.GEN_EARLY_BIRD_FRAC,
+            night_owl_frac=cls.GEN_NIGHT_OWL_FRAC,
+            ar_phi=cls.GEN_AR_PHI,
+            ar_sigma=cls.GEN_AR_SIGMA,
+            seasonal_winter_boost=cls.GEN_SEASONAL_WINTER_BOOST,
+            seasonal_summer_dip=cls.GEN_SEASONAL_SUMMER_DIP,
+            ev_penetration=cls.GEN_EV_PENETRATION,
+            solar_penetration=cls.GEN_SOLAR_PENETRATION,
+            industrial_loads=cls.GEN_INDUSTRIAL_LOADS,
+            city_districts=cls.GEN_CITY_DISTRICTS,
+        )
         log.info("КОНФИГУРАЦИЯ:")
         log.info("  Данные:      %d дней, %d домохозяйств", cls.DAYS, cls.HOUSEHOLDS)
         log.info("  Признаки:    %d ковариат на шаг", cls.N_FEATURES)

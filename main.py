@@ -81,6 +81,8 @@ def main():
         ev_penetration=Config.GEN_EV_PENETRATION,          # v9
         solar_penetration=Config.GEN_SOLAR_PENETRATION,    # v9
         industrial_loads=Config.GEN_INDUSTRIAL_LOADS,      # v9
+        city_districts=Config.GEN_CITY_DISTRICTS,
+        coefficients=Config.get_generator_coefficients(),
     )
     validate_generated_data(df)
     Config.print_summary()
@@ -145,7 +147,14 @@ def main():
         huber_delta=Config.VANILLA_HUBER_DELTA,
     )
 
-    patch_len = 8 if Config.HISTORY_LENGTH >= 48 else 6
+    if Config.HISTORY_LENGTH >= 192:
+        patch_len = 16
+    elif Config.HISTORY_LENGTH >= 96:
+        patch_len = 12
+    elif Config.HISTORY_LENGTH >= 48:
+        patch_len = 8
+    else:
+        patch_len = 6
     stride    = patch_len // 2
     patchtst  = build_patchtst(
         history_length=Config.HISTORY_LENGTH,

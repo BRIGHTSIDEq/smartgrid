@@ -21,8 +21,11 @@ import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 import numpy as np
 import tensorflow as tf
+from utils.plot_style import apply_publication_style, get_palette, save_figure
 
 logger = logging.getLogger("smart_grid.utils.attention_viz")
+apply_publication_style()
+PALETTE = get_palette()
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -166,8 +169,8 @@ def visualize_attention_weights(
                 rotation=45, fontsize=6,
             )
             ax.set_yticks(range(0, Q, max(1, Q // 8)))
-            ax.set_xlabel("Ключ (история)", fontsize=7)
-            ax.set_ylabel("Запрос", fontsize=7)
+            ax.set_xlabel("Ключ (история) [индекс]", fontsize=7)
+            ax.set_ylabel("Запрос [индекс]", fontsize=7)
 
             plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
 
@@ -176,13 +179,13 @@ def visualize_attention_weights(
             axes[h].set_visible(False)
 
         plt.tight_layout()
+        fn = os.path.join(
+            plots_dir,
+            f"attention_{model_name.replace(' ', '_')}_{block_name}.png",
+        )
+        png_path, pdf_path, svg_path = save_figure(fig, fn, save=save)
         if save:
-            fn = os.path.join(
-                plots_dir,
-                f"attention_{model_name.replace(' ', '_')}_{block_name}.png",
-            )
-            fig.savefig(fn, dpi=150, bbox_inches="tight")
-            logger.info("Attention heatmap: %s", fn)
+            logger.info("Attention heatmap: %s | %s | %s", png_path, pdf_path, svg_path)
         plt.close(fig)
 
 
@@ -240,20 +243,20 @@ def visualize_attention_summary(
     hours_back = np.arange(history_length - 1, -1, -1)  # [T-1, T-2, ..., 0]
 
     # Линейный график
-    axes[0].plot(hours_back, importance[::-1], lw=2, color="steelblue")
-    axes[0].fill_between(hours_back, 0, importance[::-1], alpha=0.3)
-    axes[0].set_xlabel("Часов назад")
-    axes[0].set_ylabel("Средний вес внимания")
-    axes[0].set_title("Важность по часам назад")
+    axes[0].plot(hours_back, importance[::-1], lw=2, color=PALETTE["primary"])
+    axes[0].fill_between(hours_back, 0, importance[::-1], alpha=0.3, color=PALETTE["primary"])
+    axes[0].set_xlabel("Часов назад [ч]")
+    axes[0].set_ylabel("Средний вес внимания [-]")
+    axes[0].set_title("Важность по часам назад [-]")
     axes[0].grid(True, alpha=0.3)
 
     # Отмечаем ключевые лаги
     key_lags = [24, 48, 72, 168]
     for lag in key_lags:
         if lag < history_length:
-            axes[0].axvline(lag, color="red", ls="--", alpha=0.5, lw=1)
+            axes[0].axvline(lag, color=PALETTE["negative"], ls="--", alpha=0.5, lw=1)
             axes[0].text(lag, importance.max() * 0.9, f"{lag}ч",
-                         color="red", fontsize=8, ha="center")
+                         color=PALETTE["negative"], fontsize=8, ha="center")
 
     # Тепловая карта по суткам
     h = history_length
@@ -261,18 +264,18 @@ def visualize_attention_summary(
     if n_days >= 1:
         importance_2d = importance[:n_days * 24].reshape(n_days, 24)
         im = axes[1].imshow(importance_2d, aspect="auto", cmap="YlOrRd")
-        axes[1].set_xlabel("Час суток")
-        axes[1].set_ylabel("Дней назад")
-        axes[1].set_title("Важность: сутки × час")
+        axes[1].set_xlabel("Час суток [ч]")
+        axes[1].set_ylabel("Дней назад [дни]")
+        axes[1].set_title("Важность: сутки × час [-]")
         axes[1].set_xticks(range(0, 24, 4))
         axes[1].set_xticklabels([f"{h}:00" for h in range(0, 24, 4)])
         plt.colorbar(im, ax=axes[1], label="Важность")
 
     plt.tight_layout()
+    fn = os.path.join(plots_dir, f"attention_summary_{model_name.replace(' ', '_')}.png")
+    png_path, pdf_path, svg_path = save_figure(fig, fn, save=save)
     if save:
-        fn = os.path.join(plots_dir, f"attention_summary_{model_name.replace(' ', '_')}.png")
-        fig.savefig(fn, dpi=150, bbox_inches="tight")
-        logger.info("Summary attention: %s", fn)
+        logger.info("Summary attention: %s | %s | %s", png_path, pdf_path, svg_path)
     plt.close(fig)
 
     return importance
@@ -323,17 +326,17 @@ def compare_head_specialization(
 
     for ax, (block_name, max_lags) in zip(axes, head_max_lags_all.items()):
         bars = ax.barh(range(num_heads), K - 1 - max_lags,  # переводим в «лаг назад»
-                       color=plt.cm.Set2.colors[:num_heads], edgecolor="black")
+                       color=plt.cm.tab10.colors[:num_heads], edgecolor=PALETTE["baseline"])
         ax.set_yticks(range(num_heads))
         ax.set_yticklabels([f"Head {h+1}" for h in range(num_heads)])
-        ax.set_xlabel("Лаг максимального внимания (часов назад)")
+        ax.set_xlabel("Лаг максимального внимания [ч]")
         ax.set_title(f"{block_name}\n(Специализация голов)")
         ax.grid(True, alpha=0.3, axis="x")
 
         # Отметим ключевые лаги
         for lag in [24, 48, 168]:
             if lag <= K:
-                ax.axvline(lag, color="red", ls="--", alpha=0.4, lw=1)
+                ax.axvline(lag, color=PALETTE["negative"], ls="--", alpha=0.4, lw=1)
 
         for bar, lag in zip(bars, K - 1 - max_lags):
             ax.text(bar.get_width() + 0.3, bar.get_y() + bar.get_height() / 2,
@@ -341,8 +344,8 @@ def compare_head_specialization(
 
     fig.suptitle(f"{model_name} — Специализация голов внимания", fontweight="bold")
     plt.tight_layout()
+    fn = os.path.join(plots_dir, f"head_specialization_{model_name.replace(' ', '_')}.png")
+    png_path, pdf_path, svg_path = save_figure(fig, fn, save=save)
     if save:
-        fn = os.path.join(plots_dir, f"head_specialization_{model_name.replace(' ', '_')}.png")
-        fig.savefig(fn, dpi=150, bbox_inches="tight")
-        logger.info("Head specialization: %s", fn)
+        logger.info("Head specialization: %s | %s | %s", png_path, pdf_path, svg_path)
     plt.close(fig)

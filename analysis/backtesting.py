@@ -17,9 +17,12 @@ import numpy as np
 import tensorflow as tf
 
 from utils.metrics import compute_all_metrics
+from utils.plot_style import apply_publication_style, get_palette, save_figure
 from data.preprocessing import inverse_scale
 
 logger = logging.getLogger("smart_grid.analysis.backtesting")
+apply_publication_style()
+PALETTE = get_palette()
 
 
 def run_backtesting(
@@ -75,27 +78,28 @@ def run_backtesting(
     # ── График (без plt.show()) ───────────────────────────────────────────────
     if metrics_history["MAE"]:
         fig, axes = plt.subplots(1, 2, figsize=(14, 5))
-        fig.suptitle(f"Бэктестинг — {model_name}", fontsize=13, fontweight="bold")
+        fig.suptitle(f"Бэктестинг — {model_name}")
         ws = list(range(1, len(metrics_history["MAE"]) + 1))
 
-        axes[0].plot(ws, metrics_history["MAE"], "o-", label="MAE")
-        axes[0].plot(ws, metrics_history["RMSE"], "s-", label="RMSE")
-        axes[0].set_title("MAE / RMSE по окнам")
-        axes[0].set_xlabel("Окно")
+        axes[0].plot(ws, metrics_history["MAE"], "o-", color=PALETTE["primary"], label="MAE")
+        axes[0].plot(ws, metrics_history["RMSE"], "s-", color=PALETTE["accent"], label="RMSE")
+        axes[0].set_title("MAE / RMSE по окнам [кВт·ч]")
+        axes[0].set_xlabel("Номер окна [-]")
+        axes[0].set_ylabel("Ошибка [кВт·ч]")
         axes[0].legend()
         axes[0].grid(True, alpha=0.3)
 
-        axes[1].plot(ws, metrics_history["MAPE"], "^-", color="orange")
-        axes[1].set_title("MAPE по окнам")
-        axes[1].set_xlabel("Окно")
-        axes[1].set_ylabel("MAPE (%)")
+        axes[1].plot(ws, metrics_history["MAPE"], "^-", color=PALETTE["warning"])
+        axes[1].set_title("MAPE по окнам [%]")
+        axes[1].set_xlabel("Номер окна [-]")
+        axes[1].set_ylabel("MAPE [%]")
         axes[1].grid(True, alpha=0.3)
 
         plt.tight_layout()
+        path = os.path.join(plots_dir, f"backtesting_{model_name.replace(' ', '_')}.png")
+        png_path, pdf_path, svg_path = save_figure(fig, path, save=save)
         if save:
-            path = os.path.join(plots_dir, f"backtesting_{model_name.replace(' ', '_')}.png")
-            fig.savefig(path, dpi=150, bbox_inches="tight")
-            logger.info("График бэктестинга: %s", path)
+            logger.info("График бэктестинга: %s | %s | %s", png_path, pdf_path, svg_path)
         plt.close(fig)
 
     logger.info(

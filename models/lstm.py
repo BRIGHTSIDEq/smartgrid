@@ -174,6 +174,7 @@ def build_lstm_model(
     tcn_filters=32,           # v9: 64→32
     use_seasonal_skip=True,
     seasonal_blend_init=0.35,
+    use_autoregressive_shortcut=True,
 ):
     """
     TCN-BiLSTM-Attention v9.
@@ -190,9 +191,20 @@ def build_lstm_model(
     # ── RevIN нормализация consumption-канала ───────────────────────────────
     cons_slice = inp[:, :, :1]             # (B, T, 1)
     cov_slice  = inp[:, :, 1:]             # (B, T, n_features-1)
-    mean_cons  = tf.reduce_mean(cons_slice, axis=1, keepdims=True)
-    std_cons   = tf.math.reduce_std(cons_slice, axis=1, keepdims=True) + 1e-6
-    cons_norm  = (cons_slice - mean_cons) / std_cons
+    # Keras 3: нельзя вызывать tf.reduce_* напрямую на KerasTensor вне слоя.
+    # Оборачиваем RevIN-статистики в Lambda-слои (graph-safe Functional API).
+    mean_cons = tf.keras.layers.Lambda(
+        lambda t: tf.reduce_mean(t, axis=1, keepdims=True),
+        name="revin_mean_cons",
+    )(cons_slice)
+    std_cons = tf.keras.layers.Lambda(
+        lambda t: tf.math.reduce_std(t, axis=1, keepdims=True) + 1e-6,
+        name="revin_std_cons",
+    )(cons_slice)
+    cons_norm = tf.keras.layers.Lambda(
+        lambda xs: (xs[0] - xs[1]) / xs[2],
+        name="revin_norm_cons",
+    )([cons_slice, mean_cons, std_cons])
     x = tf.keras.layers.Concatenate(axis=-1, name="revin_concat")([cons_norm, cov_slice])
 
     # ── Multi-scale dilated TCN ─────────────────────────────────────────────
@@ -236,6 +248,27 @@ def build_lstm_model(
                                name="head_d2")(h)
     h = tf.keras.layers.Dropout(dropout_rate * 0.5, name="head_drop2")(h, training=training_flag)
     neural_out = tf.keras.layers.Dense(forecast_horizon, name="neural_output")(h)
+
+    # ── AR-shortcut: линейная проекция последних автокорреляционных признаков ──
+    # Идея: дать нейросети "быстрый путь" для сильной сезонности (lag24/48/168),
+    # чтобы снять систематический хвост в остатках (высокий ACF24/ACF168).
+    if use_autoregressive_shortcut:
+        # последние признаки окна: consumption + календарь/погода + lag-каналы
+        last_features = inp[:, -1, :]
+        ar_shortcut = tf.keras.layers.Dense(
+            forecast_horizon, use_bias=False, name="ar_shortcut"
+        )(last_features)
+        add_terms = [neural_out, ar_shortcut]
+
+        # Усиленный seasonal shortcut из lag24/48/168 (каналы 15:18 в preprocessing.py).
+        if n_features >= 18:
+            lag_features = inp[:, -1, 15:18]
+            lag_shortcut = tf.keras.layers.Dense(
+                forecast_horizon, use_bias=False, name="lag_shortcut"
+            )(lag_features)
+            add_terms.append(lag_shortcut)
+
+        neural_out = tf.keras.layers.Add(name="neural_plus_ar")(add_terms)
     # neural_out предсказывает в [0,1] MinMaxScaler пространстве
 
     # ── SeasonalSkip (v9 FIX) ───────────────────────────────────────────────
@@ -253,6 +286,14 @@ def build_lstm_model(
         final_out = SeasonalSkipConnection(
             init_neural_weight=seasonal_blend_init, name="seasonal_skip"
         )([neural_out, naive_slice_minmax])
+
+        # Дополнительный weekly-skip, если история длинная (>= 168+горизонт).
+        # Это улучшает недельную сезонность без изменения целевого пространства.
+        if history_length >= (168 + forecast_horizon):
+            weekly_slice_minmax = inp[:, -168:-168 + forecast_horizon, 0]  # shape (B, horizon)
+            final_out = SeasonalSkipConnection(
+                init_neural_weight=0.80, name="seasonal_weekly_skip"
+            )([final_out, weekly_slice_minmax])
     else:
         final_out = neural_out
 

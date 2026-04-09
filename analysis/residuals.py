@@ -14,8 +14,11 @@ from scipy import stats
 from statsmodels.stats.diagnostic import acorr_ljungbox
 from statsmodels.stats.stattools import durbin_watson
 from statsmodels.tsa.stattools import adfuller, kpss
+from utils.plot_style import apply_publication_style, get_palette, save_figure
 
 logger = logging.getLogger("smart_grid.analysis.residuals")
+apply_publication_style()
+PALETTE = get_palette()
 
 
 def analyze_residuals(
@@ -80,42 +83,47 @@ def analyze_residuals(
 
     # ── Визуализация ──────────────────────────────────────────────────────────
     fig, axes = plt.subplots(2, 2, figsize=(14, 10))
-    fig.suptitle(f"Анализ остатков — {model_name}", fontsize=14, fontweight="bold")
+    fig.suptitle(f"Анализ остатков — {model_name}")
 
     # Остатки во времени
-    axes[0, 0].plot(residuals, lw=0.6, alpha=0.7)
-    axes[0, 0].axhline(0, color="red", ls="--", lw=1)
-    axes[0, 0].set_title("Остатки во времени")
-    axes[0, 0].set_ylabel("Остаток")
+    axes[0, 0].plot(residuals, color=PALETTE["primary"], alpha=0.8)
+    axes[0, 0].axhline(0, color=PALETTE["negative"], ls="--", lw=1)
+    axes[0, 0].set_title("Остатки во времени [кВт·ч]")
+    axes[0, 0].set_xlabel("Временной индекс [ч]")
+    axes[0, 0].set_ylabel("Остаток [кВт·ч]")
     axes[0, 0].grid(True, alpha=0.3)
 
     # Гистограмма + нормальное распределение
-    axes[0, 1].hist(residuals, bins=60, density=True, color="steelblue", alpha=0.7)
+    axes[0, 1].hist(residuals, bins=60, density=True, color=PALETTE["primary"], alpha=0.7)
     xr = np.linspace(residuals.min(), residuals.max(), 200)
     axes[0, 1].plot(xr, stats.norm.pdf(xr, residuals.mean(), residuals.std()),
-                    "r-", lw=2, label="N(μ,σ)")
-    axes[0, 1].set_title("Распределение остатков")
+                    color=PALETTE["negative"], lw=2, label="N(μ,σ)")
+    axes[0, 1].set_title("Распределение остатков [кВт·ч]")
+    axes[0, 1].set_xlabel("Остаток [кВт·ч]")
+    axes[0, 1].set_ylabel("Плотность [1/кВт·ч]")
     axes[0, 1].legend()
     axes[0, 1].grid(True, alpha=0.3)
 
     # Q-Q plot
     stats.probplot(residuals, plot=axes[1, 0])
-    axes[1, 0].set_title("Q-Q Plot")
+    axes[1, 0].set_title("Q-Q график остатков")
+    axes[1, 0].set_xlabel("Теоретические квантили [-]")
+    axes[1, 0].set_ylabel("Выборочные квантили [кВт·ч]")
     axes[1, 0].grid(True, alpha=0.3)
 
     # Факт vs прогноз
     axes[1, 1].scatter(y_pred.flatten(), residuals, alpha=0.3, s=2)
-    axes[1, 1].axhline(0, color="red", ls="--", lw=1)
-    axes[1, 1].set_xlabel("Предсказание")
-    axes[1, 1].set_ylabel("Остаток")
-    axes[1, 1].set_title("Остатки vs Предсказания")
+    axes[1, 1].axhline(0, color=PALETTE["negative"], ls="--", lw=1)
+    axes[1, 1].set_xlabel("Предсказание [кВт·ч]")
+    axes[1, 1].set_ylabel("Остаток [кВт·ч]")
+    axes[1, 1].set_title("Остатки vs предсказания [кВт·ч]")
     axes[1, 1].grid(True, alpha=0.3)
 
     plt.tight_layout()
+    path = os.path.join(plots_dir, f"residuals_{model_name.replace(' ', '_')}.png")
+    png_path, pdf_path, svg_path = save_figure(fig, path, save=save)
     if save:
-        path = os.path.join(plots_dir, f"residuals_{model_name.replace(' ', '_')}.png")
-        fig.savefig(path, dpi=150, bbox_inches="tight")
-        logger.info("График остатков: %s", path)
+        logger.info("График остатков: %s | %s | %s", png_path, pdf_path, svg_path)
     plt.close(fig)
 
     return {

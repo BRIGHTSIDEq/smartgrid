@@ -18,3 +18,11 @@ def test_compute_all_metrics_rejects_empty_arrays():
 
     with pytest.raises(ValueError, match="non-empty arrays"):
         compute_all_metrics(y_true, y_pred, model_name="dummy")
+
+
+def test_compute_all_metrics_contains_extended_metrics():
+    y_true = np.array([100.0, 120.0, 130.0, 110.0])
+    y_pred = np.array([98.0, 125.0, 128.0, 109.0])
+    metrics = compute_all_metrics(y_true, y_pred)
+    for key in ("MAE", "RMSE", "MAPE", "sMAPE", "WAPE", "MBE", "R2"):
+        assert key in metrics

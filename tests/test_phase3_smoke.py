@@ -9,6 +9,7 @@ from config import Config, GeneratorCoefficients
 from data.components.ev import simulate_ev_load
 from data.components.household import build_household_aggregate
 from data.components.industrial import simulate_industrial_load
+from data.generator import load_or_generate_smartgrid_data
 from data.components.nonlinear_states import (
     compute_cascade_factor,
     compute_dsr_rebound,
@@ -17,6 +18,7 @@ from data.components.nonlinear_states import (
 from data.components.weather import compute_weather
 from utils.deployment import predict_multifeature_from_bundle
 from utils.plot_style import apply_publication_style, save_figure
+from models.trainer import ModelTrainer
 
 
 def test_config_generator_coefficients_dataclass():
@@ -34,8 +36,8 @@ def test_plot_style_apply_and_save(tmp_path):
     png, pdf, svg = save_figure(fig, os.path.join(tmp_path, "smoke_plot.png"), save=True)
     plt.close(fig)
     assert os.path.exists(png)
-    assert os.path.exists(pdf)
-    assert os.path.exists(svg)
+    assert pdf is None
+    assert svg is None
 
 
 def test_component_smoke_paths():
@@ -113,3 +115,78 @@ def test_deployment_multivariate_inference():
     recent_window = np.random.rand(history, features).astype(np.float32)
     pred = predict_multifeature_from_bundle(bundle, recent_window)
     assert pred.shape == (horizon,)
+
+
+
+def test_load_or_generate_smartgrid_data_uses_csv_cache(tmp_path):
+    csv_path = tmp_path / "cached_data.csv"
+    df_first = load_or_generate_smartgrid_data(
+        csv_path=str(csv_path),
+        days=10,
+        households=100,
+        start_date="2024-01-01",
+        seed=42,
+    )
+    assert csv_path.exists()
+    assert "timestamp" in df_first.columns
+    assert len(df_first) == 240
+
+    df_second = load_or_generate_smartgrid_data(
+        csv_path=str(csv_path),
+        days=10,
+        households=100,
+        start_date="2024-01-01",
+        seed=42,
+    )
+    pd.testing.assert_frame_equal(df_first, df_second, check_dtype=False)
+
+
+def test_load_or_generate_smartgrid_data_invalidates_incompatible_cache(tmp_path):
+    csv_path = tmp_path / "cached_data.csv"
+    df_10_days = load_or_generate_smartgrid_data(
+        csv_path=str(csv_path),
+        days=10,
+        households=100,
+        start_date="2024-01-01",
+        seed=42,
+    )
+    assert len(df_10_days) == 240
+
+    # Должна произойти регенерация, т.к. ожидаем уже 12 дней
+    df_12_days = load_or_generate_smartgrid_data(
+        csv_path=str(csv_path),
+        days=12,
+        households=100,
+        start_date="2024-01-01",
+        seed=42,
+    )
+    assert len(df_12_days) == 288
+
+
+def test_model_trainer_uses_tft_split_inputs():
+    history = 12
+    horizon = 4
+    # Модель с двумя входами, как у TFT-Lite
+    x_series = tf.keras.Input(shape=(history, 1))
+    x_cov = tf.keras.Input(shape=(history, 4))
+    xs = tf.keras.layers.Flatten()(x_series)
+    xc = tf.keras.layers.Flatten()(x_cov)
+    out = tf.keras.layers.Dense(horizon)(tf.keras.layers.Concatenate()([xs, xc]))
+    model = tf.keras.Model([x_series, x_cov], out)
+    model.compile(optimizer="adam", loss="mse")
+
+    trainer = ModelTrainer(model, model_name="TFT-Lite")
+    n = 8
+    data = {
+        "X_test": np.random.rand(n, history, 26).astype(np.float32),  # неверный формат для TFT
+        "X_tft_test": [
+            np.random.rand(n, history, 1).astype(np.float32),
+            np.random.rand(n, history, 4).astype(np.float32),
+        ],
+        "Y_test": np.random.rand(n, horizon).astype(np.float32),
+        "Y_seasonal_naive_test": np.zeros((n, horizon), dtype=np.float32),
+        "seasonal_diff": True,
+        "scaler": MinMaxScaler().fit(np.random.rand(256, 1)),
+    }
+    metrics = trainer.evaluate(data, split="test", run_residual_diagnostics=False)
+    assert "MAE" in metrics and np.isfinite(metrics["MAE"])

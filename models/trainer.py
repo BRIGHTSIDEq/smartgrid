@@ -204,7 +204,10 @@ class ModelTrainer:
                     callbacks=callbacks, verbose=1,
                 )
                 actual_epochs = len(self.history.history["loss"])
+                best_epoch = int(np.argmin(self.history.history.get("val_loss", self.history.history["loss"]))) + 1
+                best_val_loss = float(np.min(self.history.history.get("val_loss", self.history.history["loss"])))
                 logger.info("%s: %d эпох", self.model_name, actual_epochs)
+                logger.info("%s: best_epoch=%d best_val_loss=%.6f", self.model_name, best_epoch, best_val_loss)
                 diag = diagnose_training_regime(self.history.history)
                 logger.info("%s: regime=%s train_mae=%.4f val_mae=%.4f gap=%.4f",
                     self.model_name, diag.get("status","?"),
@@ -233,12 +236,22 @@ class ModelTrainer:
             return self.model.predict(X, verbose=0)
         return self.model.predict(X)
 
+    def _get_split_inputs(self, data: Dict[str, Any], split: str):
+        """
+        Подбирает корректный входной тензор(ы) для конкретной модели.
+        Для TFT-Lite ожидается список [series, covariates].
+        """
+        tft_key = f"X_tft_{split}"
+        if self.model_name == "TFT-Lite" and tft_key in data:
+            return data[tft_key]
+        return data[f"X_{split}"]
+
     def predict_absolute(self, data: Dict[str, Any], split: str = "test") -> np.ndarray:
         """
         Возвращает предсказание в кВт·ч с учётом seasonal_diff.
         Основной метод для визуализации и сравнения.
         """
-        X = data[f"X_{split}"]
+        X = self._get_split_inputs(data, split)
         y_out, _ = _reconstruct_predictions(self.predict(X), data, split)
         return y_out
 
@@ -253,7 +266,7 @@ class ModelTrainer:
         v6: реконструирует абсолютные значения при seasonal_diff=True
         перед вычислением метрик.
         """
-        X = data[f"X_{split}"]
+        X = self._get_split_inputs(data, split)
         y_raw = self.predict(X)
         y_pred, y_true = _reconstruct_predictions(y_raw, data, split)
 
@@ -417,7 +430,7 @@ def compare_trainers(
                 split.upper(), select_by, data.get("seasonal_diff", False))
     logger.info("%s", "="*72)
     logger.info("%-24s %8s %8s %7s %7s %6s %7s %10s",
-                "Модель", "MAE", "RMSE", "MAPE%", "R2", "DW", "ACF24", "Composite")
+                "Модель", "MAE", "RMSE", "sMAPE", "R2", "DW", "ACF24", "Composite")
     logger.info("%s", "-"*80)
 
     for trainer in trainers:
@@ -425,7 +438,7 @@ def compare_trainers(
             m = trainer.evaluate(data, split=split, run_residual_diagnostics=True)
             results[trainer.model_name] = m
             logger.info("%-24s %8.2f %8.2f %7.2f%% %6.4f %6s %7s %10.3f",
-                trainer.model_name, m["MAE"], m["RMSE"], m["MAPE"], m["R2"],
+                trainer.model_name, m["MAE"], m["RMSE"], m.get("sMAPE", m["MAPE"]), m["R2"],
                 f"{m.get('DW',float('nan')):.3f}", f"{m.get('ACF_24',float('nan')):.3f}",
                 m.get("composite_score", float("nan")))
         except Exception as exc:

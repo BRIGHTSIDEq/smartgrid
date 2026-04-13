@@ -142,14 +142,22 @@ def run_eda(
     # ── 5. Температурная зависимость ──────────────────────────────────────────
     if "temperature" in df.columns:
         fig, ax = plt.subplots(figsize=(10, 6))
-        sc = ax.scatter(
+        hb = ax.hexbin(
             df["temperature"], c,
-            c=df["hour"], cmap="viridis", alpha=0.4, s=1,
+            gridsize=40, cmap="viridis", mincnt=1,
         )
-        plt.colorbar(sc, label="Час суток [ч]")
-        ax.set_xlabel("Температура (°C)")
+        plt.colorbar(hb, label="Плотность наблюдений [-]")
+        temp_bins = pd.cut(df["temperature"], bins=36)
+        temp_med = df.groupby(temp_bins, observed=True)["consumption"].median()
+        temp_p10 = df.groupby(temp_bins, observed=True)["consumption"].quantile(0.1)
+        temp_p90 = df.groupby(temp_bins, observed=True)["consumption"].quantile(0.9)
+        temp_x = np.array([b.mid for b in temp_med.index], dtype=np.float32)
+        ax.plot(temp_x, temp_med.values, color=PALETTE["accent"], lw=2, label="Медиана")
+        ax.fill_between(temp_x, temp_p10.values, temp_p90.values, color=PALETTE["accent"], alpha=0.2, label="P10-P90")
+        ax.set_xlabel("Температура [°C]")
         ax.set_ylabel("Потребление [кВт·ч]")
-        ax.set_title("Зависимость потребления от температуры")
+        ax.set_title("Температурная зависимость (hexbin + доверительный диапазон)")
+        ax.legend()
         ax.grid(True, alpha=0.3)
         _save(fig, plots_dir, "05_temperature_dependency.png", save)
 

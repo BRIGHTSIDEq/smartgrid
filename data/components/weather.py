@@ -20,6 +20,18 @@ class WeatherOutputs:
     cold_wave_factor: np.ndarray
 
 
+def _smooth_event_envelope(length: int, ramp: int = 12) -> np.ndarray:
+    """Cosine ramp envelope to avoid abrupt jumps at event borders."""
+    if length <= 1:
+        return np.ones(length, dtype=np.float32)
+    ramp = int(max(1, min(ramp, length // 2)))
+    env = np.ones(length, dtype=np.float32)
+    up = 0.5 - 0.5 * np.cos(np.linspace(0, np.pi, ramp, dtype=np.float32))
+    env[:ramp] = up
+    env[-ramp:] = up[::-1]
+    return env
+
+
 def compute_weather(
     rng: np.random.Generator,
     t: np.ndarray,
@@ -39,14 +51,22 @@ def compute_weather(
     heat_surge_factor = np.ones(hours, np.float32)
     for idx in np.where((dates.month >= 6) & (dates.month <= 8))[0][: max(1, int(days / 365 * 3)) * 50 : 50]:
         e = min(idx + int(rng.integers(48, 120)), hours)
-        temperature[idx:e] = np.clip(temperature[idx:e] + rng.uniform(8, 14), -38, 45)
-        heat_surge_factor[idx:e] = rng.uniform(1.28, 1.40)
+        event_len = e - idx
+        envelope = _smooth_event_envelope(event_len, ramp=12)
+        temp_boost = rng.uniform(8, 14) * envelope
+        factor_boost = 1.0 + (rng.uniform(1.28, 1.40) - 1.0) * envelope
+        temperature[idx:e] = np.clip(temperature[idx:e] + temp_boost, -38, 45)
+        heat_surge_factor[idx:e] = np.maximum(heat_surge_factor[idx:e], factor_boost.astype(np.float32))
 
     cold_wave_factor = np.ones(hours, np.float32)
     for idx in np.where((dates.month == 12) | (dates.month <= 2))[0][: max(1, days // 120) * 50 : 50]:
         e = min(idx + int(rng.integers(72, 168)), hours)
-        temperature[idx:e] = np.clip(temperature[idx:e] - rng.uniform(5, 12), -38, 45)
-        cold_wave_factor[idx:e] = rng.uniform(1.12, 1.22)
+        event_len = e - idx
+        envelope = _smooth_event_envelope(event_len, ramp=16)
+        temp_drop = rng.uniform(5, 12) * envelope
+        factor_boost = 1.0 + (rng.uniform(1.12, 1.22) - 1.0) * envelope
+        temperature[idx:e] = np.clip(temperature[idx:e] - temp_drop, -38, 45)
+        cold_wave_factor[idx:e] = np.maximum(cold_wave_factor[idx:e], factor_boost.astype(np.float32))
 
     cloud_annual = 0.52 + 0.18 * np.cos(2 * np.pi * t / (24 * 365.25) + np.pi)
     cn = np.zeros(hours)

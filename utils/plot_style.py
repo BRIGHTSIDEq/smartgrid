@@ -73,7 +73,7 @@ def save_figure(
     dpi: int = DEFAULT_DPI,
 ) -> Tuple[str, str, str] | Tuple[None, None, None]:
     """
-    Сохраняет график в PNG + векторные форматы (PDF/SVG).
+    Сохраняет график только в PNG (единый формат для отчётов).
     output_path может быть с .png или без расширения.
     """
     if not save:
@@ -85,10 +85,5 @@ def save_figure(
     os.makedirs(base.parent, exist_ok=True)
 
     png_path = str(base.with_suffix(".png"))
-    pdf_path = str(base.with_suffix(".pdf"))
-    svg_path = str(base.with_suffix(".svg"))
-
     fig.savefig(png_path, dpi=max(dpi, DEFAULT_DPI), bbox_inches="tight")
-    fig.savefig(pdf_path, bbox_inches="tight")
-    fig.savefig(svg_path, bbox_inches="tight")
-    return png_path, pdf_path, svg_path
+    return png_path, None, None

@@ -233,12 +233,22 @@ class ModelTrainer:
             return self.model.predict(X, verbose=0)
         return self.model.predict(X)
 
+    def _get_split_inputs(self, data: Dict[str, Any], split: str):
+        """
+        Подбирает корректный входной тензор(ы) для конкретной модели.
+        Для TFT-Lite ожидается список [series, covariates].
+        """
+        tft_key = f"X_tft_{split}"
+        if self.model_name == "TFT-Lite" and tft_key in data:
+            return data[tft_key]
+        return data[f"X_{split}"]
+
     def predict_absolute(self, data: Dict[str, Any], split: str = "test") -> np.ndarray:
         """
         Возвращает предсказание в кВт·ч с учётом seasonal_diff.
         Основной метод для визуализации и сравнения.
         """
-        X = data[f"X_{split}"]
+        X = self._get_split_inputs(data, split)
         y_out, _ = _reconstruct_predictions(self.predict(X), data, split)
         return y_out
 
@@ -253,7 +263,7 @@ class ModelTrainer:
         v6: реконструирует абсолютные значения при seasonal_diff=True
         перед вычислением метрик.
         """
-        X = data[f"X_{split}"]
+        X = self._get_split_inputs(data, split)
         y_raw = self.predict(X)
         y_pred, y_true = _reconstruct_predictions(y_raw, data, split)
 

@@ -18,6 +18,7 @@ from data.components.nonlinear_states import (
 from data.components.weather import compute_weather
 from utils.deployment import predict_multifeature_from_bundle
 from utils.plot_style import apply_publication_style, save_figure
+from models.trainer import ModelTrainer
 
 
 def test_config_generator_coefficients_dataclass():
@@ -138,3 +139,32 @@ def test_load_or_generate_smartgrid_data_uses_csv_cache(tmp_path):
         seed=777,
     )
     pd.testing.assert_frame_equal(df_first, df_second, check_dtype=False)
+
+
+def test_model_trainer_uses_tft_split_inputs():
+    history = 12
+    horizon = 4
+    # Модель с двумя входами, как у TFT-Lite
+    x_series = tf.keras.Input(shape=(history, 1))
+    x_cov = tf.keras.Input(shape=(history, 4))
+    xs = tf.keras.layers.Flatten()(x_series)
+    xc = tf.keras.layers.Flatten()(x_cov)
+    out = tf.keras.layers.Dense(horizon)(tf.keras.layers.Concatenate()([xs, xc]))
+    model = tf.keras.Model([x_series, x_cov], out)
+    model.compile(optimizer="adam", loss="mse")
+
+    trainer = ModelTrainer(model, model_name="TFT-Lite")
+    n = 8
+    data = {
+        "X_test": np.random.rand(n, history, 26).astype(np.float32),  # неверный формат для TFT
+        "X_tft_test": [
+            np.random.rand(n, history, 1).astype(np.float32),
+            np.random.rand(n, history, 4).astype(np.float32),
+        ],
+        "Y_test": np.random.rand(n, horizon).astype(np.float32),
+        "Y_seasonal_naive_test": np.zeros((n, horizon), dtype=np.float32),
+        "seasonal_diff": True,
+        "scaler": MinMaxScaler().fit(np.random.rand(256, 1)),
+    }
+    metrics = trainer.evaluate(data, split="test", run_residual_diagnostics=False)
+    assert "MAE" in metrics and np.isfinite(metrics["MAE"])

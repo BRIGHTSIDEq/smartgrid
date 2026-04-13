@@ -1,48 +1,45 @@
 # -*- coding: utf-8 -*-
-"""models/lstm.py — TCN-BiLSTM-Attention v9 (Keras 3 compatible).
+"""models/lstm.py — TCN-BiLSTM-Attention v11.
 
-ИСПРАВЛЕНИЯ v9 относительно v8:
+ИЗМЕНЕНИЯ v11 (seasonal differencing):
 ═══════════════════════════════════════════════════════════════════════════════
 
-БАГ #1 (КРИТИЧЕСКИЙ): SeasonalSkip использовал RevIN-нормализованный baseline.
-  БЫЛО:  naive_slice = cons_norm[:, -24:, 0]  ← RevIN-нормализован ≈ N(0,1)
-         final_out = alpha * neural_out + (1-alpha) * naive_slice
-         Поскольку naive_slice ≈ 0 (RevIN mean), skip практически не работал.
-         Математически: naive вклад ≈ (1-0.35)*0 = 0 → модель учила всё сама.
-  СТАЛО: naive_slice = inp[:, -24:, 0]  ← raw MinMaxScaler [0,1] channel
-         Теперь baseline = реальное "вчера в это же время" в правильном масштабе.
-         При инициализации: final_out = 0.35*neural + 0.65*naive ∈ [0,1] = Y_train.
+КОНТЕКСТ:
+  preprocessing.py v9 теперь вычитает seasonal naive из Y_target.
+  Модель обучается предсказывать ОТКЛОНЕНИЕ от "вчера в это время".
+  При инференсе: pred_abs = model_diff_output + Y_naive
+  (выполняется в trainer.py через reconstruct_from_diff).
 
-БАГ #2 (КРИТИЧЕСКИЙ): Overfitting — 945K параметров на 6K сэмплов.
-  БЫЛО:  BiLSTM=128, TCN_filters=64, Dense=256/128 → 945K params
-         train_mae=0.019 vs val_mae=0.045 → gap 2.4× = сильный overfitting
-  СТАЛО: BiLSTM=64 per direction, TCN_filters=32, Dense=128/64 → ~150K params
-         Правило: ≥40 сэмплов на параметр при dropout 0.20
+ИЗМЕНЕНИЕ #1: SeasonalSkip УДАЛЁН.
+  БЫЛО:  SeasonalSkipConnection blend naive из inp[-24:, 0] с обучаемым logit.
+         Проблема: optimizer сдвигал logit к "чисто нейронному" за 20-30 эпох,
+         потому что нейросеть снижает loss быстрее чем naive на ранних эпохах.
+         Результат: ACF(24)=0.70 в остатках — seasonal component не устраняется.
+  СТАЛО: seasonal компонент вычтен на уровне данных (preprocessing.py v9).
+         Модель предсказывает только деviации → SeasonalSkip не нужен.
+         AR-shortcut на lag-каналах сохранён для тонкой коррекции.
 
-═══════════════════════════════════════════════════════════════════════════════
-АРХИТЕКТУРА v9 (параметры по умолчанию для optimal_mode):
-  Input(48, 26)
-    │
-    ├─ RevIN нормализация consumption-канала (per-window mean/std)
-    │
-    ├─ TCN input_proj(32) → 4 ветви TCNBlock(32, dil=1,2,4,8) → concat(128) → LN → Drop(0.10)
-    │
-    ├─ BiLSTM(64 per dir → 128 total, return_sequences=True) → LN
-    │
-    ├─ TemporalAttention(4 heads, key_dim=32) → context(128)
-    │
-    ├─ Concat([last_token(128), context(128)]) → (256)
-    │
-    ├─ Dense(128, gelu, L2=1e-5) → Drop(0.20)
-    │  Dense(64,  gelu, L2=1e-5) → Drop(0.10)
-    │  Dense(24) → neural_out ∈ [0,1]
-    │
-    └─ SeasonalSkip: inp[:,-24:,0] = raw MinMaxScaler "вчера в это время" ∈ [0,1]
-       final = sigmoid(logit) * neural_out + (1 - sigmoid(logit)) * naive_minmax
+ИЗМЕНЕНИЕ #2: Huber delta адаптируется к масштабу Y_diff.
+  Y_diff имеет std ≈ 0.05–0.08 (vs Y_abs std ≈ 0.20).
+  Huber(delta=0.05) → delta=0.02 (более агрессивный против выбросов).
+  Kurtosis=8-10 в логах → тяжёлые хвосты → меньший delta лучше.
 
-Optimizer: Adam(lr=2e-4, clipnorm=1.0)
-Loss:      Huber(delta=0.05)
-Params:    ~150K (optimal) / ~55K (fast)
+ИЗМЕНЕНИЕ #3: input_ln (LayerNorm после Concat) сохранён.
+  BatchNorm → LayerNorm в TCNBlock — из v10, без изменений.
+
+АРХИТЕКТУРА v11:
+  Input(48, 26)  — X в MinMaxScaler пространстве
+    │
+    ├─ RevIN(cons) + Concat + LayerNorm("input_ln")
+    ├─ TCN(filters, dil=[1,2,4,8], LayerNorm×each)
+    ├─ BiLSTM(units, return_seq) → LayerNorm
+    ├─ TemporalAttention(heads) → context
+    ├─ Concat([last, context]) → Dense(128/64) → Dense(horizon)
+    └─ AR-shortcut(lag_features) — добавляется к neural_out
+         [NO SeasonalSkip — seasonal component removed at data level]
+
+  Output: Y_diff ≈ N(0, σ_small)  — отклонение от seasonal naive
+  При evaluate: pred_abs = Y_diff + Y_naive (в trainer.py)
 ═══════════════════════════════════════════════════════════════════════════════
 """
 
@@ -53,15 +50,14 @@ import tensorflow as tf
 
 logger = logging.getLogger("smart_grid.models.lstm")
 
-__all__ = [
-    "TemporalAttentionBlock",
-    "TCNBlock",
-    "build_lstm_model",
-]
+__all__ = ["TemporalAttentionBlock", "TCNBlock", "build_lstm_model"]
 
 
 class TCNBlock(tf.keras.layers.Layer):
-    """Dilated causal Conv1D block with residual connection."""
+    """
+    Dilated causal Conv1D block with residual + LayerNorm.
+    v10: BatchNorm → LayerNorm (стабильно при любом batch_size).
+    """
 
     def __init__(self, filters, kernel_size, dilation_rate, dropout_rate=0.05, **kwargs):
         super().__init__(**kwargs)
@@ -73,23 +69,23 @@ class TCNBlock(tf.keras.layers.Layer):
         pad = (kernel_size - 1) * dilation_rate
         self.pad1    = tf.keras.layers.ZeroPadding1D(padding=(pad, 0))
         self.conv1   = tf.keras.layers.Conv1D(filters, kernel_size, dilation_rate=dilation_rate, padding="valid", use_bias=False)
-        self.bn1     = tf.keras.layers.BatchNormalization()
+        self.ln1     = tf.keras.layers.LayerNormalization(epsilon=1e-6)
         self.act1    = tf.keras.layers.Activation("gelu")
         self.drop1   = tf.keras.layers.Dropout(dropout_rate)
         self.pad2    = tf.keras.layers.ZeroPadding1D(padding=(pad, 0))
         self.conv2   = tf.keras.layers.Conv1D(filters, kernel_size, dilation_rate=dilation_rate, padding="valid", use_bias=False)
-        self.bn2     = tf.keras.layers.BatchNormalization()
+        self.ln2     = tf.keras.layers.LayerNormalization(epsilon=1e-6)
         self.act2    = tf.keras.layers.Activation("gelu")
         self.proj    = tf.keras.layers.Conv1D(filters, 1, padding="same", use_bias=False)
-        self.bn_proj = tf.keras.layers.BatchNormalization()
+        self.ln_proj = tf.keras.layers.LayerNormalization(epsilon=1e-6)
 
     def call(self, x, training=None):
-        res = self.bn_proj(self.proj(x), training=training)
+        res = self.ln_proj(self.proj(x))
         h   = self.conv1(self.pad1(x))
-        h   = self.act1(self.bn1(h, training=training))
+        h   = self.act1(self.ln1(h))
         h   = self.drop1(h, training=training)
         h   = self.conv2(self.pad2(h))
-        h   = self.bn2(h, training=training)
+        h   = self.ln2(h)
         return self.act2(h + res)
 
     def get_config(self):
@@ -99,7 +95,7 @@ class TCNBlock(tf.keras.layers.Layer):
 
 
 class TemporalAttentionBlock(tf.keras.layers.Layer):
-    """Temporal Multi-Head Attention over sequence hidden states."""
+    """Temporal MHA: последний токен как query, вся последовательность как key/value."""
 
     def __init__(self, num_heads=4, key_dim=32, dropout=0.10, **kwargs):
         super().__init__(**kwargs)
@@ -124,90 +120,54 @@ class TemporalAttentionBlock(tf.keras.layers.Layer):
                 "key_dim": self.key_dim, "dropout": self.dropout_rate}
 
 
-class SeasonalSkipConnection(tf.keras.layers.Layer):
-    """
-    Learnable blend: final = sigmoid(logit) * neural + (1-sigmoid(logit)) * naive.
-
-    v9 FIX: оба входа теперь в [0,1] MinMaxScaler пространстве.
-    БЫЛО: naive_slice из RevIN-нормализованного cons_norm ≈ N(0,1) → baseline ≈ 0.
-    СТАЛО: naive_slice из raw inp[:,-24:,0] ∈ [0,1] → реальный seasonal naive.
-    """
-
-    def __init__(self, init_neural_weight=0.35, **kwargs):
-        super().__init__(**kwargs)
-        self.init_neural_weight = float(init_neural_weight)
-
-    def build(self, input_shape):
-        import math
-        init_logit = math.log(self.init_neural_weight / (1.0 - self.init_neural_weight + 1e-8))
-        self.logit = self.add_weight(
-            name="blend_logit",
-            shape=(),
-            initializer=tf.keras.initializers.Constant(init_logit),
-            trainable=True,
-        )
-        super().build(input_shape)
-
-    def call(self, inputs):
-        neural_out, naive_out = inputs
-        w = tf.keras.activations.sigmoid(self.logit)
-        return w * neural_out + (1.0 - w) * naive_out
-
-    def get_config(self):
-        return {**super().get_config(), "init_neural_weight": self.init_neural_weight}
-
-
 def build_lstm_model(
-    history_length=48,
-    forecast_horizon=24,
-    n_features=26,
-    lstm_units_1=64,          # v9: 128→64 (per BiLSTM direction)
-    lstm_units_2=64,          # compat
-    lstm_units_3=64,          # compat
-    dropout_rate=0.20,
-    learning_rate=2e-4,
-    attn_heads=4,             # v9: 8→4
-    use_cosine_decay=False,   # compat
-    total_steps=37_000,       # compat
-    mc_dropout=False,
-    huber_delta=0.05,
-    tcn_filters=32,           # v9: 64→32
-    use_seasonal_skip=True,
-    seasonal_blend_init=0.35,
-    use_autoregressive_shortcut=True,
-):
+    history_length: int = 48,
+    forecast_horizon: int = 24,
+    n_features: int = 26,
+    lstm_units_1: int = 96,
+    lstm_units_2: int = 96,      # compat
+    lstm_units_3: int = 96,      # compat
+    dropout_rate: float = 0.12,
+    learning_rate: float = 2e-4,
+    attn_heads: int = 4,
+    use_cosine_decay: bool = False,
+    total_steps: int = 37_000,
+    mc_dropout: bool = False,
+    huber_delta: float = 0.02,   # v11: 0.05→0.02 (масштаб Y_diff меньше; kurtosis>5)
+    tcn_filters: int = 48,
+    use_seasonal_skip: bool = False,    # v11: по умолчанию False (seasonal diff на уровне данных)
+    seasonal_blend_init: float = 0.35,  # compat, игнорируется если use_seasonal_skip=False
+    use_autoregressive_shortcut: bool = True,
+    lag_feature_start_idx: int = 15,
+) -> tf.keras.Model:
     """
-    TCN-BiLSTM-Attention v9.
+    TCN-BiLSTM-Attention v11.
 
-    Ключевые исправления vs v8:
-      ★ SeasonalSkip использует inp[:,-24:,0] (MinMaxScaler) вместо cons_norm (RevIN)
-      ★ Размер модели сокращён с 945K до ~150K (BiLSTM 64, TCN 32, Dense 128/64)
+    Ключевое изменение vs v10:
+      use_seasonal_skip=False (default): seasonal компонент вычтен в preprocessing.
+      Модель предсказывает Y_diff ≈ N(0, σ_small).
+      huber_delta=0.02 (масштаб Y_diff значительно меньше Y_abs).
+
+    Если use_seasonal_skip=True — поведение v10 (SeasonalSkip включён).
+    Используй True только если seasonal_diff=False в prepare_data().
     """
     del lstm_units_2, lstm_units_3, use_cosine_decay, total_steps
     training_flag: Optional[bool] = True if mc_dropout else None
 
     inp = tf.keras.Input(shape=(history_length, n_features), name="input_sequence")
 
-    # ── RevIN нормализация consumption-канала ───────────────────────────────
-    cons_slice = inp[:, :, :1]             # (B, T, 1)
-    cov_slice  = inp[:, :, 1:]             # (B, T, n_features-1)
-    # Keras 3: нельзя вызывать tf.reduce_* напрямую на KerasTensor вне слоя.
-    # Оборачиваем RevIN-статистики в Lambda-слои (graph-safe Functional API).
-    mean_cons = tf.keras.layers.Lambda(
-        lambda t: tf.reduce_mean(t, axis=1, keepdims=True),
-        name="revin_mean_cons",
-    )(cons_slice)
-    std_cons = tf.keras.layers.Lambda(
-        lambda t: tf.math.reduce_std(t, axis=1, keepdims=True) + 1e-6,
-        name="revin_std_cons",
-    )(cons_slice)
-    cons_norm = tf.keras.layers.Lambda(
-        lambda xs: (xs[0] - xs[1]) / xs[2],
-        name="revin_norm_cons",
-    )([cons_slice, mean_cons, std_cons])
-    x = tf.keras.layers.Concatenate(axis=-1, name="revin_concat")([cons_norm, cov_slice])
+    # ── RevIN нормализация consumption-канала ─────────────────────────────────
+    cons_slice = inp[:, :, :1]
+    cov_slice  = inp[:, :, 1:]
+    mean_cons  = tf.keras.layers.Lambda(lambda t: tf.reduce_mean(t, axis=1, keepdims=True), name="revin_mean")(cons_slice)
+    std_cons   = tf.keras.layers.Lambda(lambda t: tf.math.reduce_std(t, axis=1, keepdims=True) + 1e-6, name="revin_std")(cons_slice)
+    cons_norm  = tf.keras.layers.Lambda(lambda xs: (xs[0]-xs[1])/xs[2], name="revin_norm")([cons_slice, mean_cons, std_cons])
 
-    # ── Multi-scale dilated TCN ─────────────────────────────────────────────
+    # v10: LayerNorm выравнивает масштаб cons_norm≈N(0,1) и cov≈[0,1]
+    x = tf.keras.layers.Concatenate(axis=-1, name="revin_concat")([cons_norm, cov_slice])
+    x = tf.keras.layers.LayerNormalization(epsilon=1e-6, name="input_ln")(x)
+
+    # ── TCN (LayerNorm, v10 fix) ───────────────────────────────────────────────
     tcn_proj = tf.keras.layers.Conv1D(tcn_filters, 1, padding="same", name="tcn_proj")(x)
     branches = [
         TCNBlock(tcn_filters, kernel_size=3, dilation_rate=d, dropout_rate=0.04, name=f"tcn_d{d}")(
@@ -218,102 +178,79 @@ def build_lstm_model(
     tcn_out = tf.keras.layers.LayerNormalization(epsilon=1e-6, name="tcn_ln")(tcn_out)
     tcn_out = tf.keras.layers.Dropout(0.10, name="tcn_drop")(tcn_out, training=training_flag)
 
-    # ── BiLSTM ─────────────────────────────────────────────────────────────
+    # ── BiLSTM ────────────────────────────────────────────────────────────────
     bilstm = tf.keras.layers.Bidirectional(
         tf.keras.layers.LSTM(lstm_units_1, return_sequences=True, recurrent_dropout=0.0),
-        name="bilstm_1"
+        name="bilstm_1",
     )(tcn_out)
     bilstm = tf.keras.layers.LayerNormalization(epsilon=1e-6, name="bilstm_ln")(bilstm)
-    bilstm_dim = lstm_units_1 * 2   # bidirectional doubles the size
+    bilstm_dim = lstm_units_1 * 2
 
-    # ── Temporal Attention ─────────────────────────────────────────────────
+    # ── Temporal Attention ────────────────────────────────────────────────────
     key_dim = max(bilstm_dim // attn_heads, 8)
     context = TemporalAttentionBlock(
-        num_heads=attn_heads, key_dim=key_dim, dropout=dropout_rate * 0.5, name="temporal_attn"
-    )(bilstm, training=training_flag)                          # (B, bilstm_dim)
+        num_heads=attn_heads, key_dim=key_dim, dropout=dropout_rate * 0.5, name="temporal_attn",
+    )(bilstm, training=training_flag)
+    last_token = tf.keras.layers.Dropout(dropout_rate * 0.5, name="drop_last")(bilstm[:, -1, :], training=training_flag)
+    agg = tf.keras.layers.Concatenate(name="agg")([last_token, context])
 
-    last_token = tf.keras.layers.Dropout(
-        dropout_rate * 0.5, name="drop_last"
-    )(bilstm[:, -1, :], training=training_flag)               # (B, bilstm_dim)
-
-    agg = tf.keras.layers.Concatenate(name="agg")([last_token, context])  # (B, bilstm_dim*2)
-
-    # ── Dense head → neural_out ∈ [0,1] ────────────────────────────────────
-    h = tf.keras.layers.Dense(128, activation="gelu",
-                               kernel_regularizer=tf.keras.regularizers.l2(1e-5),
-                               name="head_d1")(agg)
+    # ── Dense head ────────────────────────────────────────────────────────────
+    h = tf.keras.layers.Dense(128, activation="gelu", kernel_regularizer=tf.keras.regularizers.l2(1e-5), name="head_d1")(agg)
     h = tf.keras.layers.Dropout(dropout_rate, name="head_drop1")(h, training=training_flag)
-    h = tf.keras.layers.Dense(64, activation="gelu",
-                               kernel_regularizer=tf.keras.regularizers.l2(1e-5),
-                               name="head_d2")(h)
+    h = tf.keras.layers.Dense(64, activation="gelu",  kernel_regularizer=tf.keras.regularizers.l2(1e-5), name="head_d2")(h)
     h = tf.keras.layers.Dropout(dropout_rate * 0.5, name="head_drop2")(h, training=training_flag)
     neural_out = tf.keras.layers.Dense(forecast_horizon, name="neural_output")(h)
 
-    # ── AR-shortcut: линейная проекция последних автокорреляционных признаков ──
-    # Идея: дать нейросети "быстрый путь" для сильной сезонности (lag24/48/168),
-    # чтобы снять систематический хвост в остатках (высокий ACF24/ACF168).
+    # ── AR-shortcut (lag-признаки) ─────────────────────────────────────────────
     if use_autoregressive_shortcut:
-        # последние признаки окна: consumption + календарь/погода + lag-каналы
         last_features = inp[:, -1, :]
-        ar_shortcut = tf.keras.layers.Dense(
-            forecast_horizon, use_bias=False, name="ar_shortcut"
-        )(last_features)
+        ar_shortcut   = tf.keras.layers.Dense(forecast_horizon, use_bias=False, name="ar_shortcut")(last_features)
         add_terms = [neural_out, ar_shortcut]
-
-        # Усиленный seasonal shortcut из lag24/48/168 (каналы 15:18 в preprocessing.py).
-        if n_features >= 18:
-            lag_features = inp[:, -1, 15:18]
-            lag_shortcut = tf.keras.layers.Dense(
-                forecast_horizon, use_bias=False, name="lag_shortcut"
-            )(lag_features)
-            add_terms.append(lag_shortcut)
-
+        lag_end = lag_feature_start_idx + 3
+        if n_features >= lag_end:
+            lag_feats = inp[:, -1, lag_feature_start_idx:lag_end]
+            lag_sc    = tf.keras.layers.Dense(forecast_horizon, use_bias=False, name="lag_shortcut")(lag_feats)
+            add_terms.append(lag_sc)
         neural_out = tf.keras.layers.Add(name="neural_plus_ar")(add_terms)
-    # neural_out предсказывает в [0,1] MinMaxScaler пространстве
 
-    # ── SeasonalSkip (v9 FIX) ───────────────────────────────────────────────
-    # БЫЛО (v8 БАГ):
-    #   naive_slice = cons_norm[:, -forecast_horizon:, 0]  ← RevIN ≈ N(0,1)
-    #   Blend: 0.35*neural + 0.65*RevIN_naive ≈ 0.35*neural + 0 → skip бесполезен
-    #
-    # СТАЛО (v9 FIX):
-    #   naive_slice = inp[:, -forecast_horizon:, 0]  ← raw MinMaxScaler ∈ [0,1]
-    #   Blend: 0.35*neural + 0.65*minmax_naive → оба ∈ [0,1] = пространство Y_train
-    #   Инициализация хорошая: 65% "вчера в это время" = сильный baseline
+    # ── SeasonalSkip (опциональный, v10 compat) ───────────────────────────────
+    # Включай ТОЛЬКО если seasonal_diff=False в prepare_data().
     if use_seasonal_skip and history_length >= forecast_horizon:
-        # raw MinMaxScaler consumption channel — hours t-23..t → "вчера в это время"
-        naive_slice_minmax = inp[:, -forecast_horizon:, 0]    # (B, 24) ∈ [0,1]
-        final_out = SeasonalSkipConnection(
-            init_neural_weight=seasonal_blend_init, name="seasonal_skip"
-        )([neural_out, naive_slice_minmax])
+        import math
+        class _SeasonalSkip(tf.keras.layers.Layer):
+            def __init__(self, init_w=0.35, **kw):
+                super().__init__(**kw)
+                self.init_w = init_w
+            def build(self, _):
+                logit_init = math.log(self.init_w / (1.0 - self.init_w + 1e-8))
+                self.logit = self.add_weight("blend_logit", shape=(), initializer=tf.keras.initializers.Constant(logit_init), trainable=True)
+                super().build(_)
+            def call(self, inputs):
+                n, v = inputs; w = tf.keras.activations.sigmoid(self.logit)
+                return w * n + (1.0 - w) * v
+            def get_config(self): return {**super().get_config(), "init_w": self.init_w}
 
-        # Дополнительный weekly-skip, если история длинная (>= 168+горизонт).
-        # Это улучшает недельную сезонность без изменения целевого пространства.
+        naive_slice = inp[:, -forecast_horizon:, 0]
+        final_out = _SeasonalSkip(init_w=seasonal_blend_init, name="seasonal_skip")([neural_out, naive_slice])
         if history_length >= (168 + forecast_horizon):
-            weekly_slice_minmax = inp[:, -168:-168 + forecast_horizon, 0]  # shape (B, horizon)
-            final_out = SeasonalSkipConnection(
-                init_neural_weight=0.80, name="seasonal_weekly_skip"
-            )([final_out, weekly_slice_minmax])
+            weekly_slice = inp[:, -168:-168+forecast_horizon, 0]
+            final_out = _SeasonalSkip(init_w=0.80, name="seasonal_weekly_skip")([final_out, weekly_slice])
     else:
         final_out = neural_out
 
     final_out = tf.keras.layers.Lambda(lambda t: t, name="output")(final_out)
-
-    model = tf.keras.Model(inputs=inp, outputs=final_out, name="TCN_BiLSTM_Attention_v9")
+    model = tf.keras.Model(inputs=inp, outputs=final_out, name="TCN_BiLSTM_Attention_v11")
     model.compile(
         optimizer=tf.keras.optimizers.Adam(learning_rate=learning_rate, clipnorm=1.0),
         loss=tf.keras.losses.Huber(delta=huber_delta, name=f"huber_d{huber_delta}"),
-        metrics=["mae", "mape"],
+        metrics=["mae"],
     )
-
     logger.info(
-        "TCN-BiLSTM-Attention v9 | %d params | input=(%d,%d) | "
-        "TCN filters=%d dil=[1,2,4,8] | BiLSTM=%d | Attn %dh key=%d | "
-        "Dense 128/64 drop=%.2f | SeasonalSkip=%s (raw MinMaxScaler) blend=%.2f | "
-        "lr=%.0e | Huber(δ=%.2f)",
+        "TCN-BiLSTM-Attention v11 | %d params | input=(%d,%d) | "
+        "TCN=%d(LN) dil=[1,2,4,8] | BiLSTM=%d×2 | Attn %dh | Dense 128/64 drop=%.2f | "
+        "SeasonalSkip=%s | SeasonalDiff=True | lr=%.0e | Huber(δ=%.2f)",
         model.count_params(), history_length, n_features,
-        tcn_filters, lstm_units_1, attn_heads, key_dim,
-        dropout_rate, use_seasonal_skip, seasonal_blend_init,
-        learning_rate, huber_delta,
+        tcn_filters, lstm_units_1, attn_heads, dropout_rate,
+        use_seasonal_skip, learning_rate, huber_delta,
     )
     return model

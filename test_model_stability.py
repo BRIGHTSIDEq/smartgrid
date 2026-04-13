@@ -1,7 +1,7 @@
 import numpy as np
 
 from models.lstm import build_lstm_model
-from models.transformer import build_vanilla_transformer
+from models.transformer import build_patchtst, build_tft_lite, build_vanilla_transformer
 from models.trainer import diagnose_training_regime
 
 
@@ -48,5 +48,38 @@ def test_vanilla_transformer_seasonal_residual_forward_pass():
     )
     x = np.random.rand(2, 48, 26).astype(np.float32)
     y = model.predict(x, verbose=0)
+    assert y.shape == (2, 24)
+    assert np.isfinite(y).all()
+
+
+def test_patchtst_forward_pass():
+    model = build_patchtst(
+        history_length=48,
+        forecast_horizon=24,
+        patch_len=8,
+        stride=4,
+        n_features=26,
+        d_model=64,
+        num_heads=4,
+        num_layers=2,
+        dff=128,
+    )
+    x = np.random.rand(2, 48, 26).astype(np.float32)
+    y = model.predict(x, verbose=0)
+    assert y.shape == (2, 24)
+    assert np.isfinite(y).all()
+
+
+def test_tft_lite_forward_pass():
+    model = build_tft_lite(
+        history_length=48,
+        forecast_horizon=24,
+        d_model=32,
+        num_heads=4,
+        num_layers=2,
+    )
+    x_main = np.random.rand(2, 48, 1).astype(np.float32)
+    x_cov = np.random.rand(2, 48, 4).astype(np.float32)
+    y = model.predict([x_main, x_cov], verbose=0)
     assert y.shape == (2, 24)
     assert np.isfinite(y).all()

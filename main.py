@@ -18,6 +18,7 @@ main.py — Smart Grid v11.
 
 import logging
 import random
+from pathlib import Path
 
 import numpy as np
 import matplotlib
@@ -48,11 +49,37 @@ from models.trainer import ModelTrainer, WeightedEnsemble, compare_trainers
 from optimization.storage import simulate_storage, compare_strategies
 from utils.visualization import (
     plot_training_history, plot_predictions_comparison,
-    plot_metrics_comparison, plot_storage_result,
+    plot_metrics_comparison, plot_storage_result, plot_scientific_diagnostics,
 )
 from utils.deployment import export_model_bundle
 
 logger = Config.setup_logging()
+
+
+def _cleanup_plots_dir(plots_dir: str) -> None:
+    """Оставляет только целевые PNG-графики для научного отчёта."""
+    keep_prefixes = (
+        "01_timeseries_patterns",
+        "02_consumption_profiles",
+        "03_decomposition",
+        "04_acf_pacf",
+        "05_temperature_dependency",
+        "training_",
+        "predictions_comparison",
+        "metrics_comparison",
+        "scientific_diagnostics_",
+        "residuals_",
+        "backtesting_",
+        "storage_optimization",
+        "attention_summary_",
+        "head_specialization_",
+    )
+    for p in Path(plots_dir).glob("*"):
+        if p.suffix.lower() != ".png":
+            p.unlink(missing_ok=True)
+            continue
+        if not p.name.startswith(keep_prefixes):
+            p.unlink(missing_ok=True)
 
 
 def main():
@@ -193,16 +220,16 @@ def main():
             d_model=min(Config.TRANSFORMER_D_MODEL, 128),
             num_heads=min(Config.TRANSFORMER_N_HEADS, 4),
             num_layers=min(Config.TRANSFORMER_N_LAYERS, 3),
-            dff=min(Config.TRANSFORMER_DFF, 256),
             dropout=Config.TRANSFORMER_DROPOUT,
             learning_rate=Config.TRANSFORMER_LEARNING_RATE,
         )
         n_tr = len(data["X_train"]); n_vl = len(data["X_val"]); n_te = len(data["X_test"])
         tft_n_cov = 4
+        to_series = lambda x: x[:, :, :1].astype(np.float32)
         zero_cov = lambda n: np.zeros((n, Config.HISTORY_LENGTH, tft_n_cov), np.float32)
-        data["X_tft_train"] = [data["X_train"], zero_cov(n_tr)]
-        data["X_tft_val"]   = [data["X_val"],   zero_cov(n_vl)]
-        data["X_tft_test"]  = [data["X_test"],  zero_cov(n_te)]
+        data["X_tft_train"] = [to_series(data["X_train"]), zero_cov(n_tr)]
+        data["X_tft_val"]   = [to_series(data["X_val"]),   zero_cov(n_vl)]
+        data["X_tft_test"]  = [to_series(data["X_test"]),  zero_cov(n_te)]
         use_tft = True
         logger.info("TFT-Lite: %d params", count_parameters(tft_lite))
     except Exception as exc:
@@ -304,17 +331,22 @@ def main():
     logger.info("🏆 Лучшая: %s | MAE=%.2f | composite=%.3f",
                 best_name, all_metrics[best_name]["MAE"],
                 all_metrics[best_name].get("composite_score", float("nan")))
+    if best_name in predictions:
+        plot_scientific_diagnostics(
+            y_true=y_true,
+            y_pred=predictions[best_name],
+            model_name=best_name.replace(" ", "_"),
+            plots_dir=Config.PLOTS_DIR,
+        )
 
     # [7/10] Attention
     logger.info("\n[7/10] Визуализация внимания...")
     try:
         from utils.attention_visualization import (
-            visualize_attention_weights, visualize_attention_summary, compare_head_specialization)
+            visualize_attention_summary, compare_head_specialization)
         sample_x = data["X_test"][:1]
         for t in trainers:
             if t.model_name in ("VanillaTransformer", "PatchTST"):
-                visualize_attention_weights(t.model, sample_x, history_length=Config.HISTORY_LENGTH,
-                    model_name=t.model_name, plots_dir=Config.PLOTS_DIR)
                 visualize_attention_summary(t.model, sample_x, history_length=Config.HISTORY_LENGTH,
                     model_name=t.model_name, plots_dir=Config.PLOTS_DIR)
                 compare_head_specialization(t.model, sample_x, model_name=t.model_name, plots_dir=Config.PLOTS_DIR)
@@ -386,6 +418,8 @@ def main():
              "lag_feature_start_idx": lag_idx, "seasonal_diff": True},
             export_dir=Config.MODELS_DIR, model_name=best_keras.model_name,
         )
+
+    _cleanup_plots_dir(Config.PLOTS_DIR)
 
     logger.info("\n" + "=" * 70)
     logger.info("✅ Пайплайн завершён!")

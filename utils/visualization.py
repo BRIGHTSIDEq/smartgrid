@@ -89,10 +89,10 @@ def plot_metrics_comparison(
     plots_dir: str = "results/plots",
     save: bool = True,
 ) -> None:
-    """Барчарт метрик MAE / RMSE / MAPE / R² по всем моделям."""
+    """Барчарт метрик MAE / RMSE / sMAPE / R² по всем моделям."""
     os.makedirs(plots_dir, exist_ok=True)
     model_names = list(metrics.keys())
-    metric_names = ["MAE", "RMSE", "MAPE", "R2"]
+    metric_names = ["MAE", "RMSE", "sMAPE", "R2"]
 
     fig, axes = plt.subplots(1, 4, figsize=(20, 5))
     fig.suptitle("Сравнение метрик моделей")
@@ -101,7 +101,7 @@ def plot_metrics_comparison(
     for ax, m in zip(axes, metric_names):
         values = [metrics[n].get(m, 0) for n in model_names]
         bars = ax.bar(model_names, values, color=colors, alpha=0.8, edgecolor="black")
-        unit = "[%]" if m == "MAPE" else "[-]" if m == "R2" else "[кВт·ч]"
+        unit = "[%]" if m == "sMAPE" else "[-]" if m == "R2" else "[кВт·ч]"
         ax.set_title(f"{m} {unit}")
         ax.set_ylabel(unit)
         ax.set_xticks(range(len(model_names)))
@@ -113,6 +113,44 @@ def plot_metrics_comparison(
 
     plt.tight_layout()
     save_figure(fig, os.path.join(plots_dir, "metrics_comparison.png"), save=save)
+    plt.close(fig)
+
+
+def plot_scientific_diagnostics(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    model_name: str,
+    plots_dir: str = "results/plots",
+    save: bool = True,
+) -> None:
+    """Графики для научного отчёта: факт-vs-прогноз и распределение ошибки."""
+    os.makedirs(plots_dir, exist_ok=True)
+    y_t = y_true.flatten()
+    y_p = y_pred.flatten()
+    err = y_p - y_t
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+    # Scatter факт-прогноз
+    axes[0].scatter(y_t, y_p, s=4, alpha=0.30, color=PALETTE["primary"])
+    diag_min = min(y_t.min(), y_p.min())
+    diag_max = max(y_t.max(), y_p.max())
+    axes[0].plot([diag_min, diag_max], [diag_min, diag_max], "--", color=PALETTE["negative"], lw=1.5)
+    axes[0].set_title(f"{model_name}: факт vs прогноз")
+    axes[0].set_xlabel("Факт [кВт·ч]")
+    axes[0].set_ylabel("Прогноз [кВт·ч]")
+    axes[0].grid(True, alpha=0.3)
+
+    # Error distribution
+    axes[1].hist(err, bins=60, color=PALETTE["highlight"], alpha=0.75, edgecolor=PALETTE["baseline"])
+    axes[1].axvline(np.mean(err), color=PALETTE["negative"], linestyle="--", lw=1.5, label="MBE")
+    axes[1].set_title(f"{model_name}: распределение ошибки")
+    axes[1].set_xlabel("Ошибка прогноза [кВт·ч]")
+    axes[1].set_ylabel("Частота [-]")
+    axes[1].legend()
+    axes[1].grid(True, alpha=0.3, axis="y")
+
+    plt.tight_layout()
+    save_figure(fig, os.path.join(plots_dir, f"scientific_diagnostics_{model_name}.png"), save=save)
     plt.close(fig)
 
 

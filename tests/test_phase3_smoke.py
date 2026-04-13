@@ -35,8 +35,8 @@ def test_plot_style_apply_and_save(tmp_path):
     png, pdf, svg = save_figure(fig, os.path.join(tmp_path, "smoke_plot.png"), save=True)
     plt.close(fig)
     assert os.path.exists(png)
-    assert os.path.exists(pdf)
-    assert os.path.exists(svg)
+    assert pdf is None
+    assert svg is None
 
 
 def test_component_smoke_paths():

@@ -88,14 +88,15 @@ def main():
     logger.info("=" * 70)
 
     # Config.set_fast_mode()
-    # Config.set_optimal_mode()
-    Config.set_full_mode()
+    Config.set_optimal_mode()
+    # Config.set_full_mode()
     Config.create_dirs()
 
     # [1/10] Генерация данных
     logger.info("\n[1/10] Генерация данных...")
     df = load_or_generate_smartgrid_data(
         csv_path=Config.GENERATED_DATA_CSV,
+        force_regenerate=Config.FORCE_REGENERATE_DATA,
         days=Config.DAYS, households=Config.HOUSEHOLDS,
         start_date=Config.START_DATE, seed=Config.SEED,
         temp_setpoint=Config.GEN_TEMP_SETPOINT,
@@ -117,6 +118,11 @@ def main():
         coefficients=Config.get_generator_coefficients(),
     )
     validate_generated_data(df)
+    logger.info(
+        "Data snapshot | rows=%d | consumption mean=%.2f std=%.2f | temp mean=%.2f std=%.2f",
+        len(df), float(df["consumption"].mean()), float(df["consumption"].std()),
+        float(df["temperature"].mean()), float(df["temperature"].std()),
+    )
     Config.print_summary()
 
     # [2/10] EDA
@@ -140,6 +146,11 @@ def main():
     logger.info(
         "✅ X_train=%s | seasonal_diff=%s | Y_diff std=%.4f",
         x_shape, data["seasonal_diff"], float(data["Y_train"].std()),
+    )
+    logger.info(
+        "Split lens | train=%d val=%d test=%d | raw_train mean=%.2f raw_test mean=%.2f",
+        len(data["X_train"]), len(data["X_val"]), len(data["X_test"]),
+        float(np.mean(data["raw_train"])), float(np.mean(data["raw_test"])),
     )
     validate_data_integrity(data)
     lag_idx = data["lag_feature_start_idx"]

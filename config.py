@@ -135,6 +135,7 @@ class Config:
     OUTPUT_DIR: str  = os.path.join(BASE_DIR, "results")
     DATA_DIR: str = os.path.join(BASE_DIR, "data", "generated")
     GENERATED_DATA_CSV: str = os.path.join(DATA_DIR, "smartgrid_dataset.csv")
+    FORCE_REGENERATE_DATA: bool = False
     MODELS_DIR: str  = os.path.join(BASE_DIR, "results", "models")
     PLOTS_DIR: str   = os.path.join(BASE_DIR, "results", "plots")
     LOGS_DIR: str    = os.path.join(BASE_DIR, "results", "logs")
@@ -187,33 +188,33 @@ class Config:
 
     @classmethod
     def set_optimal_mode(cls):
-        # Усиленный режим для достижения более высокого R² у seq-моделей.
-        cls.DAYS = 730; cls.HOUSEHOLDS = 2500; cls.EPOCHS = 240
-        cls.PATIENCE = 25; cls.LR_PATIENCE = 10
+        # Режим для лучшего качества при разумном времени обучения (без переобучения fast/full).
+        cls.DAYS = 730; cls.HOUSEHOLDS = 2500; cls.EPOCHS = 220
+        cls.PATIENCE = 20; cls.LR_PATIENCE = 8
         cls.HISTORY_LENGTH = 48; cls.STORAGE_HORIZON = 720; cls.N_FEATURES = 26
-        cls.LSTM_UNITS_1 = 96; cls.LSTM_UNITS_2 = 96; cls.LSTM_UNITS_3 = 96
+        cls.LSTM_UNITS_1 = 72; cls.LSTM_UNITS_2 = 72; cls.LSTM_UNITS_3 = 72
         cls.LSTM_ATTN_HEADS = 4; cls.LSTM_TCN_FILTERS = 48
-        cls.DROPOUT_RATE = 0.12; cls.LSTM_LEARNING_RATE = 2.0e-4; cls.LSTM_USE_COSINE_DECAY = False
-        cls.LSTM_SEASONAL_BLEND_INIT = 0.35; cls.LSTM_HUBER_DELTA = 0.05
-        cls.TRANSFORMER_D_MODEL = 192; cls.TRANSFORMER_N_HEADS = 8
-        cls.TRANSFORMER_N_LAYERS = 5; cls.TRANSFORMER_DFF = 384
-        cls.TRANSFORMER_DROPOUT = 0.10; cls.TRANSFORMER_LEARNING_RATE = 2e-4
-        cls.VANILLA_TRANSFORMER_LR = 7e-5; cls.TRANSFORMER_STOCHASTIC_DEPTH = 0.05
+        cls.DROPOUT_RATE = 0.18; cls.LSTM_LEARNING_RATE = 1.5e-4; cls.LSTM_USE_COSINE_DECAY = False
+        cls.LSTM_SEASONAL_BLEND_INIT = 0.35; cls.LSTM_HUBER_DELTA = 0.02
+        cls.TRANSFORMER_D_MODEL = 128; cls.TRANSFORMER_N_HEADS = 4
+        cls.TRANSFORMER_N_LAYERS = 3; cls.TRANSFORMER_DFF = 256
+        cls.TRANSFORMER_DROPOUT = 0.15; cls.TRANSFORMER_LEARNING_RATE = 1.5e-4
+        cls.VANILLA_TRANSFORMER_LR = 1.2e-4; cls.TRANSFORMER_STOCHASTIC_DEPTH = 0.08
         cls.PATCHTST_USE_REVIN = True
         cls.VANILLA_USE_SEASONAL_RESIDUAL = True; cls.VANILLA_SEASONAL_BLEND_INIT = 0.40
-        cls.VANILLA_HUBER_DELTA = 0.05
-        cls.XGB_N_ESTIMATORS = 500; cls.XGB_COLSAMPLE = 0.40
+        cls.VANILLA_HUBER_DELTA = 0.02
+        cls.XGB_N_ESTIMATORS = 700; cls.XGB_COLSAMPLE = 0.50
         cls.GEN_AR_SIGMA = 0.040
         cls.GEN_EV_PENETRATION = 0.50; cls.GEN_INDUSTRIAL_LOADS = 8; cls.GEN_CITY_DISTRICTS = 12
         logging.getLogger("smart_grid").info(
-            "Optimal mode v10: DAYS=%d EPOCHS=%d N_FEATURES=%d | "
-            "LSTM TCN=%d BiLSTM=%d heads=%d lr=%.0e huber=%.2f | "
-            "Trans d=%d h=%d L=%d lr=%.0e | VanTr LR=%.0e | "
+            "Optimal mode v12: DAYS=%d EPOCHS=%d N_FEATURES=%d | "
+            "LSTM TCN=%d BiLSTM=%d heads=%d lr=%.0e drop=%.2f huber=%.2f | "
+            "Trans d=%d h=%d L=%d dff=%d drop=%.2f lr=%.0e | VanTr LR=%.0e | "
             "EV=%.0f%% STORAGE=%dh BAT=%.0f кВт·ч",
             cls.DAYS, cls.EPOCHS, cls.N_FEATURES,
             cls.LSTM_TCN_FILTERS, cls.LSTM_UNITS_1, cls.LSTM_ATTN_HEADS,
-            cls.LSTM_LEARNING_RATE, cls.LSTM_HUBER_DELTA,
-            cls.TRANSFORMER_D_MODEL, cls.TRANSFORMER_N_HEADS, cls.TRANSFORMER_N_LAYERS,
+            cls.LSTM_LEARNING_RATE, cls.DROPOUT_RATE, cls.LSTM_HUBER_DELTA,
+            cls.TRANSFORMER_D_MODEL, cls.TRANSFORMER_N_HEADS, cls.TRANSFORMER_N_LAYERS, cls.TRANSFORMER_DFF, cls.TRANSFORMER_DROPOUT,
             cls.TRANSFORMER_LEARNING_RATE, cls.VANILLA_TRANSFORMER_LR,
             cls.GEN_EV_PENETRATION*100, cls.STORAGE_HORIZON, cls.BATTERY_CAPACITY)
 

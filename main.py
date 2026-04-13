@@ -118,6 +118,9 @@ def main():
         coefficients=Config.get_generator_coefficients(),
     )
     validate_generated_data(df)
+    expected_rows = Config.DAYS * 24
+    if len(df) != expected_rows:
+        raise ValueError(f"Несовместимый датасет: rows={len(df)}, ожидалось={expected_rows}. Проверьте кэш.")
     logger.info(
         "Data snapshot | rows=%d | consumption mean=%.2f std=%.2f | temp mean=%.2f std=%.2f",
         len(df), float(df["consumption"].mean()), float(df["consumption"].std()),

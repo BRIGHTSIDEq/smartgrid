@@ -134,11 +134,33 @@ def test_load_or_generate_smartgrid_data_uses_csv_cache(tmp_path):
     df_second = load_or_generate_smartgrid_data(
         csv_path=str(csv_path),
         days=10,
-        households=9999,  # должно игнорироваться, т.к. читаем кэш
+        households=100,
         start_date="2024-01-01",
-        seed=777,
+        seed=42,
     )
     pd.testing.assert_frame_equal(df_first, df_second, check_dtype=False)
+
+
+def test_load_or_generate_smartgrid_data_invalidates_incompatible_cache(tmp_path):
+    csv_path = tmp_path / "cached_data.csv"
+    df_10_days = load_or_generate_smartgrid_data(
+        csv_path=str(csv_path),
+        days=10,
+        households=100,
+        start_date="2024-01-01",
+        seed=42,
+    )
+    assert len(df_10_days) == 240
+
+    # Должна произойти регенерация, т.к. ожидаем уже 12 дней
+    df_12_days = load_or_generate_smartgrid_data(
+        csv_path=str(csv_path),
+        days=12,
+        households=100,
+        start_date="2024-01-01",
+        seed=42,
+    )
+    assert len(df_12_days) == 288
 
 
 def test_model_trainer_uses_tft_split_inputs():

@@ -32,6 +32,7 @@ data/generator.py — Smart Grid v6: исправление EV-бага + уси
 
 import logging
 import os
+import json
 from datetime import timedelta
 from typing import Tuple, Optional
 
@@ -441,14 +442,61 @@ def load_or_generate_smartgrid_data(
     Загружает датасет из CSV, если он уже существует.
     Иначе генерирует датасет, сохраняет в CSV и возвращает DataFrame.
     """
+    meta_path = f"{csv_path}.meta.json"
+    expected_days = int(generator_kwargs.get("days", 365))
+    expected_rows = expected_days * 24
+    expected_start = str(generator_kwargs.get("start_date", "2024-01-01"))
+    expected_seed = int(generator_kwargs.get("seed", 42))
+    expected_households = int(generator_kwargs.get("households", 500))
+
     if os.path.exists(csv_path) and not force_regenerate:
-        logger.info("CSV найден, используем кэш: %s", csv_path)
+        logger.info("CSV найден, проверяем совместимость кэша: %s", csv_path)
         df = pd.read_csv(csv_path, parse_dates=["timestamp"])
-        return df
+        cache_ok = True
+
+        if len(df) != expected_rows:
+            logger.warning("Кэш несовместим: rows=%d, ожидалось=%d. Будет регенерация.", len(df), expected_rows)
+            cache_ok = False
+        if "timestamp" in df.columns and len(df) > 0:
+            first_ts = str(pd.to_datetime(df["timestamp"].iloc[0]).date())
+            if first_ts != expected_start:
+                logger.warning("Кэш несовместим: start_date=%s, ожидалось=%s. Будет регенерация.", first_ts, expected_start)
+                cache_ok = False
+
+        if os.path.exists(meta_path):
+            try:
+                with open(meta_path, "r", encoding="utf-8") as f:
+                    meta = json.load(f)
+                meta_expected = {
+                    "days": expected_days,
+                    "households": expected_households,
+                    "start_date": expected_start,
+                    "seed": expected_seed,
+                }
+                if any(meta.get(k) != v for k, v in meta_expected.items()):
+                    logger.warning("Кэш-метаданные не совпадают с текущим конфигом. Будет регенерация.")
+                    cache_ok = False
+            except Exception as exc:
+                logger.warning("Не удалось прочитать meta кэша (%s). Будет регенерация.", exc)
+                cache_ok = False
+        else:
+            logger.warning("Meta-файл кэша не найден. Проверка по размеру/дате выполнена частично.")
+
+        if cache_ok:
+            logger.info("Кэш валиден, используем CSV без регенерации.")
+            return df
 
     os.makedirs(os.path.dirname(csv_path), exist_ok=True)
     logger.info("CSV не найден (или force_regenerate=True), генерируем данные...")
     df = generate_smartgrid_data(**generator_kwargs)
     df.to_csv(csv_path, index=False)
+    meta = {
+        "days": expected_days,
+        "households": expected_households,
+        "start_date": expected_start,
+        "seed": expected_seed,
+    }
+    with open(meta_path, "w", encoding="utf-8") as f:
+        json.dump(meta, f, ensure_ascii=False, indent=2)
     logger.info("Данные сохранены в CSV: %s", csv_path)
     return df

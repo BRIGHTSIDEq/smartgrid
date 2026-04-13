@@ -31,7 +31,7 @@ random.seed(Config.SEED)
 import tensorflow as tf
 tf.random.set_seed(Config.SEED)
 
-from data.generator import generate_smartgrid_data, validate_generated_data
+from data.generator import load_or_generate_smartgrid_data, validate_generated_data
 from data.preprocessing import prepare_data, inverse_scale, validate_data_integrity
 from analysis.eda import run_eda
 from analysis.residuals import analyze_residuals
@@ -67,7 +67,8 @@ def main():
 
     # [1/10] Генерация данных
     logger.info("\n[1/10] Генерация данных...")
-    df = generate_smartgrid_data(
+    df = load_or_generate_smartgrid_data(
+        csv_path=Config.GENERATED_DATA_CSV,
         days=Config.DAYS, households=Config.HOUSEHOLDS,
         start_date=Config.START_DATE, seed=Config.SEED,
         temp_setpoint=Config.GEN_TEMP_SETPOINT,

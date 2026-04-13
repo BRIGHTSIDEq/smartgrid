@@ -9,6 +9,7 @@ from config import Config, GeneratorCoefficients
 from data.components.ev import simulate_ev_load
 from data.components.household import build_household_aggregate
 from data.components.industrial import simulate_industrial_load
+from data.generator import load_or_generate_smartgrid_data
 from data.components.nonlinear_states import (
     compute_cascade_factor,
     compute_dsr_rebound,
@@ -113,3 +114,27 @@ def test_deployment_multivariate_inference():
     recent_window = np.random.rand(history, features).astype(np.float32)
     pred = predict_multifeature_from_bundle(bundle, recent_window)
     assert pred.shape == (horizon,)
+
+
+
+def test_load_or_generate_smartgrid_data_uses_csv_cache(tmp_path):
+    csv_path = tmp_path / "cached_data.csv"
+    df_first = load_or_generate_smartgrid_data(
+        csv_path=str(csv_path),
+        days=10,
+        households=100,
+        start_date="2024-01-01",
+        seed=42,
+    )
+    assert csv_path.exists()
+    assert "timestamp" in df_first.columns
+    assert len(df_first) == 240
+
+    df_second = load_or_generate_smartgrid_data(
+        csv_path=str(csv_path),
+        days=10,
+        households=9999,  # должно игнорироваться, т.к. читаем кэш
+        start_date="2024-01-01",
+        seed=777,
+    )
+    pd.testing.assert_frame_equal(df_first, df_second, check_dtype=False)

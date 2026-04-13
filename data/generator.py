@@ -31,6 +31,7 @@ data/generator.py — Smart Grid v6: исправление EV-бага + уси
 """
 
 import logging
+import os
 from datetime import timedelta
 from typing import Tuple, Optional
 
@@ -428,3 +429,26 @@ def validate_generated_data(df):
                 float(df["consumption"].std()/df["consumption"].mean()))
     logger.info("Валидация %s", "ПРОЙДЕНА" if passed else "ПРОВАЛЕНА")
     return passed
+
+
+
+def load_or_generate_smartgrid_data(
+    csv_path: str,
+    force_regenerate: bool = False,
+    **generator_kwargs,
+) -> pd.DataFrame:
+    """
+    Загружает датасет из CSV, если он уже существует.
+    Иначе генерирует датасет, сохраняет в CSV и возвращает DataFrame.
+    """
+    if os.path.exists(csv_path) and not force_regenerate:
+        logger.info("CSV найден, используем кэш: %s", csv_path)
+        df = pd.read_csv(csv_path, parse_dates=["timestamp"])
+        return df
+
+    os.makedirs(os.path.dirname(csv_path), exist_ok=True)
+    logger.info("CSV не найден (или force_regenerate=True), генерируем данные...")
+    df = generate_smartgrid_data(**generator_kwargs)
+    df.to_csv(csv_path, index=False)
+    logger.info("Данные сохранены в CSV: %s", csv_path)
+    return df

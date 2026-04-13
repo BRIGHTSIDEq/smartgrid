@@ -133,6 +133,8 @@ class Config:
 
     BASE_DIR: str = os.path.dirname(os.path.abspath(__file__))
     OUTPUT_DIR: str  = os.path.join(BASE_DIR, "results")
+    DATA_DIR: str = os.path.join(BASE_DIR, "data", "generated")
+    GENERATED_DATA_CSV: str = os.path.join(DATA_DIR, "smartgrid_dataset.csv")
     MODELS_DIR: str  = os.path.join(BASE_DIR, "results", "models")
     PLOTS_DIR: str   = os.path.join(BASE_DIR, "results", "plots")
     LOGS_DIR: str    = os.path.join(BASE_DIR, "results", "logs")
@@ -143,7 +145,7 @@ class Config:
 
     @classmethod
     def create_dirs(cls):
-        for d in (cls.OUTPUT_DIR, cls.MODELS_DIR, cls.PLOTS_DIR, cls.LOGS_DIR):
+        for d in (cls.OUTPUT_DIR, cls.DATA_DIR, cls.MODELS_DIR, cls.PLOTS_DIR, cls.LOGS_DIR):
             os.makedirs(d, exist_ok=True)
 
     @classmethod

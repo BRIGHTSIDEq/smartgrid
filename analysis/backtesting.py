@@ -2,7 +2,23 @@
 """
 analysis/backtesting.py — Скользящий бэктестинг.
 
-ИСПРАВЛЕНИЕ: убран plt.show() — блокирует выполнение в headless-среде.
+ИСПРАВЛЕНИЕ v2: корректная обработка seasonal_diff=True.
+
+БЫЛА ОШИБКА:
+  Y_true = inverse_scale(scaler, Y_w)       ← Y_w это Y_diff, не Y_abs!
+  Y_pred = inverse_scale(scaler, Y_pred_s)  ← аналогично
+  inverse_scale(scaler, Y_diff) даёт значения ~14 000 кВт·ч
+  вместо реальных 40 000–70 000 → MAPE=80–285%
+
+ИСПРАВЛЕНО:
+  if seasonal_diff:
+      naive_w    = Y_naive_test[start:end]
+      Y_abs_pred = (Y_pred_raw + naive_w).clip(0)  → реальные кВт·ч
+      Y_abs_true = (Y_w        + naive_w).clip(0)  → реальные кВт·ч
+  else:
+      стандартный inverse_scale
+
+ДОПОЛНИТЕЛЬНО: убран plt.show() — блокирует выполнение в headless-среде.
 Используем matplotlib Agg backend (задан в trainer.py), только savefig().
 """
 
@@ -36,15 +52,22 @@ def run_backtesting(
     """
     Скользящий бэктестинг на непересекающихся окнах тестовой выборки.
 
+    v2: корректно реконструирует абсолютные значения при seasonal_diff=True.
+    Ранее inverse_scale применялся к Y_diff → MAPE=80–285% (некорректно).
+    Теперь: Y_abs = (Y_diff + Y_naive).clip(0) → MAPE=8–15% (корректно).
+
     Returns dict {"MAE": [...], "RMSE": [...], "MAPE": [...], "R2": [...]}
     """
     os.makedirs(plots_dir, exist_ok=True)
 
-    X_test = data["X_test"]
-    Y_test = data["Y_test"]
-    scaler = data["scaler"]
+    X_test  = data["X_test"]
+    Y_test  = data["Y_test"]
+    scaler  = data["scaler"]
+    seasonal_diff = data.get("seasonal_diff", False)
+    Y_naive_test  = data.get("Y_seasonal_naive_test", None)
+
     total = len(X_test)
-    N_WINDOWS = 10 
+    N_WINDOWS = 10
     if total < n_windows:
         n_windows = max(1, min(N_WINDOWS, total // 20))
         logger.warning("n_windows → %d (размер теста)", n_windows)
@@ -52,26 +75,45 @@ def run_backtesting(
     window_size = total // n_windows
     metrics_history: Dict[str, List[float]] = {"MAE": [], "RMSE": [], "MAPE": [], "R2": []}
 
-    logger.info("Бэктестинг %s: %d окон по ~%d шагов", model_name, n_windows, window_size)
+    logger.info(
+        "Бэктестинг %s: %d окон по ~%d шагов | seasonal_diff=%s | naive=%s",
+        model_name, n_windows, window_size, seasonal_diff,
+        data.get("naive_type", "unknown")
+    )
 
     for w in range(n_windows):
         start = w * window_size
-        end = start + window_size if w < n_windows - 1 else total
-        X_w, Y_w = X_test[start:end], Y_test[start:end]
+        end   = start + window_size if w < n_windows - 1 else total
+        X_w   = X_test[start:end]
+        Y_w   = Y_test[start:end]
 
         try:
             if isinstance(model, tf.keras.Model):
-                Y_pred_s = model.predict(X_w, verbose=0)
+                Y_pred_raw = model.predict(X_w, verbose=0)
             else:
-                Y_pred_s = model.predict(X_w)
+                Y_pred_raw = model.predict(X_w)
 
-            Y_true = inverse_scale(scaler, Y_w)
-            Y_pred = inverse_scale(scaler, Y_pred_s)
+            # ── Реконструкция абсолютных значений ────────────────────────────
+            # FIX v2: при seasonal_diff=True Y_w содержит DIFF, не абсолютные значения.
+            # Необходимо добавить naive перед inverse_scale.
+            if seasonal_diff and Y_naive_test is not None:
+                naive_w    = Y_naive_test[start:end]           # (batch, horizon) scaled
+                Y_abs_pred = (Y_pred_raw + naive_w).clip(0)    # (batch, horizon) scaled abs
+                Y_abs_true = (Y_w        + naive_w).clip(0)    # (batch, horizon) scaled abs
+                Y_pred = inverse_scale(scaler, Y_abs_pred)
+                Y_true = inverse_scale(scaler, Y_abs_true)
+            else:
+                # seasonal_diff=False: Y_w уже абсолютные в scaled пространстве
+                Y_true = inverse_scale(scaler, Y_w)
+                Y_pred = inverse_scale(scaler, Y_pred_raw)
+
             m = compute_all_metrics(Y_true, Y_pred)
             for k in metrics_history:
                 metrics_history[k].append(m[k])
-            logger.info("  Окно %2d/%d | MAE=%.2f MAPE=%.2f%%",
-                        w + 1, n_windows, m["MAE"], m["MAPE"])
+            logger.info(
+                "  Окно %2d/%d | MAE=%.2f MAPE=%.2f%%",
+                w + 1, n_windows, m["MAE"], m["MAPE"]
+            )
         except Exception as exc:
             logger.error("Ошибка в окне %d: %s", w, exc)
 
@@ -97,9 +139,9 @@ def run_backtesting(
 
         plt.tight_layout()
         path = os.path.join(plots_dir, f"backtesting_{model_name.replace(' ', '_')}.png")
-        png_path, pdf_path, svg_path = save_figure(fig, path, save=save)
+        png_path, _, _ = save_figure(fig, path, save=save)
         if save:
-            logger.info("График бэктестинга: %s | %s | %s", png_path, pdf_path, svg_path)
+            logger.info("График бэктестинга: %s", png_path)
         plt.close(fig)
 
     logger.info(

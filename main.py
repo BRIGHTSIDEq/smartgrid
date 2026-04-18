@@ -1,19 +1,20 @@
 # -*- coding: utf-8 -*-
 """
-main.py — Smart Grid v11.
+main.py — Smart Grid v12.
 
-КЛЮЧЕВОЕ ИЗМЕНЕНИЕ v11: seasonal_diff=True в prepare_data().
+КЛЮЧЕВЫЕ ИЗМЕНЕНИЯ v12:
 
-  Все модели обучаются предсказывать Y_diff = Y - Y_naive вместо Y_abs.
-  Реконструкция в trainer.py: pred_abs = pred_diff + Y_naive.
-  Ожидаемый результат: ACF(24) остатков < 0.15 (с 0.70), R² → 0.88–0.91.
+1. seasonal_diff=True в prepare_data() — сохранено из v11.
 
-  Дополнительно:
-    - huber_delta=0.02 в LSTM (масштаб Y_diff меньше, kurtosis>5)
-    - use_seasonal_skip=False в LSTM (больше не нужен при seasonal_diff=True)
-    - WeightedEnsemble.optimize_weights работает в абсолютном пространстве
-    - predict_absolute() для визуализации вместо predict()
-    - TFT-Lite: исправлен вызов (убран неверный аргумент n_features)
+2. patch_len / stride для HISTORY_LENGTH=168:
+   БЫЛО:  если history>=96: patch_len=12
+   СТАЛО: если history>=168: patch_len=24, stride=12
+   Обоснование: при history=168 один патч = 1 сутки (24ч).
+   Семантически: модель обрабатывает 13 суточных токенов вместо 168 шумных часовых.
+   n_patches = (168-24)//12 + 1 = 13
+
+3. Логирование naive_type из data-dict:
+   "[3/10] Подготовка данных" теперь выводит тип seasonal naive.
 """
 
 import logging
@@ -84,7 +85,7 @@ def _cleanup_plots_dir(plots_dir: str) -> None:
 
 def main():
     logger.info("=" * 70)
-    logger.info("  SMART GRID v11 — Seasonal Differencing Target")
+    logger.info("  SMART GRID v12 — Dual Seasonal Naive + History=168h")
     logger.info("=" * 70)
 
     # Config.set_fast_mode()
@@ -132,23 +133,25 @@ def main():
     logger.info("\n[2/10] EDA...")
     run_eda(df, plots_dir=Config.PLOTS_DIR, save=True)
 
-    # [3/10] Подготовка данных — seasonal_diff=True (главное изменение v11)
-    logger.info("\n[3/10] Подготовка данных (seasonal_diff=True)...")
+    # [3/10] Подготовка данных
+    # v12: при HISTORY_LENGTH=168 автоматически используется dual naive (24h×0.6 + 168h×0.4)
+    logger.info("\n[3/10] Подготовка данных (seasonal_diff=True, history=%d)...", Config.HISTORY_LENGTH)
     data = prepare_data(
         df,
         history_length=Config.HISTORY_LENGTH,
         forecast_horizon=Config.FORECAST_HORIZON,
         train_ratio=Config.TRAIN_RATIO,
         val_ratio=Config.VAL_RATIO,
-        seasonal_diff=True,   # ← КЛЮЧЕВОЕ ИЗМЕНЕНИЕ v11
+        seasonal_diff=True,
     )
     x_shape = data["X_train"].shape
     assert x_shape[2] == Config.N_FEATURES, (
         f"n_features mismatch: {x_shape[2]} != {Config.N_FEATURES}"
     )
+    naive_type = data.get("naive_type", "unknown")
     logger.info(
-        "✅ X_train=%s | seasonal_diff=%s | Y_diff std=%.4f",
-        x_shape, data["seasonal_diff"], float(data["Y_train"].std()),
+        "✅ X_train=%s | seasonal_diff=%s | naive=%s | Y_diff std=%.4f",
+        x_shape, data["seasonal_diff"], naive_type, float(data["Y_train"].std()),
     )
     logger.info(
         "Split lens | train=%d val=%d test=%d | raw_train mean=%.2f raw_test mean=%.2f",
@@ -164,7 +167,7 @@ def main():
     _n_train = int(Config.DAYS * 0.70 * 24 - Config.HISTORY_LENGTH - Config.FORECAST_HORIZON)
     _total_steps = Config.EPOCHS * max(_n_train // Config.BATCH_SIZE, 1)
 
-    # LSTM v11: use_seasonal_skip=False, huber_delta=0.02 (масштаб Y_diff)
+    # LSTM v11: use_seasonal_skip=False, huber_delta=0.02
     lstm = build_lstm_model(
         history_length=Config.HISTORY_LENGTH,
         forecast_horizon=Config.FORECAST_HORIZON,
@@ -178,9 +181,9 @@ def main():
         use_cosine_decay=Config.LSTM_USE_COSINE_DECAY,
         total_steps=_total_steps,
         tcn_filters=Config.LSTM_TCN_FILTERS,
-        huber_delta=0.02,           # v11: меньше delta для Y_diff (kurtosis>5)
+        huber_delta=0.02,
         seasonal_blend_init=Config.LSTM_SEASONAL_BLEND_INIT,
-        use_seasonal_skip=False,    # v11: seasonal_diff на уровне данных
+        use_seasonal_skip=False,
         lag_feature_start_idx=lag_idx,
     )
 
@@ -197,17 +200,34 @@ def main():
         learning_rate=Config.VANILLA_TRANSFORMER_LR,
         pe_type="sinusoidal",
         stochastic_depth_rate=Config.TRANSFORMER_STOCHASTIC_DEPTH,
-        use_seasonal_residual=False,   # v11: seasonal_diff на уровне данных
+        use_seasonal_residual=False,
         seasonal_blend_init=Config.VANILLA_SEASONAL_BLEND_INIT,
-        huber_delta=0.02,              # v11: меньше delta для Y_diff
+        huber_delta=0.02,
     )
 
-    # PatchTST
-    if Config.HISTORY_LENGTH >= 192:  patch_len = 16
-    elif Config.HISTORY_LENGTH >= 96: patch_len = 12
-    elif Config.HISTORY_LENGTH >= 48: patch_len = 8
-    else:                             patch_len = 6
-    stride   = patch_len // 2
+    # PatchTST — v12: правильные patch_len/stride для каждого HISTORY_LENGTH
+    # При history=168: patch_len=24, stride=12, n_patches=13 (1 патч = 1 сутки)
+    # При history=192: patch_len=24, stride=12, n_patches=15
+    # При history=96:  patch_len=12, stride=6,  n_patches=15
+    # При history=48:  patch_len=8,  stride=4,  n_patches=11
+    if Config.HISTORY_LENGTH >= 192:
+        patch_len = 24; stride = 12
+    elif Config.HISTORY_LENGTH >= 168:
+        patch_len = 24; stride = 12   # 1 патч = 1 сутки, семантически осмысленно
+    elif Config.HISTORY_LENGTH >= 96:
+        patch_len = 12; stride = 6
+    elif Config.HISTORY_LENGTH >= 48:
+        patch_len = 8; stride = 4
+    else:
+        patch_len = 6; stride = 3
+
+    n_patches_expected = (Config.HISTORY_LENGTH - patch_len) // stride + 1
+    logger.info(
+        "PatchTST patch_len=%d stride=%d → n_patches=%d "
+        "(history=%d, 1 patch=%dh)",
+        patch_len, stride, n_patches_expected, Config.HISTORY_LENGTH, patch_len
+    )
+
     patchtst = build_patchtst(
         history_length=Config.HISTORY_LENGTH,
         forecast_horizon=Config.FORECAST_HORIZON,
@@ -221,10 +241,10 @@ def main():
         learning_rate=Config.TRANSFORMER_LEARNING_RATE,
         stochastic_depth_rate=Config.TRANSFORMER_STOCHASTIC_DEPTH,
         use_revin=Config.PATCHTST_USE_REVIN,
-        huber_delta=0.02,              # v11
+        huber_delta=0.02,
     )
 
-    # TFT-Lite (исправленный вызов — без n_features как отдельного аргумента)
+    # TFT-Lite
     use_tft = False
     tft_lite = None
     try:
@@ -263,7 +283,7 @@ def main():
                 count_parameters(lstm), count_parameters(vanilla_tr), count_parameters(patchtst))
 
     # [5/10] Обучение
-    logger.info("\n[5/10] Обучение моделей (на Y_diff)...")
+    logger.info("\n[5/10] Обучение моделей (на Y_diff, naive=%s)...", naive_type)
     models_to_train = [
         (lstm,       "LSTM"),
         (vanilla_tr, "VanillaTransformer"),
@@ -288,7 +308,7 @@ def main():
         if trainer.history is not None:
             plot_training_history(trainer.history, model_name=name, plots_dir=Config.PLOTS_DIR)
 
-    # [5b/10] WeightedEnsemble — оптимизация в абсолютном пространстве (кВт·ч)
+    # [5b/10] WeightedEnsemble
     logger.info("\n[5b/10] WeightedEnsemble (оптимизация в абсолютном пространстве)...")
     single_trainers = [t for t in trainers if t.model_name != "TFT-Lite"]
     ensemble = WeightedEnsemble(single_trainers, model_name="WeightedEnsemble")
@@ -304,7 +324,7 @@ def main():
     all_metrics, best_name = compare_trainers(trainers_all, data, split="test", select_by="composite")
     plot_metrics_comparison(all_metrics, plots_dir=Config.PLOTS_DIR)
 
-    # Визуализация — используем predict_absolute для всех тренеров
+    # Визуализация
     scaler = data["scaler"]
     predictions = {}
     for t in trainers_all:
@@ -317,17 +337,16 @@ def main():
                     predictions[t.model_name] = _inv(scaler, (raw + naive).clip(0))
                 else:
                     predictions[t.model_name] = _inv(scaler, raw)
+            elif isinstance(t, WeightedEnsemble):
+                raw = t.predict(data["X_test"])
+                from data.preprocessing import inverse_scale as _inv
+                if data["seasonal_diff"]:
+                    naive = data["Y_seasonal_naive_test"]
+                    predictions[t.model_name] = _inv(scaler, (raw + naive).clip(0))
+                else:
+                    predictions[t.model_name] = _inv(scaler, raw)
             else:
-                predictions[t.model_name] = t.predict_absolute(data, split="test") if hasattr(t, "predict_absolute") else t.evaluate(data)["MAE"]
-                # fallback для WeightedEnsemble у которого нет predict_absolute
-                if isinstance(t, WeightedEnsemble):
-                    raw = t.predict(data["X_test"])
-                    from data.preprocessing import inverse_scale as _inv
-                    if data["seasonal_diff"]:
-                        naive = data["Y_seasonal_naive_test"]
-                        predictions[t.model_name] = _inv(scaler, (raw + naive).clip(0))
-                    else:
-                        predictions[t.model_name] = _inv(scaler, raw)
+                predictions[t.model_name] = t.predict_absolute(data, split="test")
         except Exception as exc:
             logger.warning("predict_absolute %s: %s", t.model_name, exc)
 
@@ -375,7 +394,7 @@ def main():
         best_pred = best_trainer.predict_absolute(data, "test") if hasattr(best_trainer, "predict_absolute") else y_true
     analyze_residuals(y_true, best_pred, model_name=best_name, plots_dir=Config.PLOTS_DIR)
 
-    # [9/10] Бэктестинг (на LSTM)
+    # [9/10] Бэктестинг
     logger.info("\n[9/10] Бэктестинг (LSTM)...")
     lstm_trainer = next((t for t in trainers if t.model_name == "LSTM"), trainers[0])
     run_backtesting(lstm_trainer.model, data, n_windows=8,
@@ -385,7 +404,6 @@ def main():
     logger.info("\n[9b/10] MC Dropout (LSTM)...")
     try:
         mc_mean, mc_std = lstm_trainer.mc_predict(data["X_test"][:500], n_samples=30)
-        # MC std — в пространстве diff, масштабируем приблизительно
         mc_std_kwh = float(mc_std.mean()) * float(scaler.scale_[0]) if hasattr(scaler, "scale_") else float(mc_std.mean())
         logger.info("MC Dropout | mean diff uncertainty: ±%.4f (scaled)", float(mc_std.mean()))
     except Exception as exc:
@@ -421,15 +439,16 @@ def main():
 
     # Экспорт
     best_keras = next((t for t in trainers_all
-                       if t.model_name == best_name and isinstance(getattr(t,"model",None), tf.keras.Model)), None)
+                       if t.model_name == best_name and isinstance(getattr(t, "model", None), tf.keras.Model)), None)
     if best_keras is None:
-        best_keras = next((t for t in trainers if isinstance(getattr(t,"model",None), tf.keras.Model)), None)
+        best_keras = next((t for t in trainers if isinstance(getattr(t, "model", None), tf.keras.Model)), None)
     if best_keras is not None:
         export_model_bundle(
             best_keras.model, scaler,
             {"HISTORY_LENGTH": Config.HISTORY_LENGTH, "FORECAST_HORIZON": Config.FORECAST_HORIZON,
              "N_FEATURES": Config.N_FEATURES, "model_name": best_keras.model_name,
-             "lag_feature_start_idx": lag_idx, "seasonal_diff": True},
+             "lag_feature_start_idx": lag_idx, "seasonal_diff": True,
+             "naive_type": naive_type},
             export_dir=Config.MODELS_DIR, model_name=best_keras.model_name,
         )
 
@@ -440,8 +459,10 @@ def main():
     logger.info("Итог (sorted by composite_score):")
     for name, m in sorted(all_metrics.items(), key=lambda kv: kv[1].get("composite_score", 999)):
         logger.info("  %-24s MAE=%7.2f R²=%.4f ACF24=%.3f Composite=%.3f",
-                    name, m["MAE"], m["R2"], m.get("ACF_24",float("nan")), m.get("composite_score",float("nan")))
+                    name, m["MAE"], m["R2"], m.get("ACF_24", float("nan")),
+                    m.get("composite_score", float("nan")))
     logger.info("📁 %s", Config.OUTPUT_DIR)
+    logger.info("Naive strategy: %s", naive_type)
     logger.info("=" * 70)
 
 

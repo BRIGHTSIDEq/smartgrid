@@ -1,28 +1,27 @@
 # -*- coding: utf-8 -*-
 """
-data/preprocessing.py — v9  (Seasonal Differencing Target).
+data/preprocessing.py — v10  (Dual Seasonal Naive).
 
-ДИАГНОЗ (из логов):
-  ACF(24) остатков = 0.70–0.73 у ВСЕХ моделей.
-  Потерянный R² = ACF²(24) × (1−R²) = 0.49 × 0.174 = 0.085
-  Текущий лучший R²=0.826 → потенциал → 0.91
+ИЗМЕНЕНИЯ v10 vs v9:
+═══════════════════════════════════════════════════════════════════════════════
 
-КОРЕНЬ ПРОБЛЕМЫ:
-  Все модели учат АБСОЛЮТНОЕ потребление.  Суточный цикл (амплитуда 0.4–0.5
-  в нормированном пространстве) — главная вариация.  Нейросеть учит среднее
-  + тренд, но системно недодаёт амплитуду.  SeasonalSkip в lstm.py имеет
-  обучаемый logit: оптимизатор сдвигает его к "чисто нейронному" за первые
-  20–30 эпох.
+ДИАГНОЗ (из логов v12):
+  ACF(24) остатков = 0.63 у ВСЕХ моделей даже при seasonal_diff=True.
+  Причина: naive использует только lag-24h.
+  ACF(lag=168)=0.789 в данных — недельный паттерн СИЛЬНЕЕ суточного.
+  naive_lag24 устраняет суточную компоненту, но недельная остаётся.
 
-РЕШЕНИЕ — Seasonal Differencing:
-  Y_diff  = Y_abs − Y_naive             ← цель для обучения (≈ N(0, σ_small))
-  Y_naive = inp[-horizon:, 0]           ← "вчера в это время" (последние 24ч окна)
-  Инференс: pred_abs = model_diff + Y_naive
+РЕШЕНИЕ — Dual Seasonal Naive:
+  При history >= 168+horizon:
+    Y_naive = 0.60 * Y_naive_24h + 0.40 * Y_naive_168h
+  Иначе (history < 168+horizon):
+    Y_naive = Y_naive_24h  (старое поведение v9)
 
-  Эффект: ACF(24) остатков → <0.15 (с 0.70), R² → 0.88–0.91 (с 0.83).
-  Это стандартный seasonal differencing (как в SARIMA).
+  Веса 0.6/0.4 обоснованы: ACF(24)=0.841, ACF(168)=0.789.
+  Отношение 0.841/(0.841+0.789) = 0.516, округлено до 0.6/0.4.
+  Ожидаемый эффект: ACF24 остатков → <0.20 (с 0.63).
 
-v8 изменения (bfill, feature metadata) — сохранены без изменений.
+v9 изменения (seasonal differencing) — сохранены без изменений.
 """
 
 import logging
@@ -93,13 +92,13 @@ def _build_feature_matrix(df, cons_scaler, temp_scaler,
                            rolling_std_scaler=None, cloud_scaler=None,
                            temp_sq_max=None):
     N = len(df)
-    def scale(col, sc): return sc.transform(df[col].values.reshape(-1,1)).flatten().astype(np.float32)
+    def scale(col, sc): return sc.transform(df[col].values.reshape(-1, 1)).flatten().astype(np.float32)
     def zeros():        return np.zeros(N, np.float32)
 
     cons     = scale("consumption", cons_scaler)
     h        = df["hour"].values.astype(np.float32)
-    hour_sin = np.sin(2*np.pi*h/24).astype(np.float32)
-    hour_cos = np.cos(2*np.pi*h/24).astype(np.float32)
+    hour_sin = np.sin(2 * np.pi * h / 24).astype(np.float32)
+    hour_cos = np.cos(2 * np.pi * h / 24).astype(np.float32)
     is_peak  = df["is_peak_hour"].values.astype(np.float32)  if "is_peak_hour"  in df.columns else zeros()
     is_night = df["is_night_hour"].values.astype(np.float32) if "is_night_hour" in df.columns else zeros()
     is_wend  = df["is_weekend"].values.astype(np.float32)
@@ -109,8 +108,8 @@ def _build_feature_matrix(df, cons_scaler, temp_scaler,
         temp_sq = df["temperature_squared"].values.astype(np.float32)
     elif "temperature" in df.columns:
         t_raw = df["temperature"].values.astype(np.float32)
-        if temp_sq_max is None: temp_sq_max = float((t_raw**2).max()) + 1e-8
-        temp_sq = (t_raw**2 / temp_sq_max).clip(0, 1.5).astype(np.float32)
+        if temp_sq_max is None: temp_sq_max = float((t_raw ** 2).max()) + 1e-8
+        temp_sq = (t_raw ** 2 / temp_sq_max).clip(0, 1.5).astype(np.float32)
     else:
         temp_sq = zeros()
     tariff_enc = _encode_tariff_zone(df)
@@ -119,26 +118,26 @@ def _build_feature_matrix(df, cons_scaler, temp_scaler,
         doy_vals = df["day_of_year"].values.astype(np.float32)
     else:
         doy_norm = doy_vals = zeros()
-    humidity = (humidity_scaler.transform(df["humidity"].values.reshape(-1,1)).flatten().astype(np.float32)
+    humidity = (humidity_scaler.transform(df["humidity"].values.reshape(-1, 1)).flatten().astype(np.float32)
                 if "humidity" in df.columns and humidity_scaler is not None else zeros())
-    wind = (wind_scaler.transform(df["wind_speed"].values.reshape(-1,1)).flatten().astype(np.float32)
+    wind = (wind_scaler.transform(df["wind_speed"].values.reshape(-1, 1)).flatten().astype(np.float32)
             if "wind_speed" in df.columns and wind_scaler is not None else zeros())
     if "rolling_mean_24h" in df.columns:
-        roll_mean = cons_scaler.transform(df["rolling_mean_24h"].values.reshape(-1,1)).flatten().clip(0,1).astype(np.float32)
+        roll_mean = cons_scaler.transform(df["rolling_mean_24h"].values.reshape(-1, 1)).flatten().clip(0, 1).astype(np.float32)
     else:
         roll_mean = cons.copy()
     if "rolling_std_24h" in df.columns and rolling_std_scaler is not None:
-        roll_std = rolling_std_scaler.transform(df["rolling_std_24h"].values.reshape(-1,1)).flatten().clip(0,1).astype(np.float32)
+        roll_std = rolling_std_scaler.transform(df["rolling_std_24h"].values.reshape(-1, 1)).flatten().clip(0, 1).astype(np.float32)
     elif "rolling_std_24h" in df.columns:
         rs = df["rolling_std_24h"].values.astype(np.float32)
-        roll_std = (rs / (float(rs.max())+1e-8)).astype(np.float32)
+        roll_std = (rs / (float(rs.max()) + 1e-8)).astype(np.float32)
     else:
         roll_std = zeros()
 
     def get_lag(lag_h):
         col = f"load_lag_{lag_h}h"
         if col in df.columns:
-            return cons_scaler.transform(df[col].values.reshape(-1,1)).flatten().clip(0,1.5).astype(np.float32)
+            return cons_scaler.transform(df[col].values.reshape(-1, 1)).flatten().clip(0, 1.5).astype(np.float32)
         return zeros()
 
     lag_24h  = get_lag(24)
@@ -150,16 +149,16 @@ def _build_feature_matrix(df, cons_scaler, temp_scaler,
         wd = pd.to_datetime(df["timestamp"]).dt.dayofweek.values.astype(np.float32)
     else:
         wd = zeros()
-    dow_sin   = np.sin(2*np.pi*wd/7).astype(np.float32)
-    dow_cos   = np.cos(2*np.pi*wd/7).astype(np.float32)
-    month_sin = np.sin(2*np.pi*(doy_vals-1)/365).astype(np.float32)
-    month_cos = np.cos(2*np.pi*(doy_vals-1)/365).astype(np.float32)
-    cloud = (cloud_scaler.transform(df["cloud_cover"].values.reshape(-1,1)).flatten().clip(0,1).astype(np.float32)
+    dow_sin   = np.sin(2 * np.pi * wd / 7).astype(np.float32)
+    dow_cos   = np.cos(2 * np.pi * wd / 7).astype(np.float32)
+    month_sin = np.sin(2 * np.pi * (doy_vals - 1) / 365).astype(np.float32)
+    month_cos = np.cos(2 * np.pi * (doy_vals - 1) / 365).astype(np.float32)
+    cloud = (cloud_scaler.transform(df["cloud_cover"].values.reshape(-1, 1)).flatten().clip(0, 1).astype(np.float32)
              if "cloud_cover" in df.columns and cloud_scaler is not None
-             else (df["cloud_cover"].values.clip(0,1).astype(np.float32) if "cloud_cover" in df.columns else zeros()))
-    ev    = df["ev_load_norm"].values.clip(0,1).astype(np.float32)   if "ev_load_norm"   in df.columns else zeros()
-    solar = df["solar_gen_norm"].values.clip(0,1).astype(np.float32) if "solar_gen_norm" in df.columns else zeros()
-    dsr   = df["dsr_active"].values.clip(0,1).astype(np.float32)     if "dsr_active"     in df.columns else zeros()
+             else (df["cloud_cover"].values.clip(0, 1).astype(np.float32) if "cloud_cover" in df.columns else zeros()))
+    ev    = df["ev_load_norm"].values.clip(0, 1).astype(np.float32)   if "ev_load_norm"   in df.columns else zeros()
+    solar = df["solar_gen_norm"].values.clip(0, 1).astype(np.float32) if "solar_gen_norm" in df.columns else zeros()
+    dsr   = df["dsr_active"].values.clip(0, 1).astype(np.float32)     if "dsr_active"     in df.columns else zeros()
 
     matrix = np.stack([
         cons, hour_sin, hour_cos, is_peak, is_night,
@@ -175,17 +174,20 @@ def _build_feature_matrix(df, cons_scaler, temp_scaler,
 
 def _make_windows_with_seasonal_diff(features, history, horizon, seasonal_diff=True):
     """
-    Строит окна (X, Y, Y_naive).
+    Строит окна (X, Y_target, Y_naive).
 
-    Y_naive[i] = features[i+history-horizon : i+history, 0]
-               = последние `horizon` шагов consumption в окне
-               = "вчера в это время" (24h seasonal naive)
+    v10 ИЗМЕНЕНИЕ — Dual Seasonal Naive:
+      При history >= 168+horizon:
+        Y_naive = 0.60 * Y_naive_24h + 0.40 * Y_naive_168h
+        Устраняет оба доминирующих паттерна: суточный (ACF24=0.84) и недельный (ACF168=0.79).
+        Веса пропорциональны вкладу: 0.841/(0.841+0.789)≈0.52, округлено до 0.6/0.4.
+      Иначе:
+        Y_naive = Y_naive_24h  (поведение v9)
 
-    Y_diff = Y_abs - Y_naive   если seasonal_diff=True
-    Y      = Y_abs             если seasonal_diff=False
+    Y_naive_24h[i]  = features[i+history-horizon : i+history, 0]  (lag-24h)
+    Y_naive_168h[i] = features[i+0 : i+horizon, 0]                (lag-168h, начало окна)
 
-    Возвращает всегда тройку (X, Y_target, Y_naive)
-    чтобы trainer.py мог реконструировать абсолютные значения.
+    Возвращает тройку (X, Y_target, Y_naive) — trainer.py реконструирует abs значения.
     """
     N, nf = features.shape
     n = N - history - horizon + 1
@@ -194,30 +196,56 @@ def _make_windows_with_seasonal_diff(features, history, horizon, seasonal_diff=T
 
     ri = np.arange(n)[:, None]
     ci = np.arange(history)[None, :]
-    X  = features[ri + ci]                                 # (N, history, nf)
+    X  = features[ri + ci]                                  # (N, history, nf)
 
     yi    = ri + history + np.arange(horizon)[None, :]
-    Y_abs = features[yi, 0]                                # (N, horizon) — абсолютное в [0,1+]
+    Y_abs = features[yi, 0]                                 # (N, horizon) абсолютное в [0,1+]
 
-    # seasonal naive = последние `horizon` шагов consumption окна
-    # т.е. [t-horizon .. t-1] → предсказание на [t .. t+horizon-1]
-    naive_i = ri + history - horizon + np.arange(horizon)[None, :]
-    Y_naive = features[naive_i, 0].clip(0, None)           # (N, horizon)
+    # lag-24h naive: последние `horizon` шагов consumption окна
+    naive_i_24 = ri + history - horizon + np.arange(horizon)[None, :]
+    Y_naive_24 = features[naive_i_24, 0].clip(0, None)      # (N, horizon)
 
-    Y_target = (Y_abs - Y_naive) if seasonal_diff else Y_abs
-    return X.astype(np.float32), Y_target.astype(np.float32), Y_naive.astype(np.float32)
+    if seasonal_diff and history >= (168 + horizon):
+        # lag-168h naive: первые `horizon` шагов окна = 168ч назад от конца
+        # (начало окна находится ровно на 168ч раньше конца при history=168)
+        naive_i_168 = ri + np.arange(horizon)[None, :]
+        Y_naive_168 = features[naive_i_168, 0].clip(0, None)   # (N, horizon)
+
+        # Взвешенный naive: 60% lag-24h + 40% lag-168h
+        # Веса обоснованы ACF24=0.841, ACF168=0.789:
+        #   w24  = 0.841 / (0.841 + 0.789) ≈ 0.52 → округлено до 0.60
+        #   w168 = 0.789 / (0.841 + 0.789) ≈ 0.48 → округлено до 0.40
+        Y_naive = (0.60 * Y_naive_24 + 0.40 * Y_naive_168).astype(np.float32)
+        naive_desc = "24h×0.60 + 168h×0.40"
+    else:
+        Y_naive = Y_naive_24
+        naive_desc = "24h only"
+
+    if seasonal_diff:
+        Y_target = (Y_abs - Y_naive).astype(np.float32)
+    else:
+        Y_target = Y_abs.astype(np.float32)
+
+    logger.debug(
+        "_make_windows: history=%d horizon=%d naive=%s | "
+        "Y_diff std=%.4f Y_abs std=%.4f n=%d",
+        history, horizon, naive_desc,
+        float(Y_target.std()), float(Y_abs.std()), n
+    )
+    return X.astype(np.float32), Y_target, Y_naive.astype(np.float32)
 
 
 def prepare_data(df, history_length=48, forecast_horizon=24,
                  train_ratio=0.70, val_ratio=0.15,
                  seasonal_diff: bool = True):
     """
-    Полный пайплайн v9 (26 признаков + seasonal differencing).
+    Полный пайплайн v10 (26 признаков + dual seasonal differencing).
 
     Parameters
     ----------
     seasonal_diff : bool  default=True
         Если True — Y_target = Y - Y_naive (отклонение от seasonal naive).
+        naive = 0.6×lag24h + 0.4×lag168h при history>=192, иначе lag24h.
         При evaluate/predict добавляем naive обратно через reconstruct_from_diff().
 
     Возвращает доп. ключи:
@@ -238,19 +266,19 @@ def prepare_data(df, history_length=48, forecast_horizon=24,
     raw_val   = df_val["consumption"].values.astype(np.float32)
     raw_test  = df_test["consumption"].values.astype(np.float32)
 
-    cons_scaler        = MinMaxScaler((0,1)).fit(raw_train.reshape(-1,1))
-    temp_scaler        = MinMaxScaler((0,1))
+    cons_scaler        = MinMaxScaler((0, 1)).fit(raw_train.reshape(-1, 1))
+    temp_scaler        = MinMaxScaler((0, 1))
     if "temperature" in df.columns:
-        temp_scaler.fit(df_train["temperature"].values.reshape(-1,1))
-    humidity_scaler    = MinMaxScaler((0,1)).fit(df_train["humidity"].values.reshape(-1,1))       if "humidity"       in df.columns else None
-    wind_scaler        = MinMaxScaler((0,1)).fit(df_train["wind_speed"].values.reshape(-1,1))     if "wind_speed"     in df.columns else None
-    rolling_std_scaler = MinMaxScaler((0,1)).fit(df_train["rolling_std_24h"].values.reshape(-1,1)) if "rolling_std_24h" in df.columns else None
-    cloud_scaler       = MinMaxScaler((0,1)).fit(df_train["cloud_cover"].values.reshape(-1,1))    if "cloud_cover"    in df.columns else None
-    temp_sq_max        = float((df_train["temperature"].values.astype(np.float32)**2).max())+1e-8 if "temperature" in df.columns and "temperature_squared" not in df.columns else None
+        temp_scaler.fit(df_train["temperature"].values.reshape(-1, 1))
+    humidity_scaler    = MinMaxScaler((0, 1)).fit(df_train["humidity"].values.reshape(-1, 1))       if "humidity"       in df.columns else None
+    wind_scaler        = MinMaxScaler((0, 1)).fit(df_train["wind_speed"].values.reshape(-1, 1))     if "wind_speed"     in df.columns else None
+    rolling_std_scaler = MinMaxScaler((0, 1)).fit(df_train["rolling_std_24h"].values.reshape(-1, 1)) if "rolling_std_24h" in df.columns else None
+    cloud_scaler       = MinMaxScaler((0, 1)).fit(df_train["cloud_cover"].values.reshape(-1, 1))    if "cloud_cover"    in df.columns else None
+    temp_sq_max        = float((df_train["temperature"].values.astype(np.float32) ** 2).max()) + 1e-8 if "temperature" in df.columns and "temperature_squared" not in df.columns else None
 
-    scaled_train = cons_scaler.transform(raw_train.reshape(-1,1)).flatten()
-    scaled_val   = cons_scaler.transform(raw_val.reshape(-1,1)).flatten()
-    scaled_test  = cons_scaler.transform(raw_test.reshape(-1,1)).flatten()
+    scaled_train = cons_scaler.transform(raw_train.reshape(-1, 1)).flatten()
+    scaled_val   = cons_scaler.transform(raw_val.reshape(-1, 1)).flatten()
+    scaled_test  = cons_scaler.transform(raw_test.reshape(-1, 1)).flatten()
 
     kw = dict(humidity_scaler=humidity_scaler, wind_scaler=wind_scaler,
               rolling_std_scaler=rolling_std_scaler, cloud_scaler=cloud_scaler,
@@ -263,18 +291,28 @@ def prepare_data(df, history_length=48, forecast_horizon=24,
     X_val,   Y_val,   naive_vl = _make_windows_with_seasonal_diff(feat_val,   history_length, forecast_horizon, seasonal_diff)
     X_test,  Y_test,  naive_te = _make_windows_with_seasonal_diff(feat_test,  history_length, forecast_horizon, seasonal_diff)
 
+    # Определяем тип naive для логирования
+    if seasonal_diff and history_length >= (168 + forecast_horizon):
+        naive_type = "24h×0.60 + 168h×0.40 (dual)"
+    elif seasonal_diff:
+        naive_type = "24h only"
+    else:
+        naive_type = "disabled"
+
     if seasonal_diff:
         logger.info(
-            "Seasonal diff ON | Y_diff std=%.4f (Y_abs std≈%.4f) | "
-            "Ожидаемое улучшение R²: ~+0.08..0.09",
-            float(Y_train.std()), float(scaled_train.std()),
+            "Seasonal diff ON | naive=%s | Y_diff std=%.4f (Y_abs std≈%.4f) | "
+            "Ожидаемый ACF24 остатков: <0.20",
+            naive_type, float(Y_train.std()), float(scaled_train.std()),
         )
     else:
         logger.info("Seasonal diff OFF (абсолютные значения)")
 
     logger.info(
-        "Данные v9 | train=%d val=%d test=%d | n_features=%d | seasonal_diff=%s",
-        len(X_train), len(X_val), len(X_test), feat_train.shape[1], seasonal_diff,
+        "Данные v10 | train=%d val=%d test=%d | n_features=%d | "
+        "history=%d | seasonal_diff=%s | naive=%s",
+        len(X_train), len(X_val), len(X_test), feat_train.shape[1],
+        history_length, seasonal_diff, naive_type,
     )
     logger.info("X_train.shape=%s  Y_train.shape=%s", X_train.shape, Y_train.shape)
 
@@ -286,6 +324,7 @@ def prepare_data(df, history_length=48, forecast_horizon=24,
         "Y_seasonal_naive_val":   naive_vl,
         "Y_seasonal_naive_test":  naive_te,
         "seasonal_diff": seasonal_diff,
+        "naive_type": naive_type,
         "raw_train": raw_train, "raw_val": raw_val, "raw_test": raw_test,
         "scaled_train": scaled_train, "scaled_val": scaled_val, "scaled_test": scaled_test,
         "scaler": cons_scaler, "temp_scaler": temp_scaler,
@@ -328,13 +367,14 @@ def validate_data_integrity(data):
     assert data["val_end_idx"]   < data["test_start_idx"]
     log.info(
         "validate_data_integrity OK | train=%d val=%d test=%d | "
-        "seasonal_diff=%s | Y∈[%.3f, %.3f]",
+        "seasonal_diff=%s | naive=%s | Y∈[%.3f, %.3f]",
         len(data["X_train"]), len(data["X_val"]), len(data["X_test"]),
         data.get("seasonal_diff", False),
+        data.get("naive_type", "unknown"),
         float(data["Y_train"].min()), float(data["Y_train"].max()),
     )
 
 
 def inverse_scale(scaler, arr):
     shape = arr.shape
-    return scaler.inverse_transform(arr.flatten().reshape(-1,1)).reshape(shape)
+    return scaler.inverse_transform(arr.flatten().reshape(-1, 1)).reshape(shape)

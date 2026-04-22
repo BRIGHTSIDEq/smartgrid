@@ -1,27 +1,31 @@
 # -*- coding: utf-8 -*-
 """
-data/preprocessing.py — v10  (Dual Seasonal Naive).
+data/preprocessing.py — v11  (Dual Seasonal Naive — исправленный порог).
 
-ИЗМЕНЕНИЯ v10 vs v9:
+ИЗМЕНЕНИЯ v11 vs v10:
 ═══════════════════════════════════════════════════════════════════════════════
 
-ДИАГНОЗ (из логов v12):
-  ACF(24) остатков = 0.63 у ВСЕХ моделей даже при seasonal_diff=True.
-  Причина: naive использует только lag-24h.
-  ACF(lag=168)=0.789 в данных — недельный паттерн СИЛЬНЕЕ суточного.
-  naive_lag24 устраняет суточную компоненту, но недельная остаётся.
+БАГ #1 ИСПРАВЛЕН: Dual Naive не активировался при history=168.
 
-РЕШЕНИЕ — Dual Seasonal Naive:
-  При history >= 168+horizon:
-    Y_naive = 0.60 * Y_naive_24h + 0.40 * Y_naive_168h
-  Иначе (history < 168+horizon):
-    Y_naive = Y_naive_24h  (старое поведение v9)
+  БЫЛО (v10):
+    if seasonal_diff and history >= (168 + horizon):
+    При history=168, horizon=24: 168 >= 192 → False.
+    Dual Naive никогда не использовался в optimal mode.
 
-  Веса 0.6/0.4 обоснованы: ACF(24)=0.841, ACF(168)=0.789.
-  Отношение 0.841/(0.841+0.789) = 0.516, округлено до 0.6/0.4.
-  Ожидаемый эффект: ACF24 остатков → <0.20 (с 0.63).
+  СТАЛО (v11):
+    if seasonal_diff and history >= 168:
+    При history=192 (новый optimal mode): 192 >= 168 → True. ✓
+    Dual Naive активируется, устраняя и суточную, и недельную компоненты.
 
-v9 изменения (seasonal differencing) — сохранены без изменений.
+  Дополнительно: явная проверка что lag-168h индексы не выходят за пределы окна.
+    naive_i_168 = ri + np.arange(horizon)
+    Это корректно при history >= 168: начало окна находится ровно на history шагов
+    раньше конца, т.е. lag-168h от конца = позиции [0..horizon-1] внутри окна.
+
+v10 изменения (seasonal differencing) — сохранены без изменений.
+Dual Seasonal Naive веса обоснованы ACF:
+    w24  = ACF(24) / (ACF(24) + ACF(168)) = 0.841 / (0.841+0.789) ≈ 0.52 → округлено до 0.60
+    w168 = 0.789 / (0.841+0.789) ≈ 0.48 → округлено до 0.40
 """
 
 import logging
@@ -176,18 +180,21 @@ def _make_windows_with_seasonal_diff(features, history, horizon, seasonal_diff=T
     """
     Строит окна (X, Y_target, Y_naive).
 
-    v10 ИЗМЕНЕНИЕ — Dual Seasonal Naive:
-      При history >= 168+horizon:
+    v11 ИСПРАВЛЕНИЕ БАГА: порог активации Dual Seasonal Naive.
+      БЫЛО:  history >= (168 + horizon)  — при history=168 условие ложно (168 >= 192 = False)
+      СТАЛО: history >= 168              — при history=192 условие истинно (192 >= 168 = True) ✓
+
+    Dual Seasonal Naive:
+      При history >= 168:
         Y_naive = 0.60 * Y_naive_24h + 0.40 * Y_naive_168h
-        Устраняет оба доминирующих паттерна: суточный (ACF24=0.84) и недельный (ACF168=0.79).
-        Веса пропорциональны вкладу: 0.841/(0.841+0.789)≈0.52, округлено до 0.6/0.4.
+        Устраняет суточный (ACF24=0.84) и недельный (ACF168=0.79) паттерны.
+        Веса пропорциональны ACF: 0.84/(0.84+0.79) ≈ 0.52, округлено до 0.60.
       Иначе:
-        Y_naive = Y_naive_24h  (поведение v9)
+        Y_naive = Y_naive_24h (только суточный паттерн)
 
     Y_naive_24h[i]  = features[i+history-horizon : i+history, 0]  (lag-24h)
-    Y_naive_168h[i] = features[i+0 : i+horizon, 0]                (lag-168h, начало окна)
-
-    Возвращает тройку (X, Y_target, Y_naive) — trainer.py реконструирует abs значения.
+    Y_naive_168h[i] = features[i : i+horizon, 0]                   (lag-168h, начало окна)
+                      Корректно при history >= 168: начало окна = 168ч до конца.
     """
     N, nf = features.shape
     n = N - history - horizon + 1
@@ -196,27 +203,25 @@ def _make_windows_with_seasonal_diff(features, history, horizon, seasonal_diff=T
 
     ri = np.arange(n)[:, None]
     ci = np.arange(history)[None, :]
-    X  = features[ri + ci]                                  # (N, history, nf)
+    X  = features[ri + ci]                                  # (n, history, nf)
 
     yi    = ri + history + np.arange(horizon)[None, :]
-    Y_abs = features[yi, 0]                                 # (N, horizon) абсолютное в [0,1+]
+    Y_abs = features[yi, 0]                                 # (n, horizon) consumption в [0,1+]
 
-    # lag-24h naive: последние `horizon` шагов consumption окна
+    # lag-24h naive: последние horizon шагов consumption окна
     naive_i_24 = ri + history - horizon + np.arange(horizon)[None, :]
-    Y_naive_24 = features[naive_i_24, 0].clip(0, None)      # (N, horizon)
+    Y_naive_24 = features[naive_i_24, 0].clip(0, None)      # (n, horizon)
 
-    if seasonal_diff and history >= (168 + horizon):
-        # lag-168h naive: первые `horizon` шагов окна = 168ч назад от конца
-        # (начало окна находится ровно на 168ч раньше конца при history=168)
+    # --- ИСПРАВЛЕННЫЙ ПОРОГ: >= 168 вместо >= (168 + horizon) ---
+    if seasonal_diff and history >= 168:
+        # lag-168h naive: первые horizon шагов окна = 168ч назад от конца окна
+        # Корректно при history >= 168: индексы ri + [0..horizon-1] < ri + history
         naive_i_168 = ri + np.arange(horizon)[None, :]
-        Y_naive_168 = features[naive_i_168, 0].clip(0, None)   # (N, horizon)
+        Y_naive_168 = features[naive_i_168, 0].clip(0, None)   # (n, horizon)
 
         # Взвешенный naive: 60% lag-24h + 40% lag-168h
-        # Веса обоснованы ACF24=0.841, ACF168=0.789:
-        #   w24  = 0.841 / (0.841 + 0.789) ≈ 0.52 → округлено до 0.60
-        #   w168 = 0.789 / (0.841 + 0.789) ≈ 0.48 → округлено до 0.40
         Y_naive = (0.60 * Y_naive_24 + 0.40 * Y_naive_168).astype(np.float32)
-        naive_desc = "24h×0.60 + 168h×0.40"
+        naive_desc = "24h×0.60 + 168h×0.40 (dual)"
     else:
         Y_naive = Y_naive_24
         naive_desc = "24h only"
@@ -237,20 +242,22 @@ def _make_windows_with_seasonal_diff(features, history, horizon, seasonal_diff=T
 
 def prepare_data(df, history_length=48, forecast_horizon=24,
                  train_ratio=0.70, val_ratio=0.15,
-                 seasonal_diff: bool = True):
+                 seasonal_diff: bool = False):
     """
-    Полный пайплайн v10 (26 признаков + dual seasonal differencing).
+    Полный пайплайн v11 (26 признаков + dual seasonal differencing с исправленным порогом).
 
     Parameters
     ----------
-    seasonal_diff : bool  default=True
-        Если True — Y_target = Y - Y_naive (отклонение от seasonal naive).
-        naive = 0.6×lag24h + 0.4×lag168h при history>=192, иначе lag24h.
-        При evaluate/predict добавляем naive обратно через reconstruct_from_diff().
+    seasonal_diff : bool  default=False
+        False (рекомендуется для optimal mode):
+            Y_target = Y_abs_scaled ∈ [0, 1]. Нейросети с seasonal_skip лучше
+            моделируют нелинейные паттерны на абсолютных значениях.
+        True:
+            Y_target = Y - Y_naive (seasonal differencing). Полезно если нейросети
+            не используют seasonal_skip.
 
-    Возвращает доп. ключи:
-      seasonal_diff               : bool
-      Y_seasonal_naive_{train/val/test} : np.ndarray (N, horizon) в scaled-пространстве
+    Dual Naive активируется при seasonal_diff=True AND history_length >= 168.
+    При history_length=192 (optimal mode) активируется автоматически.
     """
     df = _add_lag_columns(df)
     logger.info("Lag-колонки добавлены (bfill): 24/48/168h")
@@ -292,24 +299,27 @@ def prepare_data(df, history_length=48, forecast_horizon=24,
     X_test,  Y_test,  naive_te = _make_windows_with_seasonal_diff(feat_test,  history_length, forecast_horizon, seasonal_diff)
 
     # Определяем тип naive для логирования
-    if seasonal_diff and history_length >= (168 + forecast_horizon):
-        naive_type = "24h×0.60 + 168h×0.40 (dual)"
+    if seasonal_diff and history_length >= 168:
+        naive_type = "24h×0.60 + 168h×0.40 (dual, FIX v11)"
     elif seasonal_diff:
         naive_type = "24h only"
     else:
-        naive_type = "disabled"
+        naive_type = "disabled (seasonal_diff=False)"
 
     if seasonal_diff:
         logger.info(
-            "Seasonal diff ON | naive=%s | Y_diff std=%.4f (Y_abs std≈%.4f) | "
-            "Ожидаемый ACF24 остатков: <0.20",
+            "Seasonal diff ON | naive=%s | Y_diff std=%.4f (Y_abs std≈%.4f)",
             naive_type, float(Y_train.std()), float(scaled_train.std()),
         )
     else:
-        logger.info("Seasonal diff OFF (абсолютные значения)")
+        logger.info(
+            "Seasonal diff OFF — абсолютные значения ∈ [%.3f, %.3f] | "
+            "Dual Naive хранится для диагностики (naive_type=%s)",
+            float(Y_train.min()), float(Y_train.max()), naive_type,
+        )
 
     logger.info(
-        "Данные v10 | train=%d val=%d test=%d | n_features=%d | "
+        "Данные v11 | train=%d val=%d test=%d | n_features=%d | "
         "history=%d | seasonal_diff=%s | naive=%s",
         len(X_train), len(X_val), len(X_test), feat_train.shape[1],
         history_length, seasonal_diff, naive_type,

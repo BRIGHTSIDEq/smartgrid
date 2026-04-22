@@ -1,9 +1,9 @@
 {
-  "HISTORY_LENGTH": 168,
+  "HISTORY_LENGTH": 192,
   "FORECAST_HORIZON": 24,
   "N_FEATURES": 26,
   "model_name": "LSTM",
   "lag_feature_start_idx": 15,
-  "seasonal_diff": true,
-  "naive_type": "24h only"
+  "seasonal_diff": false,
+  "naive_type": "disabled (seasonal_diff=False)"
 }

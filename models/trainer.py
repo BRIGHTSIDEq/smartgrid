@@ -1,31 +1,24 @@
 # -*- coding: utf-8 -*-
 """
-models/trainer.py — v7 (CosineDecay compatibility fix).
+models/trainer.py — v8 (ensemble min weight + bias correction).
 
-ИСПРАВЛЕНИЕ v7:
-═══════════════════════════════════════════════════════════════════════════════
+ИЗМЕНЕНИЯ v8 vs v7 (audit 2026-04-22):
 
-БАГ: ReduceLROnPlateau конфликтует с CosineDecay.
+[1] WeightedEnsemble.optimize_weights(): минимальный вес 0.1%.
+  БЫЛО: PatchTST получал вес 0.000 после Nelder-Mead оптимизации.
+        Это означало, что PatchTST вообще не участвовал в ансамбле,
+        несмотря на то что его MAE конкурентна с iTransformer.
+  СТАЛО: np.maximum(w_opt, 1e-3) перед нормировкой.
+         Каждая модель вносит минимум 0.1% вклада.
+         Итоговая сумма весов остаётся 1.0 после ренормировки.
 
-  ОШИБКА:
-    TypeError: This optimizer was created with a `LearningRateSchedule` object
-    as its `learning_rate` constructor argument, hence its learning rate is
-    not settable.
+[2] ModelTrainer.predict_absolute(): поддержка post-hoc bias correction.
+  БЫЛО: нет коррекции систематического занижения.
+  СТАЛО: если trainer._bias_correction установлен (main.py step 5c),
+         он вычитается из предсказания перед возвратом.
+         MBE во всех моделях: −900…−2300 кВт·ч → ближе к 0.
 
-  ПРИЧИНА:
-    ReduceLROnPlateau пытается выполнить `optimizer.learning_rate = new_lr`
-    когда optimizer использует LearningRateSchedule (CosineDecay).
-    TensorFlow/Keras не позволяет перезаписывать schedule через атрибут.
-
-  ИСПРАВЛЕНИЕ:
-    Функция `_optimizer_has_lr_schedule(model)` проверяет тип learning_rate.
-    Если это LearningRateSchedule — ReduceLROnPlateau не добавляется в callbacks.
-    В этом случае управление LR полностью отдаётся CosineDecay schedule.
-
-  Дополнительно исправлено в v7:
-    - evaluate() при seasonal_diff=False работает корректно (прямой inverse_scale)
-    - WeightedEnsemble.optimize_weights() при seasonal_diff=False не использует naive
-    - predict_absolute() корректно обрабатывает оба режима
+[3] v7 исправление (ReduceLROnPlateau vs CosineDecay) — сохранено.
 """
 
 import logging
@@ -52,17 +45,7 @@ logger = logging.getLogger("smart_grid.models.trainer")
 def _optimizer_has_lr_schedule(model: tf.keras.Model) -> bool:
     """
     Проверяет, использует ли optimizer LearningRateSchedule.
-
-    В TF 2.21+ `optimizer.learning_rate` возвращает вычисленный тензор,
-    а не сам schedule. Поэтому используем `optimizer._learning_rate`
-    (хранит исходный объект) или try/except при попытке присвоения.
-
-    Если True — ReduceLROnPlateau нельзя добавлять: он попытается
-    перезаписать learning_rate, что невозможно при Schedule.
-
-    Returns
-    -------
-    bool
+    Если True — ReduceLROnPlateau нельзя добавлять.
     """
     if not isinstance(model, tf.keras.Model):
         return False
@@ -70,22 +53,17 @@ def _optimizer_has_lr_schedule(model: tf.keras.Model) -> bool:
         optimizer = model.optimizer
         if optimizer is None:
             return False
-
-        # Метод 1: проверяем _learning_rate (работает в TF 2.13–2.21)
         internal_lr = getattr(optimizer, "_learning_rate", None)
         if internal_lr is not None:
             return isinstance(
                 internal_lr,
                 tf.keras.optimizers.schedules.LearningRateSchedule,
             )
-
-        # Метод 2: try/except при попытке присвоения (универсальный fallback)
         current_val = optimizer.learning_rate
-        optimizer.learning_rate = current_val   # попытка перезаписать
-        return False                             # если OK — нет schedule
-
+        optimizer.learning_rate = current_val
+        return False
     except TypeError:
-        return True   # TypeError означает schedule
+        return True
     except Exception:
         return False
 
@@ -178,17 +156,10 @@ def _reconstruct_predictions(
     split: str,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Реконструирует абсолютные предсказания и истинные значения.
+    Реконструирует абсолютные предсказания и истинные значения в кВт·ч.
 
-    seasonal_diff=True:
-        y_pred = inverse_scale((y_model_output + Y_naive).clip(0))
-        y_true = inverse_scale((Y_diff_true    + Y_naive).clip(0))
-
-    seasonal_diff=False (v14 optimal mode):
-        y_pred = inverse_scale(y_model_output)
-        y_true = inverse_scale(Y_true_scaled)
-
-    Оба пути возвращают значения в кВт·ч.
+    seasonal_diff=True:  y_pred = inverse_scale((y_out + Y_naive).clip(0))
+    seasonal_diff=False: y_pred = inverse_scale(y_out)
     """
     scaler = data["scaler"]
     Y_true_target = data[f"Y_{split}"]
@@ -200,7 +171,6 @@ def _reconstruct_predictions(
         y_pred = inverse_scale(scaler, y_pred_abs)
         y_true = inverse_scale(scaler, y_true_abs)
     else:
-        # seasonal_diff=False: Y_true_target уже абсолютные значения в [0,1]
         y_pred = inverse_scale(scaler, y_model_output)
         y_true = inverse_scale(scaler, Y_true_target)
 
@@ -221,6 +191,9 @@ class ModelTrainer:
         self.plots_dir  = plots_dir
         self.history    = None
         self.train_time = 0.0
+        # Post-hoc bias correction (устанавливается из main.py step 5c)
+        # bias_correction = mean(y_pred_val - y_true_val) в кВт·ч
+        self._bias_correction: Optional[float] = None
 
     def train(self, data, epochs=200, batch_size=32, patience=25,
               lr_patience=10, lr_factor=0.5, min_delta=1e-5):
@@ -241,10 +214,6 @@ class ModelTrainer:
                      lr_patience, lr_factor, min_delta):
         os.makedirs(self.models_dir, exist_ok=True)
 
-        # ── ИСПРАВЛЕНИЕ v7: CosineDecay несовместим с ReduceLROnPlateau ──────
-        # ReduceLROnPlateau пытается присвоить optimizer.learning_rate = float,
-        # но при CosineDecay это вызывает TypeError (schedule не перезаписывается).
-        # Решение: добавляем ReduceLROnPlateau только если optimizer НЕ использует schedule.
         use_lr_schedule = _optimizer_has_lr_schedule(self.model)
 
         early_stop = tf.keras.callbacks.EarlyStopping(
@@ -263,7 +232,6 @@ class ModelTrainer:
         callbacks = [early_stop, checkpoint]
 
         if not use_lr_schedule:
-            # ReduceLROnPlateau только при фиксированном float LR
             reduce_lr = tf.keras.callbacks.ReduceLROnPlateau(
                 monitor="val_loss",
                 factor=lr_factor,
@@ -354,10 +322,23 @@ class ModelTrainer:
     def predict_absolute(self, data: Dict[str, Any], split: str = "test") -> np.ndarray:
         """
         Возвращает предсказание в кВт·ч.
-        Корректно обрабатывает seasonal_diff=True и =False.
+
+        v8: если установлен _bias_correction (post-hoc, вычислен на val),
+            он вычитается из предсказания:
+              y_corrected = y_pred - bias_correction
+            где bias_correction = mean(y_pred_val - y_true_val).
+            Это снижает систематическое занижение (MBE < 0).
         """
         X = self._get_split_inputs(data, split)
         y_out, _ = _reconstruct_predictions(self.predict(X), data, split)
+
+        if self._bias_correction is not None:
+            y_out = y_out - self._bias_correction
+            logger.debug(
+                "%s: bias_correction=%.1f кВт·ч применена к split=%s",
+                self.model_name, self._bias_correction, split
+            )
+
         return y_out
 
     def mc_predict(self, X, n_samples=50):
@@ -372,12 +353,15 @@ class ModelTrainer:
     def evaluate(self, data, split="test", run_residual_diagnostics=True):
         """
         Вычисляет метрики в кВт·ч.
-        seasonal_diff=True: реконструкция через naive.
-        seasonal_diff=False: прямой inverse_scale.
+        Применяет bias correction если установлена.
         """
         X = self._get_split_inputs(data, split)
         y_raw = self.predict(X)
         y_pred, y_true = _reconstruct_predictions(y_raw, data, split)
+
+        # Применяем bias correction если есть
+        if self._bias_correction is not None:
+            y_pred = y_pred - self._bias_correction
 
         metrics = compute_all_metrics(y_true, y_pred, model_name=self.model_name)
         if run_residual_diagnostics:
@@ -432,7 +416,8 @@ class ModelTrainer:
 class WeightedEnsemble:
     """
     Взвешенный ансамбль с оптимизацией весов на val-set (Nelder-Mead).
-    Работает корректно как при seasonal_diff=True, так и при =False.
+
+    v8: минимальный вес 0.1% для каждой модели (ранее PatchTST получал 0.000).
     """
 
     def __init__(self, trainers, weights=None, model_name="WeightedEnsemble"):
@@ -457,7 +442,10 @@ class WeightedEnsemble:
     def optimize_weights(self, data: Dict[str, Any], split: str = "val") -> np.ndarray:
         """
         Оптимизирует веса по MAE в кВт·ч на val-set.
-        Корректно работает при seasonal_diff=True и =False.
+
+        v8 FIX: минимальный вес 1e-3 (0.1%) после оптимизации.
+          БЫЛО: PatchTST получал w=0.000 → не участвовал в ансамбле вообще.
+          СТАЛО: np.maximum(w_opt, 1e-3) → минимум 0.1% вклада каждой модели.
         """
         try:
             from scipy.optimize import minimize
@@ -495,8 +483,11 @@ class WeightedEnsemble:
         mae_eq  = objective(x0)
         result  = minimize(objective, x0, method="Nelder-Mead",
                            options={"maxiter": 3000, "xatol": 1e-5, "fatol": 1e-6})
-        w_opt   = np.abs(result.x)
-        w_opt  /= w_opt.sum()
+
+        # v8 FIX: минимальный вес 0.1% для каждой модели
+        w_opt  = np.abs(result.x)
+        w_opt  = np.maximum(w_opt, 1e-3)   # ← минимум 0.1%
+        w_opt /= w_opt.sum()
         self.weights = w_opt
 
         logger.info(
@@ -511,10 +502,7 @@ class WeightedEnsemble:
         return self.weights
 
     def predict_absolute(self, data, split="test"):
-        """
-        Возвращает взвешенное предсказание ансамбля в кВт·ч.
-        Используется в main.py при построении графиков.
-        """
+        """Возвращает взвешенное предсказание ансамбля в кВт·ч."""
         X = data[f"X_{split}"]
         y_raw = self.predict(X)
         y_out, _ = _reconstruct_predictions(y_raw, data, split)
@@ -558,7 +546,6 @@ def compare_trainers(
 ) -> Tuple[Dict[str, Dict[str, float]], str]:
     """
     Вычисляет метрики всех моделей в абсолютном пространстве (кВт·ч).
-    Работает при seasonal_diff=True и =False.
     """
     results = {}
     logger.info("\n%s", "=" * 72)

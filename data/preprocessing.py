@@ -1,31 +1,26 @@
 # -*- coding: utf-8 -*-
 """
-data/preprocessing.py — v11  (Dual Seasonal Naive — исправленный порог).
+data/preprocessing.py — v12  (rolling stats per split + Dual Seasonal Naive).
 
-ИЗМЕНЕНИЯ v11 vs v10:
+ИЗМЕНЕНИЯ v12 vs v11:
 ═══════════════════════════════════════════════════════════════════════════════
 
-БАГ #1 ИСПРАВЛЕН: Dual Naive не активировался при history=168.
+ИСПРАВЛЕНИЕ (audit 2026-04-22): минорная утечка через rolling_mean/std.
 
-  БЫЛО (v10):
-    if seasonal_diff and history >= (168 + horizon):
-    При history=168, horizon=24: 168 >= 192 → False.
-    Dual Naive никогда не использовался в optimal mode.
+  БЫЛО (v11):
+    rolling_mean_24h и rolling_std_24h строились в generator.py на ПОЛНОМ df
+    до разбивки на train/val/test. Первые 24 точки val-split содержали
+    rolling, посчитанный частично по хвосту train.
+    Это не утечка цели (Y), но rolling статистика в X могла нести
+    информацию из смежного сплита.
 
-  СТАЛО (v11):
-    if seasonal_diff and history >= 168:
-    При history=192 (новый optimal mode): 192 >= 168 → True. ✓
-    Dual Naive активируется, устраняя и суточную, и недельную компоненты.
+  СТАЛО (v12):
+    После хронологической разбивки rolling пересчитывается для каждого
+    сплита независимо. Первые значения заполняются expanding window,
+    что методологически корректно для walk-forward пайплайна.
 
-  Дополнительно: явная проверка что lag-168h индексы не выходят за пределы окна.
-    naive_i_168 = ri + np.arange(horizon)
-    Это корректно при history >= 168: начало окна находится ровно на history шагов
-    раньше конца, т.е. lag-168h от конца = позиции [0..horizon-1] внутри окна.
-
-v10 изменения (seasonal differencing) — сохранены без изменений.
-Dual Seasonal Naive веса обоснованы ACF:
-    w24  = ACF(24) / (ACF(24) + ACF(168)) = 0.841 / (0.841+0.789) ≈ 0.52 → округлено до 0.60
-    w168 = 0.789 / (0.841+0.789) ≈ 0.48 → округлено до 0.40
+Все остальные изменения v11 (Dual Seasonal Naive, исправление порога 168)
+сохранены без изменений.
 """
 
 import logging
@@ -88,6 +83,32 @@ def _add_lag_columns(df):
     for lag in (24, 48, 168):
         shifted = df["consumption"].shift(lag).bfill().fillna(cons_median)
         df[f"load_lag_{lag}h"] = shifted.values.astype(np.float32)
+    return df
+
+
+def _recalculate_rolling_per_split(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Пересчитывает rolling_mean_24h и rolling_std_24h только по данным
+    внутри текущего сплита (expanding для первых 23 точек).
+
+    Устраняет минорную утечку: ранее rolling считался на полном df в
+    generator.py, из-за чего первые точки val/test могли содержать
+    статистику хвоста предыдущего сплита.
+    """
+    df = df.copy()
+    df["rolling_mean_24h"] = (
+        df["consumption"]
+        .rolling(window=24, min_periods=1)
+        .mean()
+        .astype(np.float32)
+    )
+    df["rolling_std_24h"] = (
+        df["consumption"]
+        .rolling(window=24, min_periods=2)
+        .std()
+        .fillna(0.0)
+        .astype(np.float32)
+    )
     return df
 
 
@@ -181,20 +202,8 @@ def _make_windows_with_seasonal_diff(features, history, horizon, seasonal_diff=T
     Строит окна (X, Y_target, Y_naive).
 
     v11 ИСПРАВЛЕНИЕ БАГА: порог активации Dual Seasonal Naive.
-      БЫЛО:  history >= (168 + horizon)  — при history=168 условие ложно (168 >= 192 = False)
-      СТАЛО: history >= 168              — при history=192 условие истинно (192 >= 168 = True) ✓
-
-    Dual Seasonal Naive:
-      При history >= 168:
-        Y_naive = 0.60 * Y_naive_24h + 0.40 * Y_naive_168h
-        Устраняет суточный (ACF24=0.84) и недельный (ACF168=0.79) паттерны.
-        Веса пропорциональны ACF: 0.84/(0.84+0.79) ≈ 0.52, округлено до 0.60.
-      Иначе:
-        Y_naive = Y_naive_24h (только суточный паттерн)
-
-    Y_naive_24h[i]  = features[i+history-horizon : i+history, 0]  (lag-24h)
-    Y_naive_168h[i] = features[i : i+horizon, 0]                   (lag-168h, начало окна)
-                      Корректно при history >= 168: начало окна = 168ч до конца.
+      БЫЛО:  history >= (168 + horizon)  — при history=168 условие ложно
+      СТАЛО: history >= 168              — при history=192 условие истинно ✓
     """
     N, nf = features.shape
     n = N - history - horizon + 1
@@ -212,14 +221,10 @@ def _make_windows_with_seasonal_diff(features, history, horizon, seasonal_diff=T
     naive_i_24 = ri + history - horizon + np.arange(horizon)[None, :]
     Y_naive_24 = features[naive_i_24, 0].clip(0, None)      # (n, horizon)
 
-    # --- ИСПРАВЛЕННЫЙ ПОРОГ: >= 168 вместо >= (168 + horizon) ---
+    # --- ИСПРАВЛЁННЫЙ ПОРОГ: >= 168 вместо >= (168 + horizon) ---
     if seasonal_diff and history >= 168:
-        # lag-168h naive: первые horizon шагов окна = 168ч назад от конца окна
-        # Корректно при history >= 168: индексы ri + [0..horizon-1] < ri + history
         naive_i_168 = ri + np.arange(horizon)[None, :]
         Y_naive_168 = features[naive_i_168, 0].clip(0, None)   # (n, horizon)
-
-        # Взвешенный naive: 60% lag-24h + 40% lag-168h
         Y_naive = (0.60 * Y_naive_24 + 0.40 * Y_naive_168).astype(np.float32)
         naive_desc = "24h×0.60 + 168h×0.40 (dual)"
     else:
@@ -244,20 +249,18 @@ def prepare_data(df, history_length=48, forecast_horizon=24,
                  train_ratio=0.70, val_ratio=0.15,
                  seasonal_diff: bool = False):
     """
-    Полный пайплайн v11 (26 признаков + dual seasonal differencing с исправленным порогом).
+    Полный пайплайн v12 (26 признаков + per-split rolling + dual seasonal diff).
+
+    ИЗМЕНЕНИЕ v12: rolling_mean_24h и rolling_std_24h пересчитываются
+    отдельно для каждого сплита после хронологического разделения.
+    Это устраняет минорную утечку через rolling статистику хвоста train
+    в первые точки val/test.
 
     Parameters
     ----------
     seasonal_diff : bool  default=False
-        False (рекомендуется для optimal mode):
-            Y_target = Y_abs_scaled ∈ [0, 1]. Нейросети с seasonal_skip лучше
-            моделируют нелинейные паттерны на абсолютных значениях.
-        True:
-            Y_target = Y - Y_naive (seasonal differencing). Полезно если нейросети
-            не используют seasonal_skip.
-
-    Dual Naive активируется при seasonal_diff=True AND history_length >= 168.
-    При history_length=192 (optimal mode) активируется автоматически.
+        False (рекомендуется для optimal mode): Y_target = Y_abs_scaled.
+        True: Y_target = Y - Y_naive (seasonal differencing).
     """
     df = _add_lag_columns(df)
     logger.info("Lag-колонки добавлены (bfill): 24/48/168h")
@@ -269,10 +272,21 @@ def prepare_data(df, history_length=48, forecast_horizon=24,
     df_val    = df.iloc[train_end:val_end].copy()
     df_test   = df.iloc[val_end:].copy()
 
+    # ИСПРАВЛЕНИЕ v12: пересчитываем rolling для каждого сплита отдельно
+    df_train = _recalculate_rolling_per_split(df_train)
+    df_val   = _recalculate_rolling_per_split(df_val)
+    df_test  = _recalculate_rolling_per_split(df_test)
+    logger.info(
+        "Rolling stats пересчитаны per-split (v12 fix): "
+        "train=%d val=%d test=%d — нет утечки через rolling",
+        len(df_train), len(df_val), len(df_test)
+    )
+
     raw_train = df_train["consumption"].values.astype(np.float32)
     raw_val   = df_val["consumption"].values.astype(np.float32)
     raw_test  = df_test["consumption"].values.astype(np.float32)
 
+    # Все scaler'ы fit только на train
     cons_scaler        = MinMaxScaler((0, 1)).fit(raw_train.reshape(-1, 1))
     temp_scaler        = MinMaxScaler((0, 1))
     if "temperature" in df.columns:
@@ -298,7 +312,6 @@ def prepare_data(df, history_length=48, forecast_horizon=24,
     X_val,   Y_val,   naive_vl = _make_windows_with_seasonal_diff(feat_val,   history_length, forecast_horizon, seasonal_diff)
     X_test,  Y_test,  naive_te = _make_windows_with_seasonal_diff(feat_test,  history_length, forecast_horizon, seasonal_diff)
 
-    # Определяем тип naive для логирования
     if seasonal_diff and history_length >= 168:
         naive_type = "24h×0.60 + 168h×0.40 (dual, FIX v11)"
     elif seasonal_diff:
@@ -319,7 +332,7 @@ def prepare_data(df, history_length=48, forecast_horizon=24,
         )
 
     logger.info(
-        "Данные v11 | train=%d val=%d test=%d | n_features=%d | "
+        "Данные v12 | train=%d val=%d test=%d | n_features=%d | "
         "history=%d | seasonal_diff=%s | naive=%s",
         len(X_train), len(X_val), len(X_test), feat_train.shape[1],
         history_length, seasonal_diff, naive_type,

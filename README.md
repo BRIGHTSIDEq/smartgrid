@@ -472,25 +472,8 @@ smart_grid_project/
 
 ---
 
-## 11. Результаты
 
-Таблица заполняется после запуска `optimal mode`. Ориентировочные значения для 730 дней, 2500 домохозяйств (history=192, seasonal_diff=False):
-
-| Модель | MAE, кВт·ч | MAPE, % | R² | ACF(24) |
-|---|---|---|---|---|
-| WeightedEnsemble | ~ | ~ | ~ | ~ |
-| LSTM (Seasonal Skip) | ~ | ~ | ~ | ~ |
-| PatchTST | ~ | ~ | ~ | ~ |
-| VanillaTransformer | ~ | ~ | ~ | ~ |
-| TFT-Lite | ~ | ~ | ~ | ~ |
-| XGBoost | ~ | ~ | ~ | ~ |
-| LinearRegression | ~ | ~ | ~ | ~ |
-
-> Заполните таблицу из логов `results/logs/run.log` после обучения.
-
----
-
-## 12. Литература
+## 11. Литература
 
 1. Vaswani, A. et al. (2017). Attention is All You Need. *NeurIPS*.
 2. Nie, Y. et al. (2023). A Time Series is Worth 64 Words: Long-term Forecasting with Transformers. *ICLR*.

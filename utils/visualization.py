@@ -1,6 +1,17 @@
 # -*- coding: utf-8 -*-
 """
 utils/visualization.py — Утилиты для построения графиков.
+
+ИСПРАВЛЕНИЕ v2 (audit 2026-04-22):
+  plot_predictions_comparison:
+    БЫЛО: y_true.flatten()[:n_steps] — смешивало шаги 1-24 из разных
+          multi-step окон. Визуально давало «зигзаги», не совпадающие
+          с реальным рядом. Методологически некорректно.
+    СТАЛО: два режима через параметр mode=
+      "single_origin"    — берёт n_origins подряд идущих 24h окон
+                           (честный single-origin forecast)
+      "walk_forward_h1"  — берёт только шаг h=1 из каждого окна
+                           (честный rolling 1-step forecast)
 """
 
 import logging
@@ -29,7 +40,7 @@ def plot_training_history(
     plots_dir: str = "results/plots",
     save: bool = True,
 ) -> None:
-    """Рисует Loss / MAE / MAPE по эпохам."""
+    """Рисует Loss / MAE по эпохам."""
     os.makedirs(plots_dir, exist_ok=True)
     h = history.history
     metrics_to_plot = [k for k in ("loss", "mae", "mape") if k in h]
@@ -60,26 +71,96 @@ def plot_predictions_comparison(
     y_true: np.ndarray,
     predictions: Dict[str, np.ndarray],
     n_steps: int = 168,
+    mode: str = "single_origin",
     plots_dir: str = "results/plots",
     save: bool = True,
 ) -> None:
-    """Наносит факт и прогнозы нескольких моделей на один график."""
+    """
+    Наносит факт и прогнозы нескольких моделей на один график.
+
+    ИСПРАВЛЕНИЕ v2: добавлены два корректных режима вместо .flatten()[:n].
+
+    Parameters
+    ----------
+    y_true      : np.ndarray shape (N, H) — истинные значения на test-set
+    predictions : dict {name: np.ndarray (N, H)} — предсказания моделей
+    n_steps     : int — число отображаемых часов
+    mode        : str
+        "single_origin"   — берёт ceil(n_steps/H) последовательных 24h окон
+                            (каждое окно = отдельный 24h прогноз, без перекрытия).
+                            Правильно отображает качество: прогноз vs факт на одном
+                            и том же отрезке времени.
+        "walk_forward_h1" — берёт только шаг h=0 (следующий час) из каждого окна,
+                            формируя rolling 1-step forecast. Показывает краткосрочную
+                            точность без накопления ошибки горизонта.
+    plots_dir   : str
+    save        : bool
+
+    Примечание: старый вариант с .flatten()[:n_steps] смешивал шаги 1-24 из
+    перекрывающихся окон, что давало визуальные артефакты («зигзаги»).
+    """
     os.makedirs(plots_dir, exist_ok=True)
+
+    H = y_true.shape[1] if y_true.ndim == 2 else 1
+    N = y_true.shape[0]
+
+    if mode == "single_origin":
+        # Берём последовательные non-overlapping окна: 0, H, 2H, ...
+        # Каждое окно — отдельный честный 24h прогноз
+        n_origins = max(1, min((n_steps + H - 1) // H, N))
+        origin_indices = list(range(n_origins))
+
+        y_plot = np.concatenate([y_true[i] for i in origin_indices])[:n_steps]
+
+        preds_plot: Dict[str, np.ndarray] = {}
+        for name, pred in predictions.items():
+            arr = pred if pred.ndim == 2 else pred.reshape(-1, H)
+            preds_plot[name] = np.concatenate([arr[i] for i in origin_indices])[:n_steps]
+
+        xlabel = "Шаг прогноза (последовательные 24h окна) [ч]"
+        title_suffix = f"single-origin ({n_origins} окон × {H}ч)"
+
+    elif mode == "walk_forward_h1":
+        # Берём только h=0 из каждого окна → rolling 1-step forecast
+        if y_true.ndim == 2:
+            y_plot = y_true[:n_steps, 0]
+        else:
+            y_plot = y_true.flatten()[:n_steps]
+
+        preds_plot = {}
+        for name, pred in predictions.items():
+            arr = pred if pred.ndim == 2 else pred.reshape(-1, H)
+            preds_plot[name] = arr[:n_steps, 0]
+
+        xlabel = "Временной шаг [ч]"
+        title_suffix = "walk-forward h=1"
+
+    else:
+        raise ValueError(f"mode должен быть 'single_origin' или 'walk_forward_h1', получено: {mode!r}")
+
+    T = len(y_plot)
+    t = np.arange(T)
+
     fig, ax = plt.subplots(figsize=(16, 5))
-    t = np.arange(n_steps)
-    ax.plot(t, y_true.flatten()[:n_steps], color=PALETTE["baseline"], lw=2, label="Факт")
-    colors = sns.color_palette("colorblind", max(10, len(predictions)))
-    for i, (name, pred) in enumerate(predictions.items()):
-        ax.plot(t, pred.flatten()[:n_steps], lw=1.5,
-                color=colors[i % 10], label=name, alpha=0.85)
-    ax.set_title("Сравнение прогнозов моделей [кВт·ч]")
-    ax.set_xlabel("Шаг прогноза [ч]")
+    ax.plot(t, y_plot, color=PALETTE["baseline"], lw=2.0, label="Факт", zorder=10)
+
+    colors = sns.color_palette("colorblind", max(10, len(preds_plot)))
+    for i, (name, pred_arr) in enumerate(preds_plot.items()):
+        ax.plot(t, pred_arr[:T], lw=1.5, color=colors[i % 10], label=name, alpha=0.85)
+
+    ax.set_title(f"Сравнение прогнозов моделей — {title_suffix} [кВт·ч]")
+    ax.set_xlabel(xlabel)
     ax.set_ylabel("Потребление [кВт·ч]")
-    ax.legend()
+    ax.legend(fontsize=9)
     ax.grid(True, alpha=0.3)
     plt.tight_layout()
+
     save_figure(fig, os.path.join(plots_dir, "predictions_comparison.png"), save=save)
     plt.close(fig)
+    logger.info(
+        "plot_predictions_comparison: mode=%s, T=%d, models=%d",
+        mode, T, len(preds_plot)
+    )
 
 
 # ── Сравнение метрик моделей ──────────────────────────────────────────────────
@@ -142,7 +223,7 @@ def plot_scientific_diagnostics(
 
     # Error distribution
     axes[1].hist(err, bins=60, color=PALETTE["highlight"], alpha=0.75, edgecolor=PALETTE["baseline"])
-    axes[1].axvline(np.mean(err), color=PALETTE["negative"], linestyle="--", lw=1.5, label="MBE")
+    axes[1].axvline(np.mean(err), color=PALETTE["negative"], linestyle="--", lw=1.5, label=f"MBE={np.mean(err):.0f}")
     axes[1].set_title(f"{model_name}: распределение ошибки")
     axes[1].set_xlabel("Ошибка прогноза [кВт·ч]")
     axes[1].set_ylabel("Частота [-]")

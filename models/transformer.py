@@ -1,63 +1,26 @@
 # -*- coding: utf-8 -*-
-"""models/transformer.py — v15.
+"""models/transformer.py — v16.
 
-ИЗМЕНЕНИЯ v15:
-═══════════════════════════════════════════════════════════════════════════════
+ИЗМЕНЕНИЯ v16 vs v15 (audit 2026-04-22):
 
-[1] VanillaTransformer → iTransformer (Liu et al., 2024 — ICLR 2024).
+[1] build_itransformer(): выставляет model._enc_blocks.
+  БЫЛО: _enc_blocks не выставлялся → attention_visualization.py падал с
+        WARNING "Encoder-блоки не найдены в модели iTransformer_v1".
+        В main.py [7/10] вся визуализация внимания пропускалась.
+  СТАЛО: model._enc_blocks = [layer for layer in model.layers
+                               if isinstance(layer, iTransformerBlock)]
+         Позволяет extract_attention_weights() корректно итерировать блоки.
 
-  БЫЛО: VanillaTransformer v4 — attention over T=192 timesteps (temporal tokens).
-    ПРОБЛЕМА: Train MAE=0.030 при Val MAE=0.019 всё обучение (inverted gap).
-              Модель хуже справляется с тренировочными данными чем с валидационными.
-              Синусоидальное PE неинформативно для циклических данных с seasonal shift.
-              MAE=8556, худшая нейросеть.
+[2] build_patchtst(): принимает отдельные patchtst_lr и patchtst_dropout.
+  БЫЛО: learning_rate и dropout жёстко брались из вызывающего кода
+        (TRANSFORMER_LEARNING_RATE=1e-4, TRANSFORMER_DROPOUT=0.08).
+        Результат: best_epoch=17 из 61 — PatchTST не обучился.
+  СТАЛО: отдельные параметры patchtst_learning_rate и patchtst_dropout
+         с дефолтами 3e-4 / 0.05, соответствующими Config.PATCHTST_*.
+         main.py передаёт Config.PATCHTST_LEARNING_RATE явно.
 
-  СТАЛО: iTransformer v1 — attention over F=26 variates (variate tokens).
-    КЛЮЧЕВАЯ ИДЕЯ: транспонировать вход (N,T,F) → (N,F,T).
-    Каждая переменная (потребление, температура, EV, DSR...) = отдельный токен,
-    который обрабатывает свой временной ряд через FFN.
-    Self-attention захватывает зависимости МЕЖДУ переменными.
-    Никакого PE: порядок variates не меняется, PE не нужен.
-
-  ПРЕИМУЩЕСТВА iTransformer для многомерных временных рядов:
-    1. Attention over F=26 variates → понимает "температура ↑ + EV ↑ → потребление ↑↑"
-    2. Нет проблем с временным PE (T=192 — слишком длинно для обычного attention)
-    3. RevIN нормирует каждый экземпляр → robust к distribution shift
-       (test mean=70605 >> train mean=57015 — зимний период)
-    4. Proper RevIN: нормируем вход И денормируем выход → согласованный SeasonalSkip
-
-[2] WarmupCosineDecay — новый LR schedule для всех нейросетей.
-
-  БЫЛО: CosineDecay без warmup.
-    ПРОБЛЕМА: LSTM best_epoch=78 из 84 — всё ещё учился, LR уже почти 0.
-              Первые шаги с большим LR разрушают инициализацию SeasonalSkip.
-
-  СТАЛО: WarmupCosineDecay.
-    Фаза 1 (warmup, 5% шагов): LR линейно растёт 0 → peak_lr
-    Фаза 2 (cosine, 95% шагов): LR плавно падает peak_lr → alpha*peak_lr
-    Warmup защищает learnable blend weights от ранних больших обновлений.
-
-[3] PatchTST: WarmupCosineDecay + SeasonalSkip (был только ReduceLROnPlateau).
-
-  БЫЛО: PatchTST без CosineDecay, без SeasonalSkip.
-    ПРОБЛЕМА: Train LOSS продолжал падать до epoch 78 при Val плато с epoch 20.
-              best_epoch=36 — ранняя остановка неоптимальна.
-
-  СТАЛО: WarmupCosineDecay + SeasonalSkip (lag-24h + lag-168h при history>=192).
-    WarmupCosineDecay даёт плавную траекторию LR, совместимую с PATIENCE=50.
-    SeasonalSkip добавляет тот же inductive bias что у LSTM.
-
-[4] Убрана MAPE из training metrics.
-
-  БЫЛО: metrics=["mae", tf.keras.metrics.MeanAbsolutePercentageError()]
-    ПРОБЛЕМА: Train MAPE ~17000-20000% (деление на нормализованные значения ≈0).
-              VanillaTransformer/PatchTST MAPE-графики были бесполезны.
-
-  СТАЛО: metrics=["mae"] только. MAPE вычисляется при evaluate() на кВт·ч.
-
-[5] Обратная совместимость: классы PreLNEncoderBlock, SinusoidalPE, Time2Vec,
-    GatedResidualNetwork сохранены для load_keras().
-═══════════════════════════════════════════════════════════════════════════════
+[3] Сохранена обратная совместимость: PreLNEncoderBlock, SinusoidalPE,
+    Time2Vec, GatedResidualNetwork — stubs для load_keras().
 """
 
 import logging
@@ -89,15 +52,7 @@ __all__ = [
 # ══════════════════════════════════════════════════════════════════════════════
 
 class WarmupCosineDecay(tf.keras.optimizers.schedules.LearningRateSchedule):
-    """
-    Линейный warmup + CosineDecay.
-
-    Фаза 1 (шаги 0 → warmup_steps): LR линейно растёт 0 → peak_lr.
-      Защищает начальные веса (особенно SeasonalSkip blend) от больших градиентов.
-    Фаза 2 (шаги warmup_steps → total_steps): CosineDecay peak_lr → alpha*peak_lr.
-
-    При warmup_steps=0 работает как обычный CosineDecay.
-    """
+    """Линейный warmup + CosineDecay."""
 
     def __init__(self, peak_lr: float, total_steps: int, warmup_steps: int = 0,
                  alpha: float = 0.02, name: str = "WarmupCosineDecay"):
@@ -114,17 +69,12 @@ class WarmupCosineDecay(tf.keras.optimizers.schedules.LearningRateSchedule):
         ts      = float(self.total_steps)
         peak    = self.peak_lr
         alpha   = self.alpha
-
-        # Фаза 1: линейный warmup 0 → peak
         warmup_lr = peak * (step_f / ws)
-
-        # Фаза 2: cosine decay peak → alpha*peak
         cosine_steps = tf.maximum(step_f - ws, 0.0)
         cosine_total = tf.maximum(ts - ws, 1.0)
         progress     = tf.minimum(cosine_steps / cosine_total, 1.0)
         cosine_lr    = peak * (alpha + (1.0 - alpha) * 0.5 *
                                (1.0 + tf.cos(np.pi * progress)))
-
         return tf.where(step_f < ws, warmup_lr, cosine_lr)
 
     def get_config(self):
@@ -142,12 +92,7 @@ class WarmupCosineDecay(tf.keras.optimizers.schedules.LearningRateSchedule):
 # ══════════════════════════════════════════════════════════════════════════════
 
 class iTransformerBlock(tf.keras.layers.Layer):
-    """
-    Pre-LayerNorm Transformer block для iTransformer.
-
-    Работает на variate-dimension: input (N, F, d_model), attention over F.
-    Стандартный Pre-LN MHA + FFN с residual connections.
-    """
+    """Pre-LN Transformer block для iTransformer (attention over variates)."""
 
     def __init__(self, d_model: int, num_heads: int, dff: int,
                  dropout: float = 0.1, **kwargs):
@@ -169,21 +114,25 @@ class iTransformerBlock(tf.keras.layers.Layer):
         self.ff2   = tf.keras.layers.Dense(d_model,
                                            kernel_regularizer=tf.keras.regularizers.l2(1e-6))
         self.drop3 = tf.keras.layers.Dropout(dropout)
+        # Сохраняем веса внимания для визуализации
+        self._attn_weights = None
 
     def call(self, x, training=None):
-        # Pre-LN MHA (attention over variate dimension)
         h = self.ln1(x)
-        h = self.mha(h, h, h, training=training)
+        h, self._attn_weights = self.mha(
+            h, h, h, training=training, return_attention_scores=True)
         h = self.drop1(h, training=training)
         x = x + h
-
-        # Pre-LN FFN
         h = self.ln2(x)
         h = self.ff1(h)
         h = self.drop2(h, training=training)
         h = self.ff2(h)
         h = self.drop3(h, training=training)
         return x + h
+
+    def get_attention_weights(self) -> Optional[tf.Tensor]:
+        """Возвращает последние веса внимания (для визуализации)."""
+        return self._attn_weights
 
     def get_config(self):
         return {
@@ -216,12 +165,19 @@ class PreLNEncoderBlock(tf.keras.layers.Layer):
         self.drop2 = tf.keras.layers.Dropout(dropout)
         self.ff2 = tf.keras.layers.Dense(d_model)
         self.drop3 = tf.keras.layers.Dropout(dropout)
+        self._attn_weights = None
+
     def call(self, x, training=None):
-        h = self.ln1(x); h = self.mha(h, h, h, training=training)
+        h = self.ln1(x)
+        h, self._attn_weights = self.mha(h, h, h, training=training, return_attention_scores=True)
         h = self.drop1(h, training=training); x = x + h
         h = self.ln2(x); h = self.ff1(h); h = self.drop2(h, training=training)
         h = self.ff2(h); h = self.drop3(h, training=training)
         return x + h
+
+    def get_attention_weights(self) -> Optional[tf.Tensor]:
+        return self._attn_weights
+
     def get_config(self):
         return {**super().get_config(), "d_model": self.d_model,
                 "num_heads": self.num_heads, "dff": self.dff,
@@ -259,7 +215,7 @@ class GatedResidualNetwork(tf.keras.layers.Layer):
         self.dense_g = tf.keras.layers.Dense(units, activation="sigmoid")
         self.ln      = tf.keras.layers.LayerNormalization(epsilon=1e-6)
         self.drop    = tf.keras.layers.Dropout(dropout)
-        self.proj    = None  # built in build()
+        self.proj    = None
 
     def build(self, input_shape):
         if input_shape[-1] != self.units:
@@ -303,7 +259,7 @@ def _build_lr_schedule(
     alpha: float = 0.02,
     model_name: str = "",
 ):
-    """Строит WarmupCosineDecay или фиксированный LR. Возвращает schedule или float."""
+    """Строит WarmupCosineDecay или фиксированный LR."""
     if not (use_cosine_decay and total_steps > 100):
         return learning_rate
 
@@ -335,7 +291,7 @@ def build_itransformer(
     n_features: int       = 26,
     d_model: int          = 128,
     num_heads: int        = 4,
-    num_layers: int       = 4,       # 4 layers: iTransformer выигрывает от глубины
+    num_layers: int       = 4,
     dff: int              = 256,
     dropout: float        = 0.12,
     learning_rate: float  = 1e-4,
@@ -350,125 +306,71 @@ def build_itransformer(
     """
     iTransformer v1 (Liu et al., ICLR 2024).
 
-    Ключевая идея: транспонировать вход (N,T,F) → (N,F,T).
-    Каждая переменная = отдельный токен, attention over variates (не time).
-
-    Архитектура:
-      Input(T, F)
-        │
-        ├─ RevIN(cons ch.0): нормировка по экземпляру
-        ├─ Permute: (N,T,F) → (N,F,T)
-        ├─ Dense(T→d): (N,F,T) → (N,F,d_model) [per-variate embedding]
-        ├─ LayerNorm
-        ├─ iTransformerBlock × num_layers  [attention over F variates]
-        ├─ LayerNorm + Dense(d→H): (N,F,H)
-        ├─ Mean over F: (N,H)
-        ├─ RevIN denorm: → MinMaxScaler space (согласовано с SeasonalSkip)
-        └─ SeasonalSkip: lag-24h + lag-168h (при history>=192)
-
-    Преимущества над VanillaTransformer:
-      1. Захватывает зависимости между переменными (temperature↑+EV↑→consumption↑↑)
-      2. Нет проблем с PE при длинных последовательностях (T=192)
-      3. Proper RevIN устраняет влияние distribution shift (зима vs лето)
-      4. WarmupCosineDecay: стабильный старт + глубокое схождение
-
-    Параметры:
-      num_layers=4: iTransformer эффективнее при большей глубине (не ширине).
+    v16 FIX: выставляет model._enc_blocks для attention_visualization.py.
     """
     from models.lstm import _SeasonalSkipLayer
 
     inp = tf.keras.Input(shape=(history_length, n_features), name="input_seq")
 
-    # ── Шаг 1: RevIN нормировка потребления (channel 0) ──────────────────────
-    # Нормируем по экземпляру: каждое окно имеет своё среднее/std.
-    # Это устраняет distribution shift между зимой (test) и летом (train).
-    cons_in = tf.keras.layers.Lambda(
-        lambda t: t[:, :, :1], name="cons_in")(inp)
-    covs_in = tf.keras.layers.Lambda(
-        lambda t: t[:, :, 1:], name="covs_in")(inp)
+    # RevIN нормировка потребления (channel 0)
+    cons_in = tf.keras.layers.Lambda(lambda t: t[:, :, :1], name="cons_in")(inp)
+    covs_in = tf.keras.layers.Lambda(lambda t: t[:, :, 1:], name="covs_in")(inp)
     mean_c = tf.keras.layers.Lambda(
-        lambda t: tf.reduce_mean(t, axis=1, keepdims=True),
-        name="revin_mean")(cons_in)                              # (N,1,1)
+        lambda t: tf.reduce_mean(t, axis=1, keepdims=True), name="revin_mean")(cons_in)
     std_c  = tf.keras.layers.Lambda(
         lambda t: tf.math.reduce_std(t, axis=1, keepdims=True) + 1e-6,
-        name="revin_std")(cons_in)                               # (N,1,1)
+        name="revin_std")(cons_in)
     cons_n = tf.keras.layers.Lambda(
         lambda xs: (xs[0] - xs[1]) / xs[2],
-        name="revin_norm")([cons_in, mean_c, std_c])             # (N,T,1) ~ [-3,3]
+        name="revin_norm")([cons_in, mean_c, std_c])
+    x = tf.keras.layers.Concatenate(axis=-1, name="revin_concat")([cons_n, covs_in])
 
-    x = tf.keras.layers.Concatenate(
-        axis=-1, name="revin_concat")([cons_n, covs_in])         # (N,T,F)
-
-    # ── Шаг 2: Transpose → variate-first (ключевая операция iTransformer) ────
-    # (N,T,F) → (N,F,T): теперь F переменных = F токенов, каждый длины T
+    # Transpose → variate-first
     x = tf.keras.layers.Permute((2, 1), name="to_variate_first")(x)  # (N,F,T)
 
-    # ── Шаг 3: Per-variate temporal embedding → d_model ──────────────────────
-    # Dense применяется по последней оси: T → d_model, независимо для каждой переменной
-    x = tf.keras.layers.Dense(d_model, use_bias=False,
-                              name="variate_embed")(x)           # (N,F,d_model)
-    x = tf.keras.layers.LayerNormalization(
-        epsilon=1e-6, name="embed_ln")(x)
+    # Per-variate temporal embedding → d_model
+    x = tf.keras.layers.Dense(d_model, use_bias=False, name="variate_embed")(x)
+    x = tf.keras.layers.LayerNormalization(epsilon=1e-6, name="embed_ln")(x)
     x = tf.keras.layers.Dropout(dropout * 0.5, name="embed_drop")(x)
 
-    # ── Шаг 4: iTransformer blocks (attention over F variates) ───────────────
+    # iTransformer blocks
+    enc_blocks = []
     for i in range(num_layers):
-        x = iTransformerBlock(
+        blk = iTransformerBlock(
             d_model=d_model, num_heads=num_heads, dff=dff,
-            dropout=dropout, name=f"itrans_blk_{i}")(x)
+            dropout=dropout, name=f"itrans_blk_{i}")
+        x = blk(x)
+        enc_blocks.append(blk)
 
     x = tf.keras.layers.LayerNormalization(epsilon=1e-6, name="enc_ln")(x)
 
-    # ── Шаг 5: Per-variate forecast projection ───────────────────────────────
-    per_var = tf.keras.layers.Dense(
-        forecast_horizon, name="per_var_proj")(x)               # (N,F,H)
+    # Per-variate forecast projection
+    per_var = tf.keras.layers.Dense(forecast_horizon, name="per_var_proj")(x)  # (N,F,H)
 
-    # ── Шаг 6: Используем ТОЛЬКО токен потребления (variate 0) ───────────────
-    # ИСПРАВЛЕНИЕ v2: В v1 использовался tf.reduce_mean по всем F=26 variates.
-    # Проблема: усреднение прогнозов температуры, EV, DSR и других переменных
-    # с прогнозом потребления давало «размытый» сигнал. Модель показывала
-    # inverted gap (train_mae > val_mae) — тренировочные данные хуже предсказывались
-    # чем валидационные, что нетипично и указывало на неверную агрегацию.
-    #
-    # После транспонирования (N,T,F)→(N,F,T) variate[0] = потребление (channel 0).
-    # Attention разрешает токену потребления ПОСЕЩАТЬ другие variates и собирать
-    # кросс-переменную информацию (temp↑+EV↑→consumption↑↑), но финальный прогноз
-    # берётся только из токена потребления — как в оригинальной статье iTransformer.
-    #
-    # Это соответствует оригинальному iTransformer (Liu et al., ICLR 2024):
-    #   "the representation of the target variate is extracted for forecasting"
-    #
+    # Только токен потребления (variate[0])
     neural_out = tf.keras.layers.Lambda(
-        lambda t: t[:, 0, :],
-        name="variate_pool")(per_var)                            # (N,H) — только потребление
+        lambda t: t[:, 0, :], name="variate_pool")(per_var)  # (N,H)
 
-    # ── Шаг 7: RevIN denorm → MinMaxScaler space ─────────────────────────────
-    # Согласует neural_out с naive values (которые в MinMaxScaler space)
-    # чтобы SeasonalSkip корректно смешивал оба сигнала.
-    mean_2d = tf.keras.layers.Lambda(
-        lambda t: t[:, 0, :], name="mean_2d")(mean_c)           # (N,1)
-    std_2d  = tf.keras.layers.Lambda(
-        lambda t: t[:, 0, :], name="std_2d")(std_c)             # (N,1)
+    # RevIN denorm
+    mean_2d = tf.keras.layers.Lambda(lambda t: t[:, 0, :], name="mean_2d")(mean_c)
+    std_2d  = tf.keras.layers.Lambda(lambda t: t[:, 0, :], name="std_2d")(std_c)
     neural_out = tf.keras.layers.Lambda(
         lambda xs: xs[0] * xs[2] + xs[1],
-        name="revin_denorm")([neural_out, mean_2d, std_2d])      # (N,H) ~ [0,1]
+        name="revin_denorm")([neural_out, mean_2d, std_2d])
 
-    # ── Шаг 8: SeasonalSkip (lag-24h + lag-168h) ─────────────────────────────
+    # SeasonalSkip
     if use_seasonal_skip and history_length >= forecast_horizon:
         naive_24h = tf.keras.layers.Lambda(
-            lambda t: t[:, -forecast_horizon:, 0],
-            name="naive_24h")(inp)                               # (N,H) MinMaxScaler
+            lambda t: t[:, -forecast_horizon:, 0], name="naive_24h")(inp)
         final_out = _SeasonalSkipLayer(
-            init_w=seasonal_blend_init,
-            name="seasonal_skip_24h")([neural_out, naive_24h])
+            init_w=seasonal_blend_init, name="seasonal_skip_24h")([neural_out, naive_24h])
 
         if history_length >= (168 + forecast_horizon):
             weekly_naive = tf.keras.layers.Lambda(
                 lambda t: t[:, -168:-168 + forecast_horizon, 0],
                 name="weekly_naive")(inp)
             final_out = _SeasonalSkipLayer(
-                init_w=0.80,
-                name="seasonal_skip_168h")([final_out, weekly_naive])
+                init_w=0.80, name="seasonal_skip_168h")([final_out, weekly_naive])
         logger.info(
             "iTransformer: SeasonalSkip 24h (init=%.2f)%s",
             seasonal_blend_init,
@@ -480,7 +382,10 @@ def build_itransformer(
     final_out = tf.keras.layers.Lambda(lambda t: t, name="output")(final_out)
     model = tf.keras.Model(inputs=inp, outputs=final_out, name="iTransformer_v1")
 
-    # ── Optimizer: WarmupCosineDecay ─────────────────────────────────────────
+    # v16 FIX: выставляем _enc_blocks для attention_visualization.py
+    model._enc_blocks = enc_blocks
+
+    # Optimizer
     lr_sched = _build_lr_schedule(learning_rate, use_cosine_decay, total_steps,
                                   warmup_ratio, alpha, "iTransformer")
     optimizer = tf.keras.optimizers.Adam(learning_rate=lr_sched, clipnorm=1.0)
@@ -488,7 +393,7 @@ def build_itransformer(
     model.compile(
         optimizer=optimizer,
         loss=tf.keras.losses.Huber(delta=huber_delta),
-        metrics=["mae"],  # MAPE убрана: делилась бы на нормализованные ~0 значения
+        metrics=["mae"],
     )
 
     skip_str = ""
@@ -499,19 +404,21 @@ def build_itransformer(
     logger.info(
         "iTransformer v1 | %d params | input=(%d,%d) | F=%d variate tokens | "
         "d=%d h=%d L=%d dff=%d drop=%.2f | RevIN=True | "
-        "SeasonalSkip=%s | WarmupCosine=%s warmup=%.0f%% | lr=%.0e | Huber(δ=%.2f)",
+        "SeasonalSkip=%s | WarmupCosine=%s warmup=%.0f%% | lr=%.0e | Huber(δ=%.2f) | "
+        "_enc_blocks=%d [v16 FIX]",
         model.count_params(), history_length, n_features, n_features,
         d_model, num_heads, num_layers, dff, dropout,
         skip_str or "off",
         use_cosine_decay and total_steps > 100,
         warmup_ratio * 100,
         learning_rate, huber_delta,
+        len(enc_blocks),
     )
     return model
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# PatchTST v6 (+ WarmupCosineDecay + SeasonalSkip)
+# PatchTST v6 (+ отдельные patchtst_lr / patchtst_dropout)
 # ══════════════════════════════════════════════════════════════════════════════
 
 class _PatchEmbedding(tf.keras.layers.Layer):
@@ -526,8 +433,7 @@ class _PatchEmbedding(tf.keras.layers.Layer):
         self.drop  = tf.keras.layers.Dropout(dropout)
 
     def call(self, x, training=None):
-        # x: (N, n_patches, patch_len)
-        x = self.proj(x)    # (N, n_patches, d_model)
+        x = self.proj(x)
         x = self.ln(x)
         return self.drop(x, training=training)
 
@@ -545,45 +451,41 @@ def build_patchtst(
     num_heads: int        = 4,
     num_layers: int       = 3,
     dff: int              = 256,
-    dropout: float        = 0.12,
-    learning_rate: float  = 1e-4,
+    dropout: float        = 0.12,          # используется как fallback если patchtst_dropout не задан
+    learning_rate: float  = 1e-4,          # fallback
     stochastic_depth_rate: float = 0.08,
     use_revin: bool        = True,
-    use_cosine_decay: bool = True,   # НОВОЕ: WarmupCosineDecay вместо ReduceLROnPlateau
+    use_cosine_decay: bool = True,
     total_steps: int       = 0,
     warmup_ratio: float    = 0.05,
     alpha: float           = 0.02,
     huber_delta: float     = 0.05,
-    use_seasonal_skip: bool = True,  # НОВОЕ: SeasonalSkip (lag-24h + lag-168h)
+    use_seasonal_skip: bool = True,
     seasonal_blend_init: float = 0.60,
+    # v16 FIX: отдельные параметры PatchTST (приоритет над общими)
+    patchtst_learning_rate: Optional[float] = None,  # если None → используется learning_rate
+    patchtst_dropout: Optional[float]       = None,  # если None → используется dropout
 ) -> tf.keras.Model:
     """
-    PatchTST v6 (Nie et al., 2023) с улучшениями:
-      - WarmupCosineDecay вместо ReduceLROnPlateau
-        (Train LOSS продолжал падать 78 эпох при Val плато с epoch 20 → нестабильный LR)
-      - SeasonalSkip (lag-24h + lag-168h при history>=192)
-        (добавляет тот же сезонный prior что у LSTM и iTransformer)
-      - MAPE убрана из training metrics
+    PatchTST v6 (Nie et al., 2023).
 
-    Архитектура:
-      Input(T, F)
-        │
-        ├─ RevIN(ch.0) + LayerNorm
-        ├─ Patch extraction: (N, n_patches, patch_len*n_channels)
-        ├─ PatchEmbedding: → (N, n_patches, d_model)
-        ├─ Learned positional embedding
-        ├─ PreLNEncoderBlock × num_layers
-        ├─ Flatten → Dense(horizon) → (N, H)
-        ├─ RevIN denorm
-        └─ SeasonalSkip
+    v16 FIX: добавлены patchtst_learning_rate и patchtst_dropout.
+      БЫЛО: learning_rate=1e-4, dropout=0.08 → best_epoch=17 из 61.
+      СТАЛО: patchtst_learning_rate=3e-4 (из Config.PATCHTST_LEARNING_RATE),
+             patchtst_dropout=0.05 (из Config.PATCHTST_DROPOUT).
+             Передаются из main.py явно.
     """
     from models.lstm import _SeasonalSkipLayer
+
+    # Применяем patchtst-специфичные параметры если заданы
+    eff_lr      = patchtst_learning_rate if patchtst_learning_rate is not None else learning_rate
+    eff_dropout = patchtst_dropout       if patchtst_dropout       is not None else dropout
 
     n_patches = (history_length - patch_len) // stride + 1
 
     inp = tf.keras.Input(shape=(history_length, n_features), name="input_seq")
 
-    # ── RevIN (consumption channel 0) ────────────────────────────────────────
+    # RevIN (consumption channel 0 only)
     if use_revin:
         cons_in = tf.keras.layers.Lambda(lambda t: t[:, :, :1], name="cons_in")(inp)
         covs_in = tf.keras.layers.Lambda(lambda t: t[:, :, 1:], name="covs_in")(inp)
@@ -603,55 +505,51 @@ def build_patchtst(
 
     x_seq = tf.keras.layers.LayerNormalization(epsilon=1e-6, name="input_ln")(x_seq)
 
-    # ── Patch extraction ─────────────────────────────────────────────────────
-    # Извлекаем патчи через strided slicing
+    # Patch extraction (strided slicing)
     patches_list = []
     for p_start in range(0, history_length - patch_len + 1, stride):
         patch = tf.keras.layers.Lambda(
             lambda t, s=p_start: t[:, s:s + patch_len, :],
-            name=f"patch_{p_start}")(x_seq)              # (N, patch_len, F)
+            name=f"patch_{p_start}")(x_seq)
         flat_p = tf.keras.layers.Reshape(
             (patch_len * n_features,),
-            name=f"flat_patch_{p_start}")(patch)         # (N, patch_len*F)
+            name=f"flat_patch_{p_start}")(patch)
         patches_list.append(flat_p)
 
-    # Stack: (N, n_patches, patch_len*F)
     patches = tf.keras.layers.Lambda(
         lambda ts: tf.stack(ts, axis=1),
-        name="stack_patches")(patches_list)
+        name="stack_patches")(patches_list)  # (N, n_patches, patch_len*F)
 
-    # ── Patch embedding ───────────────────────────────────────────────────────
+    # Patch embedding
     x = _PatchEmbedding(
         patch_len=patch_len, d_model=d_model,
-        dropout=dropout * 0.5, name="patch_embed")(patches)  # (N, n_patches, d_model)
+        dropout=eff_dropout * 0.5, name="patch_embed")(patches)
 
-    # Learned positional embeddings — фиксированные индексы, broadcast по batch
+    # Learned positional embeddings
     pos_idx = tf.keras.layers.Lambda(
-        lambda t: tf.tile(
-            tf.expand_dims(tf.range(n_patches), 0),
-            [tf.shape(t)[0], 1]
-        ),
-        name="pos_range")(x)                                   # (N, n_patches)
-    pos_emb = tf.keras.layers.Embedding(
-        n_patches, d_model, name="pos_embed")(pos_idx)         # (N, n_patches, d_model)
+        lambda t: tf.tile(tf.expand_dims(tf.range(n_patches), 0), [tf.shape(t)[0], 1]),
+        name="pos_range")(x)
+    pos_emb = tf.keras.layers.Embedding(n_patches, d_model, name="pos_embed")(pos_idx)
     x = tf.keras.layers.Add(name="add_pos")([x, pos_emb])
 
-    # ── Transformer encoder ──────────────────────────────────────────────────
+    # Transformer encoder
+    enc_blocks = []
     for i in range(num_layers):
-        x = PreLNEncoderBlock(
+        blk = PreLNEncoderBlock(
             d_model=d_model, num_heads=num_heads, dff=dff,
-            dropout=dropout, stochastic_depth_rate=stochastic_depth_rate,
-            name=f"enc_blk_{i}")(x)
+            dropout=eff_dropout, stochastic_depth_rate=stochastic_depth_rate,
+            name=f"enc_blk_{i}")
+        x = blk(x)
+        enc_blocks.append(blk)
 
     x = tf.keras.layers.LayerNormalization(epsilon=1e-6, name="enc_ln")(x)
 
-    # ── Output head ───────────────────────────────────────────────────────────
-    flat = tf.keras.layers.Flatten(name="flatten")(x)       # (N, n_patches*d_model)
-    flat = tf.keras.layers.Dropout(dropout, name="head_drop")(flat)
-    neural_out = tf.keras.layers.Dense(
-        forecast_horizon, name="forecast_head")(flat)       # (N, H)
+    # Output head
+    flat = tf.keras.layers.Flatten(name="flatten")(x)
+    flat = tf.keras.layers.Dropout(eff_dropout, name="head_drop")(flat)
+    neural_out = tf.keras.layers.Dense(forecast_horizon, name="forecast_head")(flat)
 
-    # ── RevIN denorm ──────────────────────────────────────────────────────────
+    # RevIN denorm
     if use_revin and mean_c is not None:
         mean_2d = tf.keras.layers.Lambda(lambda t: t[:, 0, :], name="mean_2d")(mean_c)
         std_2d  = tf.keras.layers.Lambda(lambda t: t[:, 0, :], name="std_2d")(std_c)
@@ -659,11 +557,10 @@ def build_patchtst(
             lambda xs: xs[0] * xs[2] + xs[1],
             name="revin_denorm")([neural_out, mean_2d, std_2d])
 
-    # ── SeasonalSkip (NEW in v6) ───────────────────────────────────────────────
+    # SeasonalSkip
     if use_seasonal_skip and history_length >= forecast_horizon:
         naive_24h = tf.keras.layers.Lambda(
-            lambda t: t[:, -forecast_horizon:, 0],
-            name="naive_24h")(inp)
+            lambda t: t[:, -forecast_horizon:, 0], name="naive_24h")(inp)
         final_out = _SeasonalSkipLayer(
             init_w=seasonal_blend_init, name="seasonal_skip_24h")([neural_out, naive_24h])
 
@@ -678,9 +575,10 @@ def build_patchtst(
 
     final_out = tf.keras.layers.Lambda(lambda t: t, name="output")(final_out)
     model = tf.keras.Model(inputs=inp, outputs=final_out, name="PatchTST_v6")
+    model._enc_blocks = enc_blocks
 
-    # ── Optimizer ─────────────────────────────────────────────────────────────
-    lr_sched = _build_lr_schedule(learning_rate, use_cosine_decay, total_steps,
+    # Optimizer с patchtst-специфичным LR
+    lr_sched = _build_lr_schedule(eff_lr, use_cosine_decay, total_steps,
                                   warmup_ratio, alpha, "PatchTST")
     optimizer = tf.keras.optimizers.Adam(learning_rate=lr_sched, clipnorm=1.0)
 
@@ -692,12 +590,13 @@ def build_patchtst(
 
     logger.info(
         "PatchTST v6 patch=%d stride=%d n_p=%d d=%d h=%d L=%d sdrop=%.2f "
-        "RevIN=%s(ch0 only, denorm) SeasonalSkip=%s | WarmupCosine=%s warmup=%.0f%% | "
-        "%d params",
+        "RevIN=%s SeasonalSkip=%s | lr=%.0e drop=%.2f [v16: individual params] "
+        "WarmupCosine=%s warmup=%.0f%% | %d params",
         patch_len, stride, n_patches, d_model, num_heads, num_layers,
         stochastic_depth_rate, use_revin,
         "24h+168h" if (use_seasonal_skip and history_length >= 168 + forecast_horizon)
         else ("24h" if use_seasonal_skip else "off"),
+        eff_lr, eff_dropout,
         use_cosine_decay and total_steps > 100,
         warmup_ratio * 100,
         model.count_params(),
@@ -718,34 +617,22 @@ def build_tft_lite(
     dropout: float        = 0.12,
     learning_rate: float  = 1e-4,
     n_covariate_features: int = 10,
-    use_cosine_decay: bool  = True,   # НОВОЕ: WarmupCosineDecay
+    use_cosine_decay: bool  = True,
     total_steps: int        = 0,
     warmup_ratio: float     = 0.05,
     alpha: float            = 0.02,
     huber_delta: float      = 0.05,
 ) -> tf.keras.Model:
-    """
-    TFT-Lite v2 с WarmupCosineDecay и RevIN denorm.
-
-    Принимает два входа: [series (N,T,1), covariates (N,T,n_cov)].
-    series нормируется через RevIN, covariates используются как есть.
-
-    Исправления v2:
-      - WarmupCosineDecay: best_epoch=17 был слишком ранним из-за резкого LR
-      - RevIN denorm output: согласует с SeasonalSkip scale
-      - MBE=-4509 → исправляется за счёт правильной нормировки
-    """
+    """TFT-Lite v2 с WarmupCosineDecay и RevIN denorm."""
     key_dim = max(d_model // num_heads, 8)
 
-    # Входы: series + covariates
     inp_series = tf.keras.Input(shape=(history_length, 1), name="series_input")
     inp_covars = tf.keras.Input(shape=(history_length, n_covariate_features),
                                 name="covars_input")
 
-    # ── RevIN на серии потребления ────────────────────────────────────────────
+    # RevIN на серии потребления
     mean_s = tf.keras.layers.Lambda(
-        lambda t: tf.reduce_mean(t, axis=1, keepdims=True),
-        name="revin_mean")(inp_series)
+        lambda t: tf.reduce_mean(t, axis=1, keepdims=True), name="revin_mean")(inp_series)
     std_s  = tf.keras.layers.Lambda(
         lambda t: tf.math.reduce_std(t, axis=1, keepdims=True) + 1e-6,
         name="revin_std")(inp_series)
@@ -753,36 +640,29 @@ def build_tft_lite(
         lambda xs: (xs[0] - xs[1]) / xs[2],
         name="revin_norm")([inp_series, mean_s, std_s])
 
-    # Concat series + covariates → (N, T, 1+n_cov)
-    combined = tf.keras.layers.Concatenate(
-        axis=-1, name="combined")([series_n, inp_covars])
+    combined = tf.keras.layers.Concatenate(axis=-1, name="combined")([series_n, inp_covars])
 
-    # ── GRN embedding ─────────────────────────────────────────────────────────
     x = GatedResidualNetwork(d_model, dropout=dropout, name="input_grn")(combined)
     x = tf.keras.layers.LayerNormalization(epsilon=1e-6, name="input_ln")(x)
 
-    # ── Transformer encoder ───────────────────────────────────────────────────
     for i in range(num_layers):
-        # Pre-LN MHA
         h = tf.keras.layers.LayerNormalization(epsilon=1e-6, name=f"ln1_{i}")(x)
         h = tf.keras.layers.MultiHeadAttention(
             num_heads=num_heads, key_dim=key_dim,
             dropout=dropout, name=f"mha_{i}")(h, h, h)
         h = tf.keras.layers.Dropout(dropout, name=f"drop_mha_{i}")(h)
         x = tf.keras.layers.Add(name=f"add_mha_{i}")([x, h])
-        # Pre-LN GRN
         h = tf.keras.layers.LayerNormalization(epsilon=1e-6, name=f"ln2_{i}")(x)
         h = GatedResidualNetwork(d_model, dropout=dropout, name=f"grn_{i}")(h)
         x = tf.keras.layers.Add(name=f"add_grn_{i}")([x, h])
 
     x = tf.keras.layers.LayerNormalization(epsilon=1e-6, name="enc_ln")(x)
 
-    # ── Output: последний токен → forecast ────────────────────────────────────
     last = tf.keras.layers.Lambda(lambda t: t[:, -1, :], name="last_tok")(x)
     last = tf.keras.layers.Dropout(dropout, name="head_drop")(last)
     neural_out = tf.keras.layers.Dense(forecast_horizon, name="forecast")(last)
 
-    # ── RevIN denorm ──────────────────────────────────────────────────────────
+    # RevIN denorm
     mean_2d = tf.keras.layers.Lambda(lambda t: t[:, 0, :], name="mean_2d")(mean_s)
     std_2d  = tf.keras.layers.Lambda(lambda t: t[:, 0, :], name="std_2d")(std_s)
     neural_out = tf.keras.layers.Lambda(
@@ -794,7 +674,6 @@ def build_tft_lite(
     model = tf.keras.Model(
         inputs=[inp_series, inp_covars], outputs=final_out, name="TFTLite_v2")
 
-    # ── Optimizer ─────────────────────────────────────────────────────────────
     lr_sched = _build_lr_schedule(learning_rate, use_cosine_decay, total_steps,
                                   warmup_ratio, alpha, "TFT-Lite")
     optimizer = tf.keras.optimizers.Adam(learning_rate=lr_sched, clipnorm=1.0)

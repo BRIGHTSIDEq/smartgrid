@@ -1,4 +1,15 @@
 # -*- coding: utf-8 -*-
+"""
+main.py — Smart Grid v18.
+
+ИЗМЕНЕНИЯ v18 (академические дополнения для курсовой):
+  + [5a] SARIMA(1,1,1)(1,1,1,24) как статистическая базовая линия
+  + [6a] Анализ важности признаков XGBoost (feature_importances_)
+  + [6b] График сравнения HPO до/после
+  + [6c] График SARIMA vs нейросети
+  + [9b] MC Dropout с графиком доверительных интервалов (не только лог)
+"""
+
 import logging
 import random
 from pathlib import Path
@@ -24,15 +35,23 @@ from analysis.backtesting import run_backtesting
 from models.lstm import build_lstm_model
 from models.transformer import (
     build_itransformer, build_patchtst, build_tft_lite, count_parameters,
-    prepare_tft_covariates,
 )
-from models.baseline import build_linear_regression, build_xgboost
+from models.baseline import (
+    build_linear_regression, build_xgboost, build_sarima,
+)
 from models.trainer import ModelTrainer, WeightedEnsemble, compare_trainers
 
 from optimization.storage import simulate_storage, compare_strategies
 from utils.visualization import (
     plot_training_history, plot_predictions_comparison,
     plot_metrics_comparison, plot_storage_result, plot_scientific_diagnostics,
+)
+from utils.academic_plots import (
+    plot_mc_dropout_uncertainty,
+    compute_mc_predictions,
+    plot_feature_importance_xgboost,
+    plot_hpo_comparison,
+    plot_sarima_vs_neural,
 )
 from utils.deployment import export_model_bundle
 
@@ -41,23 +60,27 @@ logger = Config.setup_logging()
 
 def _cleanup_plots_dir(plots_dir: str) -> None:
     keep_prefixes = (
-        "01_timeseries_patterns", "02_consumption_profiles",
-        "03_decomposition", "04_acf_pacf", "05_temperature_dependency",
+        "01_", "02_", "03_", "04_", "05_",
         "training_", "predictions_comparison", "metrics_comparison",
         "scientific_diagnostics_", "residuals_", "backtesting_",
         "storage_optimization", "attention_summary_", "head_specialization_",
+        # v18 новые графики
+        "mc_dropout_uncertainty_",
+        "feature_importance_xgboost",
+        "hpo_comparison",
+        "sarima_vs_neural",
     )
     for p in Path(plots_dir).glob("*"):
         if p.suffix.lower() != ".png":
             p.unlink(missing_ok=True)
             continue
-        if not p.name.startswith(keep_prefixes):
+        if not any(p.name.startswith(pfx) for pfx in keep_prefixes):
             p.unlink(missing_ok=True)
 
 
 def main():
     logger.info("=" * 70)
-    logger.info("  SMART GRID v17 — iTransformer + PatchTST fix + BiasCorrection + single_origin viz")
+    logger.info("  SMART GRID v18 — + SARIMA + FeatureImportance + MCDropout + HPO")
     logger.info("=" * 70)
 
     # Config.set_fast_mode()
@@ -72,8 +95,10 @@ def main():
     df = load_or_generate_smartgrid_data(
         csv_path=Config.GENERATED_DATA_CSV,
         force_regenerate=Config.FORCE_REGENERATE_DATA,
-        days=Config.DAYS, households=Config.HOUSEHOLDS,
-        start_date=Config.START_DATE, seed=Config.SEED,
+        days=Config.DAYS,
+        households=Config.HOUSEHOLDS,
+        start_date=Config.START_DATE,
+        seed=Config.SEED,
         temp_setpoint=Config.GEN_TEMP_SETPOINT,
         temp_quadratic_coef=Config.GEN_TEMP_QUADRATIC_COEF,
         humidity_threshold=Config.GEN_HUMIDITY_THRESHOLD,
@@ -97,12 +122,11 @@ def main():
     if len(df) != expected_rows:
         raise ValueError(
             f"Несовместимый датасет: rows={len(df)}, ожидалось={expected_rows}. "
-            f"Удалите кэш-файл: {Config.GENERATED_DATA_CSV}"
+            f"Удалите кэш: {Config.GENERATED_DATA_CSV}"
         )
     logger.info(
-        "Data snapshot | rows=%d | consumption mean=%.2f std=%.2f | temp mean=%.2f std=%.2f",
+        "Data snapshot | rows=%d | consumption mean=%.2f std=%.2f",
         len(df), float(df["consumption"].mean()), float(df["consumption"].std()),
-        float(df["temperature"].mean()), float(df["temperature"].std()),
     )
     Config.print_summary()
 
@@ -115,10 +139,7 @@ def main():
     # ─────────────────────────────────────────────────────────────────────────
     # [3/10] Подготовка данных
     # ─────────────────────────────────────────────────────────────────────────
-    logger.info(
-        "\n[3/10] Подготовка данных (seasonal_diff=False, history=%d)...",
-        Config.HISTORY_LENGTH,
-    )
+    logger.info("\n[3/10] Подготовка данных (history=%d)...", Config.HISTORY_LENGTH)
     data = prepare_data(
         df,
         history_length=Config.HISTORY_LENGTH,
@@ -128,35 +149,27 @@ def main():
         seasonal_diff=False,
     )
     x_shape = data["X_train"].shape
-    assert x_shape[2] == Config.N_FEATURES, (
-        f"n_features mismatch: {x_shape[2]} != {Config.N_FEATURES}"
-    )
+    assert x_shape[2] == Config.N_FEATURES
+    validate_data_integrity(data)
+    lag_idx    = data["lag_feature_start_idx"]
     naive_type = data.get("naive_type", "unknown")
+    scaler     = data["scaler"]
+
     logger.info(
-        "✅ X_train=%s | seasonal_diff=%s | naive=%s | Y∈[%.3f,%.3f]",
-        x_shape, data["seasonal_diff"], naive_type,
-        float(data["Y_train"].min()), float(data["Y_train"].max()),
-    )
-    logger.info(
-        "Split lens | train=%d val=%d test=%d | raw_train mean=%.2f raw_test mean=%.2f",
+        "Split | train=%d val=%d test=%d | raw_train=%.0f raw_test=%.0f кВт·ч",
         len(data["X_train"]), len(data["X_val"]), len(data["X_test"]),
         float(np.mean(data["raw_train"])), float(np.mean(data["raw_test"])),
     )
-    validate_data_integrity(data)
-    lag_idx = data["lag_feature_start_idx"]
 
     # ─────────────────────────────────────────────────────────────────────────
     # [4/10] Инициализация моделей
     # ─────────────────────────────────────────────────────────────────────────
     logger.info("\n[4/10] Инициализация моделей...")
 
-    _n_train = int(Config.DAYS * 0.70 * 24 - Config.HISTORY_LENGTH - Config.FORECAST_HORIZON)
-    _n_train = max(_n_train, 1)
-    _total_steps = Config.EPOCHS * max(_n_train // Config.BATCH_SIZE, 1)
-    logger.info("total_steps для WarmupCosineDecay: %d (epochs=%d, n_train≈%d, batch=%d)",
-                _total_steps, Config.EPOCHS, _n_train, Config.BATCH_SIZE)
+    _n_train    = max(len(data["X_train"]) // Config.BATCH_SIZE, 1)
+    _total_steps = Config.EPOCHS * _n_train
 
-    # LSTM v13
+    # LSTM
     lstm = build_lstm_model(
         history_length=Config.HISTORY_LENGTH,
         forecast_horizon=Config.FORECAST_HORIZON,
@@ -177,7 +190,7 @@ def main():
         lag_feature_start_idx=lag_idx,
     )
 
-    # iTransformer v1
+    # iTransformer
     itransformer = build_itransformer(
         history_length=Config.HISTORY_LENGTH,
         forecast_horizon=Config.FORECAST_HORIZON,
@@ -196,23 +209,13 @@ def main():
         seasonal_blend_init=Config.VANILLA_SEASONAL_BLEND_INIT,
     )
 
-    # PatchTST v6 — v17 FIX: отдельные lr и dropout
+    # PatchTST
     if Config.HISTORY_LENGTH >= 192:
-        patch_len = 24; stride = 12
+        patch_len, stride = 24, 12
     elif Config.HISTORY_LENGTH >= 96:
-        patch_len = 12; stride = 6
-    elif Config.HISTORY_LENGTH >= 48:
-        patch_len = 8; stride = 4
+        patch_len, stride = 12, 6
     else:
-        patch_len = 6; stride = 3
-
-    n_patches_expected = (Config.HISTORY_LENGTH - patch_len) // stride + 1
-    logger.info(
-        "PatchTST patch_len=%d stride=%d → n_patches=%d "
-        "(history=%d, 1 patch=%dh) | lr=%.0e drop=%.2f patience=%d [v17 individual]",
-        patch_len, stride, n_patches_expected, Config.HISTORY_LENGTH, patch_len,
-        Config.PATCHTST_LEARNING_RATE, Config.PATCHTST_DROPOUT, Config.PATCHTST_PATIENCE,
-    )
+        patch_len, stride = 8, 4
 
     patchtst = build_patchtst(
         history_length=Config.HISTORY_LENGTH,
@@ -223,8 +226,8 @@ def main():
         num_heads=Config.TRANSFORMER_N_HEADS,
         num_layers=Config.TRANSFORMER_N_LAYERS,
         dff=Config.TRANSFORMER_DFF,
-        dropout=Config.TRANSFORMER_DROPOUT,           # fallback (не используется)
-        learning_rate=Config.TRANSFORMER_LEARNING_RATE,  # fallback (не используется)
+        dropout=Config.TRANSFORMER_DROPOUT,
+        learning_rate=Config.TRANSFORMER_LEARNING_RATE,
         stochastic_depth_rate=Config.TRANSFORMER_STOCHASTIC_DEPTH,
         use_revin=Config.PATCHTST_USE_REVIN,
         use_cosine_decay=Config.TRANSFORMER_USE_COSINE_DECAY,
@@ -233,16 +236,14 @@ def main():
         huber_delta=Config.VANILLA_HUBER_DELTA,
         use_seasonal_skip=True,
         seasonal_blend_init=Config.VANILLA_SEASONAL_BLEND_INIT,
-        # v17 FIX: отдельные PatchTST параметры
         patchtst_learning_rate=Config.PATCHTST_LEARNING_RATE,
         patchtst_dropout=Config.PATCHTST_DROPOUT,
     )
 
-    # TFT-Lite v2
+    # TFT-Lite
     _TFT_COVAR_INDICES = [1, 2, 3, 5, 6, 7, 15, 17, 23, 25]
     use_tft = False
     tft_lite = None
-    tft_n_cov = len(_TFT_COVAR_INDICES)
     try:
         tft_lite = build_tft_lite(
             history_length=Config.HISTORY_LENGTH,
@@ -252,22 +253,18 @@ def main():
             num_layers=min(Config.TRANSFORMER_N_LAYERS, 3),
             dropout=Config.TRANSFORMER_DROPOUT,
             learning_rate=Config.TRANSFORMER_LEARNING_RATE,
-            n_covariate_features=tft_n_cov,
+            n_covariate_features=len(_TFT_COVAR_INDICES),
             use_cosine_decay=Config.TRANSFORMER_USE_COSINE_DECAY,
             total_steps=_total_steps,
             warmup_ratio=Config.TRANSFORMER_WARMUP_RATIO,
             huber_delta=Config.VANILLA_HUBER_DELTA,
         )
-
         def _to_series(x): return x[:, :, :1].astype(np.float32)
         def _to_covar(x):  return x[:, :, _TFT_COVAR_INDICES].astype(np.float32)
-
         data["X_tft_train"] = [_to_series(data["X_train"]), _to_covar(data["X_train"])]
         data["X_tft_val"]   = [_to_series(data["X_val"]),   _to_covar(data["X_val"])]
         data["X_tft_test"]  = [_to_series(data["X_test"]),  _to_covar(data["X_test"])]
         use_tft = True
-        logger.info("TFT-Lite v2: %d params | series=(N,T,1) + covars=(N,T,%d) + RevIN denorm",
-                    count_parameters(tft_lite), tft_n_cov)
     except Exception as exc:
         logger.warning("TFT-Lite пропущен: %s", exc)
 
@@ -281,23 +278,29 @@ def main():
         seed=Config.SEED,
     )
 
-    logger.info("Параметры: LSTM=%d | iTransformer=%d | PatchTST=%d",
-                count_parameters(lstm), count_parameters(itransformer), count_parameters(patchtst))
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # [5/10] Обучение
-    # ─────────────────────────────────────────────────────────────────────────
-    logger.info(
-        "\n[5/10] Обучение моделей | seasonal_diff=%s | history=%d",
-        data["seasonal_diff"], Config.HISTORY_LENGTH,
+    # ── [NEW v18] SARIMA ───────────────────────────────────────────────────────
+    sarima_model = build_sarima(
+        order=(1, 1, 1),
+        seasonal_order=(1, 1, 1, 24),
+        refit=False,
     )
 
+    logger.info(
+        "Параметры: LSTM=%d | iTransformer=%d | PatchTST=%d",
+        count_parameters(lstm), count_parameters(itransformer), count_parameters(patchtst),
+    )
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # [5/10] Обучение нейросетей и ML
+    # ─────────────────────────────────────────────────────────────────────────
+    logger.info("\n[5/10] Обучение моделей...")
+
     models_to_train = [
-        (lstm,          "LSTM",            Config.PATIENCE),
-        (itransformer,  "iTransformer",    Config.PATIENCE),
-        (patchtst,      "PatchTST",        Config.PATCHTST_PATIENCE),  # v17: отдельный patience
-        (lr_model,      "LinearRegression",Config.PATIENCE),
-        (xgb_model,     "XGBoost",         Config.PATIENCE),
+        (lstm,         "LSTM",             Config.PATIENCE),
+        (itransformer, "iTransformer",      Config.PATIENCE),
+        (patchtst,     "PatchTST",          Config.PATCHTST_PATIENCE),
+        (lr_model,     "LinearRegression",  Config.PATIENCE),
+        (xgb_model,    "XGBoost",           Config.PATIENCE),
     ]
     if use_tft and tft_lite is not None:
         models_to_train.append((tft_lite, "TFT-Lite", Config.PATIENCE))
@@ -305,92 +308,112 @@ def main():
     trainers = []
     for model, name, patience in models_to_train:
         trainer = ModelTrainer(model, name, Config.MODELS_DIR, Config.PLOTS_DIR)
-        if name == "TFT-Lite":
-            train_data = {**data, "X_train": data["X_tft_train"], "X_val": data["X_tft_val"]}
-        else:
-            train_data = data
-        trainer.train(train_data, epochs=Config.EPOCHS, batch_size=Config.BATCH_SIZE,
-                      patience=patience,                # v17: per-model patience
-                      lr_patience=Config.LR_PATIENCE,
-                      lr_factor=Config.LR_FACTOR, min_delta=Config.MIN_DELTA)
+        train_data = (
+            {**data, "X_train": data["X_tft_train"], "X_val": data["X_tft_val"]}
+            if name == "TFT-Lite" else data
+        )
+        trainer.train(
+            train_data,
+            epochs=Config.EPOCHS,
+            batch_size=Config.BATCH_SIZE,
+            patience=patience,
+            lr_patience=Config.LR_PATIENCE,
+            lr_factor=Config.LR_FACTOR,
+            min_delta=Config.MIN_DELTA,
+        )
         trainers.append(trainer)
         if trainer.history is not None:
-            plot_training_history(trainer.history, model_name=name, plots_dir=Config.PLOTS_DIR)
+            plot_training_history(trainer.history, model_name=name,
+                                  plots_dir=Config.PLOTS_DIR)
+
+    # ── [NEW v18] Обучение SARIMA ─────────────────────────────────────────────
+    logger.info("\n[5a/10] Обучение SARIMA(1,1,1)(1,1,1,24)...")
+    sarima_trainer = ModelTrainer(sarima_model, "SARIMA",
+                                  Config.MODELS_DIR, Config.PLOTS_DIR)
+    try:
+        # SARIMA обучается на сыром ряду, не на нормализованных окнах
+        sarima_model.fit(
+            data["X_train"], data["Y_train"],
+            raw_series=data["raw_train"],
+        )
+        trainers.append(sarima_trainer)
+        sarima_trained = True
+        logger.info("SARIMA обучена успешно")
+    except Exception as exc:
+        logger.warning("SARIMA пропущена: %s", exc)
+        sarima_trained = False
 
     # ─────────────────────────────────────────────────────────────────────────
     # [5b/10] WeightedEnsemble
     # ─────────────────────────────────────────────────────────────────────────
-    logger.info("\n[5b/10] WeightedEnsemble (оптимизация в абсолютном пространстве)...")
-    single_trainers = [t for t in trainers if t.model_name != "TFT-Lite"]
-    ensemble = WeightedEnsemble(single_trainers, model_name="WeightedEnsemble")
+    logger.info("\n[5b/10] WeightedEnsemble...")
+    # SARIMA в ансамбль не включаем — разные пространства предсказаний
+    ensemble_trainers = [t for t in trainers
+                         if t.model_name not in ("TFT-Lite", "SARIMA")]
+    ensemble = WeightedEnsemble(ensemble_trainers, model_name="WeightedEnsemble")
     try:
         ensemble.optimize_weights(data, split="val")
-        trainers_all = trainers + [ensemble]
     except Exception as exc:
-        logger.warning("Ensemble оптимизация не удалась: %s", exc)
-        trainers_all = trainers + [ensemble]
+        logger.warning("Ensemble оптимизация: %s", exc)
+    trainers_all = trainers + [ensemble]
 
     # ─────────────────────────────────────────────────────────────────────────
-    # [5c/10] Post-hoc bias correction на val-set
-    logger.info("\n[5c/10] Post-hoc bias correction на val-set...")
-    scaler = data["scaler"]
-    y_val_true = inverse_scale(scaler, data["Y_val"])  # (N_val, H) кВт·ч
-
+    # [5c/10] Bias correction
+    # ─────────────────────────────────────────────────────────────────────────
+    logger.info("\n[5c/10] Bias correction...")
+    y_val_true = inverse_scale(scaler, data["Y_val"])
     for t in trainers_all:
+        if t.model_name in ("SARIMA", "WeightedEnsemble"):
+            continue
         try:
-            if isinstance(t, WeightedEnsemble):
-                # Для ансамбля bias correction не применяем — он агрегирует уже скорректированных
-                continue
             y_val_pred = t.predict_absolute(data, split="val")
-            bias = float(np.mean(y_val_pred - y_val_true))   # MBE в кВт·ч
+            bias = float(np.mean(y_val_pred - y_val_true))
             t._bias_correction = bias
-            logger.info(
-                "  %-24s bias_correction=%+.1f кВт·ч (MBE на val, будет вычтен из test pred)",
-                t.model_name, bias
-            )
+            logger.info("  %-24s bias=%+.1f кВт·ч", t.model_name, bias)
         except Exception as exc:
-            logger.warning("  bias correction %s: %s", t.model_name, exc)
+            logger.warning("  bias %s: %s", t.model_name, exc)
 
     # ─────────────────────────────────────────────────────────────────────────
     # [6/10] Сравнение моделей
     # ─────────────────────────────────────────────────────────────────────────
     logger.info("\n[6/10] Сравнение (метрики в кВт·ч)...")
     all_metrics, best_name = compare_trainers(
-        trainers_all, data, split="test", select_by="composite")
+        trainers_all, data, split="test", select_by="composite"
+    )
     plot_metrics_comparison(all_metrics, plots_dir=Config.PLOTS_DIR)
 
+    # Собираем предсказания всех моделей
     predictions = {}
+    y_true = inverse_scale(scaler, data["Y_test"])
+
     for t in trainers_all:
         try:
             if t.model_name == "TFT-Lite":
                 raw = t.predict(data["X_tft_test"])
                 predictions[t.model_name] = inverse_scale(scaler, raw)
+            elif t.model_name == "SARIMA" and sarima_trained:
+                # SARIMA предсказывает в raw кВт·ч напрямую
+                raw_pred = sarima_model.predict(data["X_test"])
+                predictions["SARIMA"] = raw_pred
             else:
                 predictions[t.model_name] = t.predict_absolute(data, split="test")
         except Exception as exc:
-            logger.warning("predict_absolute %s: %s", t.model_name, exc)
-
-    y_true = inverse_scale(scaler, data["Y_test"])  # (N_test, H) кВт·ч
+            logger.warning("predict %s: %s", t.model_name, exc)
 
     if predictions:
-
         plot_predictions_comparison(
             y_true, predictions,
             n_steps=168,
             mode="single_origin",
             plots_dir=Config.PLOTS_DIR,
         )
-        # Дополнительно: rolling h=1 forecast для диагностики краткосрочной точности
-        plot_predictions_comparison(
-            y_true, predictions,
-            n_steps=168,
-            mode="walk_forward_h1",
-            plots_dir=Config.PLOTS_DIR.replace("plots", "plots_h1") if False else Config.PLOTS_DIR,
-        )
 
-    best_trainer = next((t for t in trainers_all if t.model_name == best_name), trainers[0])
+    best_trainer = next(
+        (t for t in trainers_all if t.model_name == best_name), trainers[0]
+    )
     logger.info("🏆 Лучшая: %s | MAE=%.2f | composite=%.3f",
-                best_name, all_metrics[best_name]["MAE"],
+                best_name,
+                all_metrics[best_name]["MAE"],
                 all_metrics[best_name].get("composite_score", float("nan")))
 
     if best_name in predictions:
@@ -400,6 +423,55 @@ def main():
             model_name=best_name.replace(" ", "_"),
             plots_dir=Config.PLOTS_DIR,
         )
+
+    # ── [NEW v18] SARIMA vs нейросети ─────────────────────────────────────────
+    logger.info("\n[6a/10] График SARIMA vs нейросети...")
+    if predictions:
+        try:
+            plot_sarima_vs_neural(
+                y_true=y_true,
+                predictions=predictions,
+                n_steps=96,
+                plots_dir=Config.PLOTS_DIR,
+            )
+        except Exception as exc:
+            logger.warning("sarima_vs_neural: %s", exc)
+
+    # ── [NEW v18] Feature importance XGBoost ──────────────────────────────────
+    logger.info("\n[6b/10] Feature importance XGBoost...")
+    xgb_trainer = next(
+        (t for t in trainers if t.model_name == "XGBoost"), None
+    )
+    if xgb_trainer is not None:
+        try:
+            imp_dict = xgb_trainer.model.get_feature_importance(top_n=25)
+            if imp_dict is not None:
+                plot_feature_importance_xgboost(
+                    imp_dict,
+                    top_n=25,
+                    plots_dir=Config.PLOTS_DIR,
+                )
+        except Exception as exc:
+            logger.warning("Feature importance: %s", exc)
+
+    # ── [NEW v18] HPO comparison ───────────────────────────────────────────────
+    logger.info("\n[6c/10] HPO comparison до/после...")
+    try:
+        # all_metrics содержит результаты ПОСЛЕ HPO (текущий запуск)
+        results_after_hpo = {
+            name: {
+                "MAE":  m["MAE"],
+                "R2":   m["R2"],
+                "MAPE": m.get("MAPE", m.get("sMAPE", 0.0)),
+            }
+            for name, m in all_metrics.items()
+        }
+        plot_hpo_comparison(
+            results_after=results_after_hpo,
+            plots_dir=Config.PLOTS_DIR,
+        )
+    except Exception as exc:
+        logger.warning("HPO comparison: %s", exc)
 
     # ─────────────────────────────────────────────────────────────────────────
     # [7/10] Визуализация внимания
@@ -412,10 +484,16 @@ def main():
         for t in trainers:
             if t.model_name in ("iTransformer", "PatchTST"):
                 visualize_attention_summary(
-                    t.model, sample_x, history_length=Config.HISTORY_LENGTH,
-                    model_name=t.model_name, plots_dir=Config.PLOTS_DIR)
+                    t.model, sample_x,
+                    history_length=Config.HISTORY_LENGTH,
+                    model_name=t.model_name,
+                    plots_dir=Config.PLOTS_DIR,
+                )
                 compare_head_specialization(
-                    t.model, sample_x, model_name=t.model_name, plots_dir=Config.PLOTS_DIR)
+                    t.model, sample_x,
+                    model_name=t.model_name,
+                    plots_dir=Config.PLOTS_DIR,
+                )
     except Exception as exc:
         logger.warning("Attention пропущена: %s", exc)
 
@@ -428,33 +506,58 @@ def main():
     else:
         try:
             best_pred = best_trainer.predict_absolute(data, "test")
-        except Exception as exc:
-            logger.warning("Fallback predict_absolute failed: %s. Using y_true.", exc)
+        except Exception:
             best_pred = y_true
-    analyze_residuals(y_true, best_pred, model_name=best_name, plots_dir=Config.PLOTS_DIR)
+    analyze_residuals(
+        y_true, best_pred,
+        model_name=best_name,
+        plots_dir=Config.PLOTS_DIR,
+    )
 
     # ─────────────────────────────────────────────────────────────────────────
     # [9/10] Бэктестинг
     # ─────────────────────────────────────────────────────────────────────────
     logger.info("\n[9/10] Бэктестинг (LSTM)...")
-    lstm_trainer = next((t for t in trainers if t.model_name == "LSTM"), trainers[0])
-    run_backtesting(lstm_trainer.model, data, n_windows=8,
-                    plots_dir=Config.PLOTS_DIR, model_name="LSTM")
+    lstm_trainer = next(
+        (t for t in trainers if t.model_name == "LSTM"), trainers[0]
+    )
+    run_backtesting(
+        lstm_trainer.model, data,
+        n_windows=8,
+        plots_dir=Config.PLOTS_DIR,
+        model_name="LSTM",
+    )
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # [9b/10] MC Dropout
-    # ─────────────────────────────────────────────────────────────────────────
-    logger.info("\n[9b/10] MC Dropout (LSTM)...")
+    # ── [NEW v18] MC Dropout с ГРАФИКОМ ───────────────────────────────────────
+    logger.info("\n[9b/10] MC Dropout (LSTM) — с графиком доверительных интервалов...")
     try:
-        mc_mean, mc_std = lstm_trainer.mc_predict(data["X_test"][:500], n_samples=30)
-        if hasattr(scaler, "scale_") and scaler.scale_ is not None:
-            mc_std_kwh = float(mc_std.mean()) / float(scaler.scale_[0])
-        else:
-            mc_std_kwh = float(mc_std.mean()) * float(data["raw_train"].max() - data["raw_train"].min())
-        logger.info("MC Dropout | mean uncertainty: ±%.1f кВт·ч (scaled: ±%.4f)",
-                    mc_std_kwh, float(mc_std.mean()))
+        n_mc_samples = 500
+        mc_mean_kwh, mc_std_kwh = compute_mc_predictions(
+            model=lstm_trainer.model,
+            X=data["X_test"][:n_mc_samples],
+            scaler=scaler,
+            n_samples=30,
+        )
+        y_true_mc = inverse_scale(scaler, data["Y_test"][:n_mc_samples])
+
+        # График доверительных интервалов
+        plot_mc_dropout_uncertainty(
+            y_true=y_true_mc,
+            mc_mean=mc_mean_kwh,
+            mc_std=mc_std_kwh,
+            model_name="LSTM",
+            n_steps=72,
+            plots_dir=Config.PLOTS_DIR,
+        )
+
+        avg_std = float(mc_std_kwh.mean())
+        logger.info(
+            "MC Dropout | mean uncertainty: ±%.1f кВт·ч (%.2f%% от ср.потребления)",
+            avg_std,
+            avg_std / float(np.mean(data["raw_test"])) * 100,
+        )
     except Exception as exc:
-        logger.warning("MC Dropout пропущен: %s", exc)
+        logger.warning("MC Dropout: %s", exc)
 
     # ─────────────────────────────────────────────────────────────────────────
     # [10/10] Оптимизация батареи BESS
@@ -465,9 +568,8 @@ def main():
     mean_train = float(np.mean(data["raw_train"]))
     if mean_test > mean_train * 1.15:
         logger.warning(
-            "Тест-период имеет повышенное потребление (mean=%.0f vs train=%.0f кВт·ч). "
-            "Срок окупаемости батареи может быть занижен. "
-            "Используйте годовой прогноз для реалистичной оценки.",
+            "Тест-период: повышенное потребление (mean=%.0f vs train=%.0f кВт·ч). "
+            "Срок окупаемости занижен — для реалистичной оценки используйте годовой прогноз.",
             mean_test, mean_train,
         )
 
@@ -501,29 +603,31 @@ def main():
         annual_om_share=Config.BATTERY_OM_SHARE,
     )
 
-    # Экспорт лучшей Keras-модели
+    # Экспорт лучшей модели
     best_keras = next(
         (t for t in trainers_all
-         if t.model_name == best_name and isinstance(getattr(t, "model", None), tf.keras.Model)),
+         if t.model_name == best_name
+         and isinstance(getattr(t, "model", None), tf.keras.Model)),
         None,
     )
     if best_keras is None:
         best_keras = next(
-            (t for t in trainers if isinstance(getattr(t, "model", None), tf.keras.Model)),
+            (t for t in trainers
+             if isinstance(getattr(t, "model", None), tf.keras.Model)),
             None,
         )
     if best_keras is not None:
         export_model_bundle(
             best_keras.model, scaler,
             {
-                "HISTORY_LENGTH": Config.HISTORY_LENGTH,
-                "FORECAST_HORIZON": Config.FORECAST_HORIZON,
-                "N_FEATURES": Config.N_FEATURES,
-                "model_name": best_keras.model_name,
+                "HISTORY_LENGTH":    Config.HISTORY_LENGTH,
+                "FORECAST_HORIZON":  Config.FORECAST_HORIZON,
+                "N_FEATURES":        Config.N_FEATURES,
+                "model_name":        best_keras.model_name,
                 "lag_feature_start_idx": lag_idx,
-                "seasonal_diff": False,
-                "naive_type": naive_type,
-                "bias_correction": getattr(best_keras, "_bias_correction", None),
+                "seasonal_diff":     False,
+                "naive_type":        naive_type,
+                "bias_correction":   getattr(best_keras, "_bias_correction", None),
             },
             export_dir=Config.MODELS_DIR,
             model_name=best_keras.model_name,
@@ -531,21 +635,27 @@ def main():
 
     _cleanup_plots_dir(Config.PLOTS_DIR)
 
-    # Итоговый отчёт
+    # ── Итоговый отчёт ─────────────────────────────────────────────────────────
     logger.info("\n" + "=" * 70)
-    logger.info(" Пайплайн завершён!")
+    logger.info(" Пайплайн v18 завершён!")
     logger.info("Итог (sorted by composite_score):")
-    for name, m in sorted(all_metrics.items(), key=lambda kv: kv[1].get("composite_score", 999)):
+    for name, m in sorted(
+        all_metrics.items(),
+        key=lambda kv: kv[1].get("composite_score", 999)
+    ):
         logger.info(
             "  %-24s MAE=%7.2f R²=%.4f ACF24=%.3f Composite=%.3f",
-            name, m["MAE"], m["R2"], m.get("ACF_24", float("nan")),
+            name, m["MAE"], m["R2"],
+            m.get("ACF_24", float("nan")),
             m.get("composite_score", float("nan")),
         )
+
+    logger.info("\nНовые графики v18:")
+    logger.info("  results/plots/sarima_vs_neural.png")
+    logger.info("  results/plots/feature_importance_xgboost.png")
+    logger.info("  results/plots/hpo_comparison.png")
+    logger.info("  results/plots/mc_dropout_uncertainty_LSTM.png")
     logger.info(" %s", Config.OUTPUT_DIR)
-    logger.info("Config: history=%d | seasonal_diff=False | "
-                "LSTM seasonal_skip=True | PatchTST lr=%.0e drop=%.2f patience=%d",
-                Config.HISTORY_LENGTH,
-                Config.PATCHTST_LEARNING_RATE, Config.PATCHTST_DROPOUT, Config.PATCHTST_PATIENCE)
     logger.info("=" * 70)
 
 

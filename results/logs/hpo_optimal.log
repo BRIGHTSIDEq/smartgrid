@@ -1,0 +1,419 @@
+2026-04-30 23:57:46,203 | INFO     | smart_grid.hpo | ======================================================================
+2026-04-30 23:57:46,209 | INFO     | smart_grid.hpo | SMART GRID HPO v1 | mode=optimal | model=all | n_trials=25
+2026-04-30 23:57:46,218 | INFO     | smart_grid.hpo | Search config: days=365 | epochs=80 | batch=16 | patience=20
+2026-04-30 23:57:46,226 | INFO     | smart_grid.hpo | ======================================================================
+2026-04-30 23:57:46,236 | INFO     | smart_grid.hpo | Генерация данных для HPO (365 дней)...
+2026-04-30 23:57:46,251 | INFO     | smart_grid.data.generator | Генерация Smart Grid v6: 365 дней, 1500 домохозяйств, районов=12 | EV=50% Solar=22%
+2026-04-30 23:57:47,051 | INFO     | smart_grid.data.generator | Типы: ранние=420 (28%), стандартные=780 (52%), ночные=300 (20%)
+2026-04-30 23:58:02,820 | INFO     | smart_grid.data.generator | Сгенерировано 8760 записей. Потребление: min=12463.5, mean=36854.3, max=105218.0 кВт·ч
+2026-04-30 23:58:02,820 | INFO     | smart_grid.data.generator |   EV нагрузка: mean=2694.6 кВт (12.0% базовой)  [v5 был: ~1.2% — был time-wrap баг]
+2026-04-30 23:58:02,820 | INFO     | smart_grid.data.generator |   Solar: mean=176.7 кВт, max=986.9 кВт
+2026-04-30 23:58:02,821 | INFO     | smart_grid.data.generator |   DSR событий активно: 84 ч | Industrial: 6 заводов | Cascade max=1.25
+2026-04-30 23:58:02,821 | INFO     | smart_grid.data.generator |   Grid stress max=1.21 | DSR rebound max=0.15
+2026-04-30 23:58:02,821 | INFO     | smart_grid.data.generator |   CV потребления: 0.339
+2026-04-30 23:58:02,864 | INFO     | smart_grid.hpo | Подготовка признаков (history=192)...
+2026-04-30 23:58:02,877 | INFO     | smart_grid.data.preprocessing | Lag-колонки добавлены (bfill): 24/48/168h
+2026-04-30 23:58:02,888 | INFO     | smart_grid.data.preprocessing | Rolling stats пересчитаны per-split (v12 fix): train=6132 val=1314 test=1314 — нет утечки через rolling
+2026-04-30 23:58:03,101 | INFO     | smart_grid.data.preprocessing | Seasonal diff OFF — абсолютные значения ∈ [0.000, 1.000] | Dual Naive хранится для диагностики (naive_type=disabled (seasonal_diff=False))
+2026-04-30 23:58:03,101 | INFO     | smart_grid.data.preprocessing | Данные v12 | train=5917 val=1099 test=1099 | n_features=26 | history=192 | seasonal_diff=False | naive=disabled (seasonal_diff=False)
+2026-04-30 23:58:03,101 | INFO     | smart_grid.data.preprocessing | X_train.shape=(5917, 192, 26)  Y_train.shape=(5917, 24)
+2026-04-30 23:58:03,102 | INFO     | smart_grid.hpo | Данные готовы: train=5917 val=1099
+2026-04-30 23:58:03,102 | INFO     | smart_grid.hpo | 
+──────────────────────────────────────────────────────────────────────
+2026-04-30 23:58:03,102 | INFO     | smart_grid.hpo | Запуск HPO для модели: LSTM
+2026-04-30 23:58:03,103 | INFO     | smart_grid.hpo | =================================================================
+2026-04-30 23:58:03,103 | INFO     | smart_grid.hpo | HPO [LSTM | mode=optimal] n_trials=25 | epochs=80 | days=365
+2026-04-30 23:58:03,103 | INFO     | smart_grid.hpo | =================================================================
+2026-04-30 23:58:03,959 | WARNING  | tensorflow | From C:\Users\Admin\AppData\Local\Programs\Python\Python312\Lib\site-packages\keras\src\backend\tensorflow\core.py:204: The name tf.placeholder is deprecated. Please use tf.compat.v1.placeholder instead.
+
+2026-04-30 23:58:04,723 | INFO     | smart_grid.models.lstm | SeasonalSkip активирован: lag-24h (init_w=0.40) + lag-168h (init_w=0.80)
+2026-04-30 23:58:04,729 | INFO     | smart_grid.models.lstm | LSTM: WarmupCosineDecay lr=0→8e-05 warmup=1476 steps → 2e-06
+2026-04-30 23:58:04,733 | INFO     | smart_grid.models.lstm | TCN-BiLSTM-Attention v13 | 673862 params | input=(192,26) | TCN=64(LN) dil=[1,2,4,8] | BiLSTM=96×2 | Attn 8h | Dense 256/128 drop=0.25 | RevIN=True(denorm) | SeasonalSkip=True + lag-168h skip blend=0.40 | WarmupCosine=True warmup=5% | lr=8e-05 | Huber(δ=0.10)
+2026-05-01 01:28:07,540 | INFO     | smart_grid.models.lstm | SeasonalSkip активирован: lag-24h (init_w=0.80) + lag-168h (init_w=0.80)
+2026-05-01 01:28:07,548 | INFO     | smart_grid.models.lstm | LSTM: WarmupCosineDecay lr=0→4e-04 warmup=1476 steps → 7e-06
+2026-05-01 01:28:07,553 | INFO     | smart_grid.models.lstm | TCN-BiLSTM-Attention v13 | 298470 params | input=(192,26) | TCN=32(LN) dil=[1,2,4,8] | BiLSTM=64×2 | Attn 4h | Dense 256/128 drop=0.05 | RevIN=True(denorm) | SeasonalSkip=True + lag-168h skip blend=0.80 | WarmupCosine=True warmup=5% | lr=4e-04 | Huber(δ=0.02)
+2026-05-01 02:05:46,309 | INFO     | smart_grid.models.lstm | SeasonalSkip активирован: lag-24h (init_w=0.60) + lag-168h (init_w=0.80)
+2026-05-01 02:05:46,320 | INFO     | smart_grid.models.lstm | TCN-BiLSTM-Attention v13 | 1350118 params | input=(192,26) | TCN=32(LN) dil=[1,2,4,8] | BiLSTM=192×2 | Attn 4h | Dense 256/128 drop=0.25 | RevIN=True(denorm) | SeasonalSkip=True + lag-168h skip blend=0.60 | WarmupCosine=False warmup=5% | lr=3e-04 | Huber(δ=0.02)
+2026-05-01 03:14:27,815 | INFO     | smart_grid.models.lstm | SeasonalSkip активирован: lag-24h (init_w=0.70) + lag-168h (init_w=0.80)
+2026-05-01 03:14:27,823 | INFO     | smart_grid.models.lstm | LSTM: WarmupCosineDecay lr=0→3e-04 warmup=1476 steps → 5e-06
+2026-05-01 03:14:27,832 | INFO     | smart_grid.models.lstm | TCN-BiLSTM-Attention v13 | 944966 params | input=(192,26) | TCN=64(LN) dil=[1,2,4,8] | BiLSTM=128×2 | Attn 2h | Dense 256/128 drop=0.05 | RevIN=True(denorm) | SeasonalSkip=True + lag-168h skip blend=0.70 | WarmupCosine=True warmup=5% | lr=3e-04 | Huber(δ=0.05)
+2026-05-01 04:55:52,070 | INFO     | smart_grid.models.lstm | SeasonalSkip активирован: lag-24h (init_w=0.70) + lag-168h (init_w=0.80)
+2026-05-01 04:55:52,083 | INFO     | smart_grid.models.lstm | TCN-BiLSTM-Attention v13 | 662694 params | input=(192,26) | TCN=96(LN) dil=[1,2,4,8] | BiLSTM=64×2 | Attn 8h | Dense 256/128 drop=0.20 | RevIN=True(denorm) | SeasonalSkip=True + lag-168h skip blend=0.70 | WarmupCosine=False warmup=5% | lr=2e-04 | Huber(δ=0.05)
+2026-05-01 06:47:52,539 | INFO     | smart_grid.models.lstm | SeasonalSkip активирован: lag-24h (init_w=0.60) + lag-168h (init_w=0.80)
+2026-05-01 06:47:52,547 | INFO     | smart_grid.models.lstm | LSTM: WarmupCosineDecay lr=0→3e-04 warmup=1476 steps → 5e-06
+2026-05-01 06:47:52,554 | INFO     | smart_grid.models.lstm | TCN-BiLSTM-Attention v13 | 2520902 params | input=(192,26) | TCN=64(LN) dil=[1,2,4,8] | BiLSTM=256×2 | Attn 4h | Dense 256/128 drop=0.25 | RevIN=True(denorm) | SeasonalSkip=True + lag-168h skip blend=0.60 | WarmupCosine=True warmup=5% | lr=3e-04 | Huber(δ=0.02)
+2026-05-01 09:42:00,379 | INFO     | smart_grid.models.lstm | SeasonalSkip активирован: lag-24h (init_w=0.80) + lag-168h (init_w=0.80)
+2026-05-01 09:42:00,390 | INFO     | smart_grid.models.lstm | TCN-BiLSTM-Attention v13 | 673862 params | input=(192,26) | TCN=64(LN) dil=[1,2,4,8] | BiLSTM=96×2 | Attn 2h | Dense 256/128 drop=0.05 | RevIN=True(denorm) | SeasonalSkip=True + lag-168h skip blend=0.80 | WarmupCosine=False warmup=5% | lr=1e-04 | Huber(δ=0.10)
+2026-05-01 09:54:17,549 | INFO     | smart_grid.hpo | Trial 6 обрезан на эпохе 20 (val_loss=0.003223)
+2026-05-01 09:54:25,548 | INFO     | smart_grid.models.lstm | SeasonalSkip активирован: lag-24h (init_w=0.80) + lag-168h (init_w=0.80)
+2026-05-01 09:54:25,553 | INFO     | smart_grid.models.lstm | TCN-BiLSTM-Attention v13 | 368022 params | input=(192,26) | TCN=48(LN) dil=[1,2,4,8] | BiLSTM=64×2 | Attn 4h | Dense 256/128 drop=0.05 | RevIN=True(denorm) | SeasonalSkip=True + lag-168h skip blend=0.80 | WarmupCosine=False warmup=5% | lr=1e-04 | Huber(δ=0.10)
+2026-05-01 10:02:45,873 | INFO     | smart_grid.hpo | Trial 7 обрезан на эпохе 20 (val_loss=0.003220)
+2026-05-01 10:02:47,027 | INFO     | smart_grid.models.lstm | SeasonalSkip активирован: lag-24h (init_w=0.60) + lag-168h (init_w=0.80)
+2026-05-01 10:02:47,031 | INFO     | smart_grid.models.lstm | LSTM: WarmupCosineDecay lr=0→8e-05 warmup=1476 steps → 2e-06
+2026-05-01 10:02:47,033 | INFO     | smart_grid.models.lstm | TCN-BiLSTM-Attention v13 | 725990 params | input=(192,26) | TCN=32(LN) dil=[1,2,4,8] | BiLSTM=128×2 | Attn 4h | Dense 256/128 drop=0.15 | RevIN=True(denorm) | SeasonalSkip=True + lag-168h skip blend=0.60 | WarmupCosine=True warmup=5% | lr=8e-05 | Huber(δ=0.05)
+2026-05-01 10:13:39,514 | INFO     | smart_grid.hpo | Trial 8 обрезан на эпохе 20 (val_loss=0.002333)
+2026-05-01 10:13:40,736 | INFO     | smart_grid.models.lstm | SeasonalSkip активирован: lag-24h (init_w=0.50) + lag-168h (init_w=0.80)
+2026-05-01 10:13:40,739 | INFO     | smart_grid.models.lstm | LSTM: WarmupCosineDecay lr=0→2e-04 warmup=1476 steps → 4e-06
+2026-05-01 10:13:40,741 | INFO     | smart_grid.models.lstm | TCN-BiLSTM-Attention v13 | 828310 params | input=(192,26) | TCN=48(LN) dil=[1,2,4,8] | BiLSTM=128×2 | Attn 8h | Dense 256/128 drop=0.25 | RevIN=True(denorm) | SeasonalSkip=True + lag-168h skip blend=0.50 | WarmupCosine=True warmup=5% | lr=2e-04 | Huber(δ=0.10)
+2026-05-01 10:26:09,778 | INFO     | smart_grid.hpo | Trial 9 обрезан на эпохе 20 (val_loss=0.002242)
+2026-05-01 10:26:11,137 | INFO     | smart_grid.models.lstm | SeasonalSkip активирован: lag-24h (init_w=0.70) + lag-168h (init_w=0.80)
+2026-05-01 10:26:11,143 | INFO     | smart_grid.models.lstm | TCN-BiLSTM-Attention v13 | 1350118 params | input=(192,26) | TCN=32(LN) dil=[1,2,4,8] | BiLSTM=192×2 | Attn 4h | Dense 256/128 drop=0.25 | RevIN=True(denorm) | SeasonalSkip=True + lag-168h skip blend=0.70 | WarmupCosine=False warmup=5% | lr=3e-04 | Huber(δ=0.02)
+2026-05-01 11:45:30,246 | INFO     | smart_grid.models.lstm | SeasonalSkip активирован: lag-24h (init_w=0.80) + lag-168h (init_w=0.80)
+2026-05-01 11:45:30,287 | INFO     | smart_grid.models.lstm | TCN-BiLSTM-Attention v13 | 1350118 params | input=(192,26) | TCN=32(LN) dil=[1,2,4,8] | BiLSTM=192×2 | Attn 2h | Dense 256/128 drop=0.25 | RevIN=True(denorm) | SeasonalSkip=True + lag-168h skip blend=0.80 | WarmupCosine=False warmup=5% | lr=3e-04 | Huber(δ=0.02)
+2026-05-01 13:02:07,075 | INFO     | smart_grid.models.lstm | SeasonalSkip активирован: lag-24h (init_w=0.80) + lag-168h (init_w=0.80)
+2026-05-01 13:02:07,091 | INFO     | smart_grid.models.lstm | TCN-BiLSTM-Attention v13 | 1350118 params | input=(192,26) | TCN=32(LN) dil=[1,2,4,8] | BiLSTM=192×2 | Attn 2h | Dense 256/128 drop=0.15 | RevIN=True(denorm) | SeasonalSkip=True + lag-168h skip blend=0.80 | WarmupCosine=False warmup=5% | lr=2e-04 | Huber(δ=0.02)
+2026-05-01 13:45:17,079 | INFO     | smart_grid.hpo | Trial 12 обрезан на эпохе 20 (val_loss=0.000925)
+2026-05-01 13:45:22,326 | INFO     | smart_grid.models.lstm | SeasonalSkip активирован: lag-24h (init_w=0.80) + lag-168h (init_w=0.80)
+2026-05-01 13:45:22,342 | INFO     | smart_grid.models.lstm | TCN-BiLSTM-Attention v13 | 917414 params | input=(192,26) | TCN=96(LN) dil=[1,2,4,8] | BiLSTM=96×2 | Attn 2h | Dense 256/128 drop=0.25 | RevIN=True(denorm) | SeasonalSkip=True + lag-168h skip blend=0.80 | WarmupCosine=False warmup=5% | lr=2e-04 | Huber(δ=0.02)
+2026-05-01 15:22:27,894 | INFO     | smart_grid.models.lstm | SeasonalSkip активирован: lag-24h (init_w=0.50) + lag-168h (init_w=0.80)
+2026-05-01 15:22:27,914 | INFO     | smart_grid.models.lstm | TCN-BiLSTM-Attention v13 | 1350118 params | input=(192,26) | TCN=32(LN) dil=[1,2,4,8] | BiLSTM=192×2 | Attn 4h | Dense 256/128 drop=0.25 | RevIN=True(denorm) | SeasonalSkip=True + lag-168h skip blend=0.50 | WarmupCosine=False warmup=5% | lr=1e-04 | Huber(δ=0.02)
+2026-05-01 16:07:49,862 | INFO     | smart_grid.hpo | Trial 14 обрезан на эпохе 20 (val_loss=0.000916)
+2026-05-01 16:07:54,270 | INFO     | smart_grid.models.lstm | SeasonalSkip активирован: lag-24h (init_w=0.40) + lag-168h (init_w=0.80)
+2026-05-01 16:07:54,280 | INFO     | smart_grid.models.lstm | TCN-BiLSTM-Attention v13 | 1350118 params | input=(192,26) | TCN=32(LN) dil=[1,2,4,8] | BiLSTM=192×2 | Attn 2h | Dense 256/128 drop=0.20 | RevIN=True(denorm) | SeasonalSkip=True + lag-168h skip blend=0.40 | WarmupCosine=False warmup=5% | lr=3e-04 | Huber(δ=0.02)
+2026-05-01 17:39:01,351 | INFO     | smart_grid.models.lstm | SeasonalSkip активирован: lag-24h (init_w=0.70) + lag-168h (init_w=0.80)
+2026-05-01 17:39:01,371 | INFO     | smart_grid.models.lstm | TCN-BiLSTM-Attention v13 | 1485206 params | input=(192,26) | TCN=48(LN) dil=[1,2,4,8] | BiLSTM=192×2 | Attn 2h | Dense 256/128 drop=0.25 | RevIN=True(denorm) | SeasonalSkip=True + lag-168h skip blend=0.70 | WarmupCosine=False warmup=5% | lr=3e-04 | Huber(δ=0.10)
+2026-05-01 18:26:19,140 | INFO     | smart_grid.hpo | Trial 16 обрезан на эпохе 20 (val_loss=0.002169)
+2026-05-01 18:26:23,455 | INFO     | smart_grid.models.lstm | SeasonalSkip активирован: lag-24h (init_w=0.40) + lag-168h (init_w=0.80)
+2026-05-01 18:26:23,468 | INFO     | smart_grid.models.lstm | TCN-BiLSTM-Attention v13 | 1350118 params | input=(192,26) | TCN=32(LN) dil=[1,2,4,8] | BiLSTM=192×2 | Attn 4h | Dense 256/128 drop=0.25 | RevIN=True(denorm) | SeasonalSkip=True + lag-168h skip blend=0.40 | WarmupCosine=False warmup=5% | lr=4e-04 | Huber(δ=0.05)
+2026-05-01 19:07:29,904 | INFO     | smart_grid.hpo | Trial 17 обрезан на эпохе 20 (val_loss=0.001663)
+2026-05-01 19:07:33,546 | INFO     | smart_grid.models.lstm | SeasonalSkip активирован: lag-24h (init_w=0.80) + lag-168h (init_w=0.80)
+2026-05-01 19:07:33,556 | INFO     | smart_grid.models.lstm | TCN-BiLSTM-Attention v13 | 1350118 params | input=(192,26) | TCN=32(LN) dil=[1,2,4,8] | BiLSTM=192×2 | Attn 2h | Dense 256/128 drop=0.25 | RevIN=True(denorm) | SeasonalSkip=True + lag-168h skip blend=0.80 | WarmupCosine=False warmup=5% | lr=2e-04 | Huber(δ=0.05)
+2026-05-01 19:49:37,040 | INFO     | smart_grid.hpo | Trial 18 обрезан на эпохе 20 (val_loss=0.001752)
+2026-05-01 19:49:40,645 | INFO     | smart_grid.models.lstm | SeasonalSkip активирован: lag-24h (init_w=0.70) + lag-168h (init_w=0.80)
+2026-05-01 19:49:40,651 | INFO     | smart_grid.models.lstm | LSTM: WarmupCosineDecay lr=0→4e-04 warmup=1476 steps → 7e-06
+2026-05-01 19:49:40,655 | INFO     | smart_grid.models.lstm | TCN-BiLSTM-Attention v13 | 1350118 params | input=(192,26) | TCN=32(LN) dil=[1,2,4,8] | BiLSTM=192×2 | Attn 2h | Dense 256/128 drop=0.25 | RevIN=True(denorm) | SeasonalSkip=True + lag-168h skip blend=0.70 | WarmupCosine=True warmup=5% | lr=4e-04 | Huber(δ=0.02)
+2026-05-01 20:31:50,762 | INFO     | smart_grid.hpo | Trial 19 обрезан на эпохе 20 (val_loss=0.000910)
+2026-05-01 20:32:16,214 | INFO     | smart_grid.models.lstm | SeasonalSkip активирован: lag-24h (init_w=0.60) + lag-168h (init_w=0.80)
+2026-05-01 20:32:16,229 | INFO     | smart_grid.models.lstm | TCN-BiLSTM-Attention v13 | 2338710 params | input=(192,26) | TCN=48(LN) dil=[1,2,4,8] | BiLSTM=256×2 | Attn 4h | Dense 256/128 drop=0.15 | RevIN=True(denorm) | SeasonalSkip=True + lag-168h skip blend=0.60 | WarmupCosine=False warmup=5% | lr=2e-04 | Huber(δ=0.02)
+2026-05-01 22:40:54,784 | INFO     | smart_grid.models.lstm | SeasonalSkip активирован: lag-24h (init_w=0.80) + lag-168h (init_w=0.80)
+2026-05-01 22:40:54,804 | INFO     | smart_grid.models.lstm | TCN-BiLSTM-Attention v13 | 917414 params | input=(192,26) | TCN=96(LN) dil=[1,2,4,8] | BiLSTM=96×2 | Attn 4h | Dense 256/128 drop=0.25 | RevIN=True(denorm) | SeasonalSkip=True + lag-168h skip blend=0.80 | WarmupCosine=False warmup=5% | lr=2e-04 | Huber(δ=0.02)
+2026-05-02 00:47:16,899 | INFO     | smart_grid.models.lstm | SeasonalSkip активирован: lag-24h (init_w=0.70) + lag-168h (init_w=0.80)
+2026-05-02 00:47:16,916 | INFO     | smart_grid.models.lstm | TCN-BiLSTM-Attention v13 | 917414 params | input=(192,26) | TCN=96(LN) dil=[1,2,4,8] | BiLSTM=96×2 | Attn 4h | Dense 256/128 drop=0.25 | RevIN=True(denorm) | SeasonalSkip=True + lag-168h skip blend=0.70 | WarmupCosine=False warmup=5% | lr=6e-05 | Huber(δ=0.02)
+2026-05-02 01:24:57,622 | INFO     | smart_grid.hpo | Trial 22 обрезан на эпохе 20 (val_loss=0.001143)
+2026-05-02 01:25:36,218 | INFO     | smart_grid.models.lstm | SeasonalSkip активирован: lag-24h (init_w=0.80) + lag-168h (init_w=0.80)
+2026-05-02 01:25:36,225 | INFO     | smart_grid.models.lstm | TCN-BiLSTM-Attention v13 | 725990 params | input=(192,26) | TCN=32(LN) dil=[1,2,4,8] | BiLSTM=128×2 | Attn 2h | Dense 256/128 drop=0.25 | RevIN=True(denorm) | SeasonalSkip=True + lag-168h skip blend=0.80 | WarmupCosine=False warmup=5% | lr=4e-04 | Huber(δ=0.02)
+2026-05-02 01:52:39,259 | INFO     | smart_grid.hpo | Trial 23 обрезан на эпохе 20 (val_loss=0.000923)
+2026-05-02 01:52:46,903 | INFO     | smart_grid.models.lstm | SeasonalSkip активирован: lag-24h (init_w=0.80) + lag-168h (init_w=0.80)
+2026-05-02 01:52:46,908 | INFO     | smart_grid.models.lstm | TCN-BiLSTM-Attention v13 | 917414 params | input=(192,26) | TCN=96(LN) dil=[1,2,4,8] | BiLSTM=96×2 | Attn 4h | Dense 256/128 drop=0.20 | RevIN=True(denorm) | SeasonalSkip=True + lag-168h skip blend=0.80 | WarmupCosine=False warmup=5% | lr=2e-04 | Huber(δ=0.10)
+2026-05-02 02:34:20,450 | INFO     | smart_grid.hpo | Trial 24 обрезан на эпохе 20 (val_loss=0.002340)
+2026-05-02 02:34:22,165 | INFO     | smart_grid.hpo | ─────────────────────────────────────────────────────────────────
+2026-05-02 02:34:22,165 | INFO     | smart_grid.hpo | ✅ LSTM ЗАВЕРШЁН | best_val_loss=0.000835 | trials: 12/25 завершено, 13 обрезано
+2026-05-02 02:34:22,165 | INFO     | smart_grid.hpo |    Время: 1596.3 мин
+2026-05-02 02:34:22,166 | INFO     | smart_grid.hpo |    Лучшие параметры:
+2026-05-02 02:34:22,166 | INFO     | smart_grid.hpo |      lstm_units                     = 192
+2026-05-02 02:34:22,166 | INFO     | smart_grid.hpo |      tcn_filters                    = 32
+2026-05-02 02:34:22,167 | INFO     | smart_grid.hpo |      attn_heads                     = 2
+2026-05-02 02:34:22,167 | INFO     | smart_grid.hpo |      dropout                        = 0.25
+2026-05-02 02:34:22,167 | INFO     | smart_grid.hpo |      learning_rate                  = 0.00032829622015720307
+2026-05-02 02:34:22,168 | INFO     | smart_grid.hpo |      seasonal_blend                 = 0.8
+2026-05-02 02:34:22,168 | INFO     | smart_grid.hpo |      huber_delta                    = 0.02
+2026-05-02 02:34:22,168 | INFO     | smart_grid.hpo |      use_cosine_decay               = False
+2026-05-02 02:34:22,169 | INFO     | smart_grid.hpo |    Сохранено: C:\Users\Admin\Desktop\smg\smartgrid\results\hpo\optimal\lstm_best_params.json
+2026-05-02 02:34:22,172 | INFO     | smart_grid.hpo | 
+──────────────────────────────────────────────────────────────────────
+2026-05-02 02:34:22,173 | INFO     | smart_grid.hpo | Запуск HPO для модели: ITRANSFORMER
+2026-05-02 02:34:22,177 | INFO     | smart_grid.hpo | =================================================================
+2026-05-02 02:34:22,177 | INFO     | smart_grid.hpo | HPO [ITRANSFORMER | mode=optimal] n_trials=25 | epochs=80 | days=365
+2026-05-02 02:34:22,177 | INFO     | smart_grid.hpo | =================================================================
+2026-05-02 02:34:23,137 | INFO     | smart_grid.models.transformer | iTransformer: SeasonalSkip 24h (init=0.40) + 168h
+2026-05-02 02:34:23,142 | INFO     | smart_grid.models.transformer | iTransformer v1 | 703866 params | input=(192,26) | F=26 variate tokens | d=96 h=2 L=5 dff=512 drop=0.16 | RevIN=True | SeasonalSkip= 24h+168h | WarmupCosine=False warmup=5% | lr=7e-05 | Huber(δ=0.05) | _enc_blocks=5 [v16 FIX]
+2026-05-02 03:18:08,787 | INFO     | smart_grid.models.transformer | iTransformer: SeasonalSkip 24h (init=0.40) + 168h
+2026-05-02 03:18:08,800 | INFO     | smart_grid.models.transformer | iTransformer v1 | 637658 params | input=(192,26) | F=26 variate tokens | d=192 h=8 L=3 dff=128 drop=0.04 | RevIN=True | SeasonalSkip= 24h+168h | WarmupCosine=False warmup=5% | lr=1e-04 | Huber(δ=0.05) | _enc_blocks=3 [v16 FIX]
+2026-05-02 03:54:32,643 | INFO     | smart_grid.models.transformer | iTransformer: SeasonalSkip 24h (init=0.60) + 168h
+2026-05-02 03:54:32,654 | INFO     | smart_grid.models.transformer | iTransformer v1 | 164058 params | input=(192,26) | F=26 variate tokens | d=64 h=2 L=3 dff=256 drop=0.08 | RevIN=True | SeasonalSkip= 24h+168h | WarmupCosine=False warmup=5% | lr=1e-04 | Huber(δ=0.05) | _enc_blocks=3 [v16 FIX]
+2026-05-02 04:09:56,106 | INFO     | smart_grid.models.transformer | iTransformer: SeasonalSkip 24h (init=0.60) + 168h
+2026-05-02 04:09:56,118 | INFO     | smart_grid.models.transformer | iTransformer v1 | 294234 params | input=(192,26) | F=26 variate tokens | d=96 h=2 L=2 dff=512 drop=0.08 | RevIN=True | SeasonalSkip= 24h+168h | WarmupCosine=False warmup=5% | lr=8e-05 | Huber(δ=0.05) | _enc_blocks=2 [v16 FIX]
+2026-05-02 04:27:27,564 | INFO     | smart_grid.models.transformer | iTransformer: SeasonalSkip 24h (init=0.50) + 168h
+2026-05-02 04:27:27,571 | INFO     | smart_grid.models.transformer | iTransformer v1 | 270874 params | input=(192,26) | F=26 variate tokens | d=96 h=4 L=4 dff=128 drop=0.16 | RevIN=True | SeasonalSkip= 24h+168h | WarmupCosine=False warmup=5% | lr=2e-04 | Huber(δ=0.05) | _enc_blocks=4 [v16 FIX]
+2026-05-02 04:53:46,268 | INFO     | smart_grid.models.transformer | iTransformer: SeasonalSkip 24h (init=0.40) + 168h
+2026-05-02 04:53:46,281 | INFO     | smart_grid.models.transformer | iTransformer v1 | 1280986 params | input=(192,26) | F=26 variate tokens | d=192 h=8 L=5 dff=256 drop=0.10 | RevIN=True | SeasonalSkip= 24h+168h | WarmupCosine=False warmup=5% | lr=5e-05 | Huber(δ=0.05) | _enc_blocks=5 [v16 FIX]
+2026-05-02 05:18:22,955 | INFO     | smart_grid.hpo | Trial 5 обрезан на эпохе 20 (val_loss=0.002398)
+2026-05-02 05:18:53,321 | INFO     | smart_grid.models.transformer | iTransformer: SeasonalSkip 24h (init=0.80) + 168h
+2026-05-02 05:18:53,328 | INFO     | smart_grid.models.transformer | iTransformer v1 | 358938 params | input=(192,26) | F=26 variate tokens | d=128 h=4 L=2 dff=384 drop=0.14 | RevIN=True | SeasonalSkip= 24h+168h | WarmupCosine=False warmup=5% | lr=2e-04 | Huber(δ=0.05) | _enc_blocks=2 [v16 FIX]
+2026-05-02 05:32:57,875 | INFO     | smart_grid.models.transformer | iTransformer: SeasonalSkip 24h (init=0.50) + 168h
+2026-05-02 05:32:57,879 | INFO     | smart_grid.models.transformer | iTransformer: WarmupCosineDecay lr=0→6e-05 warmup=1476 steps, cosine→1e-06 total=29520
+2026-05-02 05:32:57,886 | INFO     | smart_grid.models.transformer | iTransformer v1 | 526106 params | input=(192,26) | F=26 variate tokens | d=128 h=8 L=5 dff=128 drop=0.06 | RevIN=True | SeasonalSkip= 24h+168h | WarmupCosine=True warmup=5% | lr=6e-05 | Huber(δ=0.05) | _enc_blocks=5 [v16 FIX]
+2026-05-02 05:47:07,990 | INFO     | smart_grid.hpo | Trial 7 обрезан на эпохе 20 (val_loss=0.002131)
+2026-05-02 05:47:10,849 | INFO     | smart_grid.models.transformer | iTransformer: SeasonalSkip 24h (init=0.80) + 168h
+2026-05-02 05:47:10,855 | INFO     | smart_grid.models.transformer | iTransformer: WarmupCosineDecay lr=0→8e-05 warmup=1476 steps, cosine→2e-06 total=29520
+2026-05-02 05:47:10,858 | INFO     | smart_grid.models.transformer | iTransformer v1 | 933338 params | input=(192,26) | F=26 variate tokens | d=192 h=2 L=3 dff=384 drop=0.04 | RevIN=True | SeasonalSkip= 24h+168h | WarmupCosine=True warmup=5% | lr=8e-05 | Huber(δ=0.05) | _enc_blocks=3 [v16 FIX]
+2026-05-02 06:01:03,710 | INFO     | smart_grid.hpo | Trial 8 обрезан на эпохе 20 (val_loss=0.002146)
+2026-05-02 06:01:09,276 | INFO     | smart_grid.models.transformer | iTransformer: SeasonalSkip 24h (init=0.40) + 168h
+2026-05-02 06:01:09,285 | INFO     | smart_grid.models.transformer | iTransformer v1 | 282554 params | input=(192,26) | F=26 variate tokens | d=96 h=2 L=3 dff=256 drop=0.16 | RevIN=True | SeasonalSkip= 24h+168h | WarmupCosine=False warmup=5% | lr=9e-05 | Huber(δ=0.05) | _enc_blocks=3 [v16 FIX]
+2026-05-02 06:13:00,769 | INFO     | smart_grid.hpo | Trial 9 обрезан на эпохе 20 (val_loss=0.001767)
+2026-05-02 06:13:06,676 | INFO     | smart_grid.models.transformer | iTransformer: SeasonalSkip 24h (init=0.80) + 168h
+2026-05-02 06:13:06,683 | INFO     | smart_grid.models.transformer | iTransformer v1 | 524314 params | input=(192,26) | F=26 variate tokens | d=128 h=4 L=3 dff=384 drop=0.16 | RevIN=True | SeasonalSkip= 24h+168h | WarmupCosine=False warmup=5% | lr=3e-04 | Huber(δ=0.05) | _enc_blocks=3 [v16 FIX]
+2026-05-02 06:36:39,565 | INFO     | smart_grid.models.transformer | iTransformer: SeasonalSkip 24h (init=0.80) + 168h
+2026-05-02 06:36:39,581 | INFO     | smart_grid.models.transformer | iTransformer v1 | 524314 params | input=(192,26) | F=26 variate tokens | d=128 h=4 L=3 dff=384 drop=0.16 | RevIN=True | SeasonalSkip= 24h+168h | WarmupCosine=False warmup=5% | lr=2e-04 | Huber(δ=0.05) | _enc_blocks=3 [v16 FIX]
+2026-05-02 07:01:15,159 | INFO     | smart_grid.models.transformer | iTransformer: SeasonalSkip 24h (init=0.80) + 168h
+2026-05-02 07:01:15,172 | INFO     | smart_grid.models.transformer | iTransformer v1 | 358938 params | input=(192,26) | F=26 variate tokens | d=128 h=4 L=2 dff=384 drop=0.12 | RevIN=True | SeasonalSkip= 24h+168h | WarmupCosine=False warmup=5% | lr=7e-05 | Huber(δ=0.05) | _enc_blocks=2 [v16 FIX]
+2026-05-02 07:13:03,701 | INFO     | smart_grid.hpo | Trial 12 обрезан на эпохе 20 (val_loss=0.001775)
+2026-05-02 07:13:08,529 | INFO     | smart_grid.models.transformer | iTransformer: SeasonalSkip 24h (init=0.60) + 168h
+2026-05-02 07:13:08,536 | INFO     | smart_grid.models.transformer | iTransformer: WarmupCosineDecay lr=0→2e-04 warmup=1476 steps, cosine→4e-06 total=29520
+2026-05-02 07:13:08,539 | INFO     | smart_grid.models.transformer | iTransformer v1 | 358938 params | input=(192,26) | F=26 variate tokens | d=128 h=4 L=2 dff=384 drop=0.10 | RevIN=True | SeasonalSkip= 24h+168h | WarmupCosine=True warmup=5% | lr=2e-04 | Huber(δ=0.05) | _enc_blocks=2 [v16 FIX]
+2026-05-02 07:38:42,121 | INFO     | smart_grid.models.transformer | iTransformer: SeasonalSkip 24h (init=0.70) + 168h
+2026-05-02 07:38:42,132 | INFO     | smart_grid.models.transformer | iTransformer v1 | 244826 params | input=(192,26) | F=26 variate tokens | d=96 h=8 L=2 dff=384 drop=0.14 | RevIN=True | SeasonalSkip= 24h+168h | WarmupCosine=False warmup=5% | lr=2e-04 | Huber(δ=0.05) | _enc_blocks=2 [v16 FIX]
+2026-05-02 07:56:13,161 | INFO     | smart_grid.models.transformer | iTransformer: SeasonalSkip 24h (init=0.80) + 168h
+2026-05-02 07:56:13,176 | INFO     | smart_grid.models.transformer | iTransformer v1 | 195418 params | input=(192,26) | F=26 variate tokens | d=96 h=8 L=2 dff=256 drop=0.16 | RevIN=True | SeasonalSkip= 24h+168h | WarmupCosine=False warmup=5% | lr=2e-04 | Huber(δ=0.05) | _enc_blocks=2 [v16 FIX]
+2026-05-02 08:09:30,791 | INFO     | smart_grid.models.transformer | iTransformer: SeasonalSkip 24h (init=0.60) + 168h
+2026-05-02 08:09:30,807 | INFO     | smart_grid.models.transformer | iTransformer v1 | 1230362 params | input=(192,26) | F=26 variate tokens | d=192 h=8 L=4 dff=384 drop=0.14 | RevIN=True | SeasonalSkip= 24h+168h | WarmupCosine=False warmup=5% | lr=2e-04 | Huber(δ=0.05) | _enc_blocks=4 [v16 FIX]
+2026-05-02 08:35:05,342 | INFO     | smart_grid.hpo | Trial 16 обрезан на эпохе 20 (val_loss=0.001782)
+2026-05-02 08:35:36,986 | INFO     | smart_grid.models.transformer | iTransformer: SeasonalSkip 24h (init=0.50) + 168h
+2026-05-02 08:35:36,993 | INFO     | smart_grid.models.transformer | iTransformer v1 | 244826 params | input=(192,26) | F=26 variate tokens | d=96 h=8 L=2 dff=384 drop=0.12 | RevIN=True | SeasonalSkip= 24h+168h | WarmupCosine=False warmup=5% | lr=2e-04 | Huber(δ=0.05) | _enc_blocks=2 [v16 FIX]
+2026-05-02 08:57:06,800 | INFO     | smart_grid.models.transformer | iTransformer: SeasonalSkip 24h (init=0.60) + 168h
+2026-05-02 08:57:06,816 | INFO     | smart_grid.models.transformer | iTransformer v1 | 424730 params | input=(192,26) | F=26 variate tokens | d=128 h=2 L=2 dff=512 drop=0.14 | RevIN=True | SeasonalSkip= 24h+168h | WarmupCosine=False warmup=5% | lr=3e-04 | Huber(δ=0.05) | _enc_blocks=2 [v16 FIX]
+2026-05-02 09:18:21,214 | INFO     | smart_grid.models.transformer | iTransformer: SeasonalSkip 24h (init=0.80) + 168h
+2026-05-02 09:18:21,228 | INFO     | smart_grid.models.transformer | iTransformer v1 | 147098 params | input=(192,26) | F=26 variate tokens | d=64 h=8 L=2 dff=384 drop=0.08 | RevIN=True | SeasonalSkip= 24h+168h | WarmupCosine=False warmup=5% | lr=2e-04 | Huber(δ=0.05) | _enc_blocks=2 [v16 FIX]
+2026-05-02 09:30:25,882 | INFO     | smart_grid.models.transformer | iTransformer: SeasonalSkip 24h (init=0.80) + 168h
+2026-05-02 09:30:25,892 | INFO     | smart_grid.models.transformer | iTransformer v1 | 147098 params | input=(192,26) | F=26 variate tokens | d=64 h=8 L=2 dff=384 drop=0.08 | RevIN=True | SeasonalSkip= 24h+168h | WarmupCosine=False warmup=5% | lr=1e-04 | Huber(δ=0.05) | _enc_blocks=2 [v16 FIX]
+2026-05-02 09:36:29,349 | INFO     | smart_grid.models.transformer | iTransformer: SeasonalSkip 24h (init=0.80) + 168h
+2026-05-02 09:36:29,359 | INFO     | smart_grid.models.transformer | iTransformer v1 | 147098 params | input=(192,26) | F=26 variate tokens | d=64 h=8 L=2 dff=384 drop=0.04 | RevIN=True | SeasonalSkip= 24h+168h | WarmupCosine=False warmup=5% | lr=2e-04 | Huber(δ=0.05) | _enc_blocks=2 [v16 FIX]
+2026-05-02 09:41:54,897 | INFO     | smart_grid.models.transformer | iTransformer: SeasonalSkip 24h (init=0.80) + 168h
+2026-05-02 09:41:54,905 | INFO     | smart_grid.models.transformer | iTransformer v1 | 147098 params | input=(192,26) | F=26 variate tokens | d=64 h=8 L=2 dff=384 drop=0.04 | RevIN=True | SeasonalSkip= 24h+168h | WarmupCosine=False warmup=5% | lr=3e-04 | Huber(δ=0.05) | _enc_blocks=2 [v16 FIX]
+2026-05-02 09:46:03,206 | INFO     | smart_grid.models.transformer | iTransformer: SeasonalSkip 24h (init=0.80) + 168h
+2026-05-02 09:46:03,223 | INFO     | smart_grid.models.transformer | iTransformer v1 | 147098 params | input=(192,26) | F=26 variate tokens | d=64 h=8 L=2 dff=384 drop=0.10 | RevIN=True | SeasonalSkip= 24h+168h | WarmupCosine=False warmup=5% | lr=9e-05 | Huber(δ=0.05) | _enc_blocks=2 [v16 FIX]
+2026-05-02 09:55:47,385 | INFO     | smart_grid.models.transformer | iTransformer: SeasonalSkip 24h (init=0.70) + 168h
+2026-05-02 09:55:47,395 | INFO     | smart_grid.models.transformer | iTransformer v1 | 114522 params | input=(192,26) | F=26 variate tokens | d=64 h=8 L=3 dff=128 drop=0.10 | RevIN=True | SeasonalSkip= 24h+168h | WarmupCosine=False warmup=5% | lr=7e-05 | Huber(δ=0.05) | _enc_blocks=3 [v16 FIX]
+2026-05-02 09:59:56,097 | INFO     | smart_grid.hpo | Trial 24 обрезан на эпохе 20 (val_loss=0.001745)
+2026-05-02 10:00:05,361 | INFO     | smart_grid.hpo | ─────────────────────────────────────────────────────────────────
+2026-05-02 10:00:05,361 | INFO     | smart_grid.hpo | ✅ ITRANSFORMER ЗАВЕРШЁН | best_val_loss=0.001558 | trials: 18/25 завершено, 7 обрезано
+2026-05-02 10:00:05,362 | INFO     | smart_grid.hpo |    Время: 445.7 мин
+2026-05-02 10:00:05,362 | INFO     | smart_grid.hpo |    Лучшие параметры:
+2026-05-02 10:00:05,363 | INFO     | smart_grid.hpo |      d_model                        = 64
+2026-05-02 10:00:05,363 | INFO     | smart_grid.hpo |      num_heads                      = 8
+2026-05-02 10:00:05,363 | INFO     | smart_grid.hpo |      num_layers                     = 2
+2026-05-02 10:00:05,363 | INFO     | smart_grid.hpo |      dff                            = 384
+2026-05-02 10:00:05,364 | INFO     | smart_grid.hpo |      dropout                        = 0.08
+2026-05-02 10:00:05,364 | INFO     | smart_grid.hpo |      learning_rate                  = 0.00015619685042677964
+2026-05-02 10:00:05,364 | INFO     | smart_grid.hpo |      seasonal_blend                 = 0.8
+2026-05-02 10:00:05,364 | INFO     | smart_grid.hpo |      use_cosine_decay               = False
+2026-05-02 10:00:05,364 | INFO     | smart_grid.hpo |    Сохранено: C:\Users\Admin\Desktop\smg\smartgrid\results\hpo\optimal\itransformer_best_params.json
+2026-05-02 10:00:05,369 | INFO     | smart_grid.hpo | 
+──────────────────────────────────────────────────────────────────────
+2026-05-02 10:00:05,369 | INFO     | smart_grid.hpo | Запуск HPO для модели: PATCHTST
+2026-05-02 10:00:05,373 | INFO     | smart_grid.hpo | =================================================================
+2026-05-02 10:00:05,374 | INFO     | smart_grid.hpo | HPO [PATCHTST | mode=optimal] n_trials=25 | epochs=80 | days=365
+2026-05-02 10:00:05,374 | INFO     | smart_grid.hpo | =================================================================
+2026-05-02 10:00:06,433 | INFO     | smart_grid.models.transformer | PatchTST: WarmupCosineDecay lr=0→2e-04 warmup=1476 steps, cosine→3e-06 total=29520
+2026-05-02 10:00:06,437 | INFO     | smart_grid.models.transformer | PatchTST v6 patch=16 stride=4 n_p=45 d=96 h=4 L=2 sdrop=0.08 RevIN=True SeasonalSkip=24h+168h | lr=2e-04 drop=0.04 [v16: individual params] WarmupCosine=True warmup=5% | 372078 params
+2026-05-02 10:11:38,391 | INFO     | smart_grid.models.transformer | PatchTST: WarmupCosineDecay lr=0→9e-04 warmup=1476 steps, cosine→2e-05 total=29520
+2026-05-02 10:11:38,401 | INFO     | smart_grid.models.transformer | PatchTST v6 patch=12 stride=9 n_p=21 d=128 h=2 L=4 sdrop=0.04 RevIN=True SeasonalSkip=24h+168h | lr=9e-04 drop=0.10 [v16: individual params] WarmupCosine=True warmup=5% | 900814 params
+2026-05-02 10:49:40,283 | INFO     | smart_grid.models.transformer | PatchTST v6 patch=16 stride=4 n_p=45 d=128 h=2 L=4 sdrop=0.04 RevIN=True SeasonalSkip=24h+168h | lr=4e-04 drop=0.12 [v16: individual params] WarmupCosine=False warmup=5% | 990926 params
+2026-05-02 11:30:07,184 | INFO     | smart_grid.models.transformer | PatchTST: WarmupCosineDecay lr=0→5e-04 warmup=1476 steps, cosine→1e-05 total=29520
+2026-05-02 11:30:07,195 | INFO     | smart_grid.models.transformer | PatchTST v6 patch=24 stride=18 n_p=10 d=192 h=2 L=4 sdrop=0.04 RevIN=True SeasonalSkip=24h+168h | lr=5e-04 drop=0.10 [v16: individual params] WarmupCosine=True warmup=5% | 1948110 params
+2026-05-02 12:19:05,515 | INFO     | smart_grid.models.transformer | PatchTST v6 patch=12 stride=9 n_p=21 d=128 h=8 L=3 sdrop=0.08 RevIN=True SeasonalSkip=24h+168h | lr=6e-04 drop=0.06 [v16: individual params] WarmupCosine=False warmup=5% | 702542 params
+2026-05-02 12:35:55,276 | INFO     | smart_grid.models.transformer | PatchTST: WarmupCosineDecay lr=0→4e-04 warmup=1476 steps, cosine→9e-06 total=29520
+2026-05-02 12:35:55,282 | INFO     | smart_grid.models.transformer | PatchTST v6 patch=16 stride=8 n_p=23 d=96 h=8 L=4 sdrop=0.04 RevIN=True SeasonalSkip=24h+168h | lr=4e-04 drop=0.12 [v16: individual params] WarmupCosine=True warmup=5% | 542958 params
+2026-05-02 12:47:36,205 | INFO     | smart_grid.hpo | Trial 5 обрезан на эпохе 24 (val_loss=0.001361)
+2026-05-02 12:47:39,949 | INFO     | smart_grid.models.transformer | PatchTST v6 patch=16 stride=12 n_p=15 d=96 h=2 L=3 sdrop=0.10 RevIN=True SeasonalSkip=24h+168h | lr=9e-04 drop=0.04 [v16: individual params] WarmupCosine=False warmup=5% | 411918 params
+2026-05-02 12:53:10,584 | INFO     | smart_grid.hpo | Trial 6 обрезан на эпохе 20 (val_loss=0.001458)
+2026-05-02 12:53:14,453 | INFO     | smart_grid.models.transformer | PatchTST v6 patch=12 stride=3 n_p=61 d=64 h=2 L=3 sdrop=0.10 RevIN=True SeasonalSkip=24h+168h | lr=1e-03 drop=0.04 [v16: individual params] WarmupCosine=False warmup=5% | 267854 params
+2026-05-02 13:01:17,026 | INFO     | smart_grid.hpo | Trial 7 обрезан на эпохе 20 (val_loss=0.001452)
+2026-05-02 13:01:20,654 | INFO     | smart_grid.models.transformer | PatchTST: WarmupCosineDecay lr=0→4e-04 warmup=1476 steps, cosine→9e-06 total=29520
+2026-05-02 13:01:20,655 | INFO     | smart_grid.models.transformer | PatchTST v6 patch=24 stride=18 n_p=10 d=192 h=2 L=2 sdrop=0.06 RevIN=True SeasonalSkip=24h+168h | lr=4e-04 drop=0.04 [v16: individual params] WarmupCosine=True warmup=5% | 1058382 params
+2026-05-02 13:07:32,525 | INFO     | smart_grid.hpo | Trial 8 обрезан на эпохе 20 (val_loss=0.001448)
+2026-05-02 13:07:36,157 | INFO     | smart_grid.models.transformer | PatchTST: WarmupCosineDecay lr=0→2e-04 warmup=1476 steps, cosine→4e-06 total=29520
+2026-05-02 13:07:36,159 | INFO     | smart_grid.models.transformer | PatchTST v6 patch=24 stride=6 n_p=29 d=64 h=8 L=3 sdrop=0.12 RevIN=True SeasonalSkip=24h+168h | lr=2e-04 drop=0.06 [v16: individual params] WarmupCosine=True warmup=5% | 236622 params
+2026-05-02 13:15:54,168 | INFO     | smart_grid.hpo | Trial 9 обрезан на эпохе 20 (val_loss=0.001403)
+2026-05-02 13:15:57,960 | INFO     | smart_grid.models.transformer | PatchTST: WarmupCosineDecay lr=0→9e-04 warmup=1476 steps, cosine→2e-05 total=29520
+2026-05-02 13:15:57,963 | INFO     | smart_grid.models.transformer | PatchTST v6 patch=16 stride=12 n_p=15 d=192 h=2 L=3 sdrop=0.04 RevIN=True SeasonalSkip=24h+168h | lr=9e-04 drop=0.12 [v16: individual params] WarmupCosine=True warmup=5% | 1487310 params
+2026-05-02 13:26:23,347 | INFO     | smart_grid.hpo | Trial 10 обрезан на эпохе 20 (val_loss=0.001474)
+2026-05-02 13:26:27,102 | INFO     | smart_grid.models.transformer | PatchTST: WarmupCosineDecay lr=0→2e-04 warmup=1476 steps, cosine→5e-06 total=29520
+2026-05-02 13:26:27,104 | INFO     | smart_grid.models.transformer | PatchTST v6 patch=24 stride=18 n_p=10 d=192 h=2 L=4 sdrop=0.04 RevIN=True SeasonalSkip=24h+168h | lr=2e-04 drop=0.06 [v16: individual params] WarmupCosine=True warmup=5% | 1948110 params
+2026-05-02 13:38:42,043 | INFO     | smart_grid.hpo | Trial 11 обрезан на эпохе 20 (val_loss=0.001501)
+2026-05-02 13:38:45,933 | INFO     | smart_grid.models.transformer | PatchTST: WarmupCosineDecay lr=0→5e-04 warmup=1476 steps, cosine→1e-05 total=29520
+2026-05-02 13:38:45,935 | INFO     | smart_grid.models.transformer | PatchTST v6 patch=12 stride=9 n_p=21 d=128 h=2 L=4 sdrop=0.04 RevIN=True SeasonalSkip=24h+168h | lr=5e-04 drop=0.06 [v16: individual params] WarmupCosine=True warmup=5% | 900814 params
+2026-05-02 13:51:40,453 | INFO     | smart_grid.hpo | Trial 12 обрезан на эпохе 20 (val_loss=0.001423)
+2026-05-02 13:51:44,334 | INFO     | smart_grid.models.transformer | PatchTST: WarmupCosineDecay lr=0→9e-04 warmup=1476 steps, cosine→2e-05 total=29520
+2026-05-02 13:51:44,336 | INFO     | smart_grid.models.transformer | PatchTST v6 patch=12 stride=3 n_p=61 d=128 h=4 L=3 sdrop=0.06 RevIN=True SeasonalSkip=24h+168h | lr=9e-04 drop=0.12 [v16: individual params] WarmupCosine=True warmup=5% | 830542 params
+2026-05-02 14:15:20,143 | INFO     | smart_grid.hpo | Trial 13 обрезан на эпохе 24 (val_loss=0.001383)
+2026-05-02 14:15:25,069 | INFO     | smart_grid.models.transformer | PatchTST v6 patch=24 stride=18 n_p=10 d=64 h=2 L=4 sdrop=0.06 RevIN=True SeasonalSkip=24h+168h | lr=7e-04 drop=0.12 [v16: individual params] WarmupCosine=False warmup=5% | 256206 params
+2026-05-02 14:19:45,230 | INFO     | smart_grid.hpo | Trial 14 обрезан на эпохе 20 (val_loss=0.001522)
+2026-05-02 14:19:54,709 | INFO     | smart_grid.models.transformer | PatchTST: WarmupCosineDecay lr=0→4e-04 warmup=1476 steps, cosine→8e-06 total=29520
+2026-05-02 14:19:54,711 | INFO     | smart_grid.models.transformer | PatchTST v6 patch=12 stride=3 n_p=61 d=192 h=2 L=4 sdrop=0.06 RevIN=True SeasonalSkip=24h+168h | lr=4e-04 drop=0.08 [v16: individual params] WarmupCosine=True warmup=5% | 2133006 params
+2026-05-02 15:00:09,673 | INFO     | smart_grid.hpo | Trial 15 обрезан на эпохе 23 (val_loss=0.001396)
+2026-05-02 15:00:15,951 | INFO     | smart_grid.models.transformer | PatchTST: WarmupCosineDecay lr=0→9e-04 warmup=1476 steps, cosine→2e-05 total=29520
+2026-05-02 15:00:15,953 | INFO     | smart_grid.models.transformer | PatchTST v6 patch=12 stride=9 n_p=21 d=64 h=2 L=4 sdrop=0.08 RevIN=True SeasonalSkip=24h+168h | lr=9e-04 drop=0.12 [v16: individual params] WarmupCosine=True warmup=5% | 253838 params
+2026-05-02 15:24:29,472 | INFO     | smart_grid.models.transformer | PatchTST v6 patch=12 stride=9 n_p=21 d=64 h=2 L=4 sdrop=0.08 RevIN=True SeasonalSkip=24h+168h | lr=8e-04 drop=0.12 [v16: individual params] WarmupCosine=False warmup=5% | 253838 params
+2026-05-02 15:32:25,976 | INFO     | smart_grid.hpo | Trial 17 обрезан на эпохе 20 (val_loss=0.001425)
+2026-05-02 15:32:29,904 | INFO     | smart_grid.models.transformer | PatchTST: WarmupCosineDecay lr=0→9e-04 warmup=1476 steps, cosine→2e-05 total=29520
+2026-05-02 15:32:29,906 | INFO     | smart_grid.models.transformer | PatchTST v6 patch=16 stride=8 n_p=23 d=64 h=2 L=4 sdrop=0.10 RevIN=True SeasonalSkip=24h+168h | lr=9e-04 drop=0.12 [v16: individual params] WarmupCosine=True warmup=5% | 263694 params
+2026-05-02 15:40:40,067 | INFO     | smart_grid.hpo | Trial 18 обрезан на эпохе 20 (val_loss=0.001401)
+2026-05-02 15:40:43,961 | INFO     | smart_grid.models.transformer | PatchTST: WarmupCosineDecay lr=0→5e-04 warmup=1476 steps, cosine→1e-05 total=29520
+2026-05-02 15:40:43,963 | INFO     | smart_grid.models.transformer | PatchTST v6 patch=12 stride=9 n_p=21 d=128 h=2 L=4 sdrop=0.12 RevIN=True SeasonalSkip=24h+168h | lr=5e-04 drop=0.12 [v16: individual params] WarmupCosine=True warmup=5% | 900814 params
+2026-05-02 15:52:57,826 | INFO     | smart_grid.hpo | Trial 19 обрезан на эпохе 20 (val_loss=0.001410)
+2026-05-02 15:53:01,627 | INFO     | smart_grid.models.transformer | PatchTST: WarmupCosineDecay lr=0→4e-04 warmup=1476 steps, cosine→7e-06 total=29520
+2026-05-02 15:53:01,628 | INFO     | smart_grid.models.transformer | PatchTST v6 patch=12 stride=6 n_p=31 d=64 h=2 L=3 sdrop=0.04 RevIN=True SeasonalSkip=24h+168h | lr=4e-04 drop=0.12 [v16: individual params] WarmupCosine=True warmup=5% | 219854 params
+2026-05-02 16:00:25,586 | INFO     | smart_grid.hpo | Trial 20 обрезан на эпохе 20 (val_loss=0.001540)
+2026-05-02 16:00:46,773 | INFO     | smart_grid.models.transformer | PatchTST: WarmupCosineDecay lr=0→1e-03 warmup=1476 steps, cosine→2e-05 total=29520
+2026-05-02 16:00:46,776 | INFO     | smart_grid.models.transformer | PatchTST v6 patch=24 stride=18 n_p=10 d=128 h=2 L=4 sdrop=0.04 RevIN=True SeasonalSkip=24h+168h | lr=1e-03 drop=0.12 [v16: individual params] WarmupCosine=True warmup=5% | 905550 params
+2026-05-02 16:10:18,334 | INFO     | smart_grid.hpo | Trial 21 обрезан на эпохе 20 (val_loss=0.001464)
+2026-05-02 16:10:22,404 | INFO     | smart_grid.models.transformer | PatchTST: WarmupCosineDecay lr=0→5e-04 warmup=1476 steps, cosine→1e-05 total=29520
+2026-05-02 16:10:22,406 | INFO     | smart_grid.models.transformer | PatchTST v6 patch=12 stride=9 n_p=21 d=128 h=2 L=4 sdrop=0.04 RevIN=True SeasonalSkip=24h+168h | lr=5e-04 drop=0.12 [v16: individual params] WarmupCosine=True warmup=5% | 900814 params
+2026-05-02 16:25:02,147 | INFO     | smart_grid.hpo | Trial 22 обрезан на эпохе 24 (val_loss=0.001377)
+2026-05-02 16:25:05,926 | INFO     | smart_grid.models.transformer | PatchTST: WarmupCosineDecay lr=0→9e-04 warmup=1476 steps, cosine→2e-05 total=29520
+2026-05-02 16:25:05,928 | INFO     | smart_grid.models.transformer | PatchTST v6 patch=12 stride=9 n_p=21 d=64 h=8 L=3 sdrop=0.08 RevIN=True SeasonalSkip=24h+168h | lr=9e-04 drop=0.10 [v16: individual params] WarmupCosine=True warmup=5% | 203854 params
+2026-05-02 16:31:53,505 | INFO     | smart_grid.hpo | Trial 23 обрезан на эпохе 20 (val_loss=0.001402)
+2026-05-02 16:31:57,338 | INFO     | smart_grid.models.transformer | PatchTST v6 patch=24 stride=12 n_p=15 d=192 h=2 L=4 sdrop=0.04 RevIN=True SeasonalSkip=24h+168h | lr=3e-04 drop=0.10 [v16: individual params] WarmupCosine=False warmup=5% | 1972110 params
+2026-05-02 16:45:29,134 | INFO     | smart_grid.hpo | Trial 24 обрезан на эпохе 20 (val_loss=0.001441)
+2026-05-02 16:45:32,478 | INFO     | smart_grid.hpo | ─────────────────────────────────────────────────────────────────
+2026-05-02 16:45:32,478 | INFO     | smart_grid.hpo | ✅ PATCHTST ЗАВЕРШЁН | best_val_loss=0.001293 | trials: 6/25 завершено, 19 обрезано
+2026-05-02 16:45:32,478 | INFO     | smart_grid.hpo |    Время: 405.5 мин
+2026-05-02 16:45:32,478 | INFO     | smart_grid.hpo |    Лучшие параметры:
+2026-05-02 16:45:32,478 | INFO     | smart_grid.hpo |      patch_len                      = 12
+2026-05-02 16:45:32,478 | INFO     | smart_grid.hpo |      stride_ratio                   = 0.75
+2026-05-02 16:45:32,478 | INFO     | smart_grid.hpo |      d_model                        = 64
+2026-05-02 16:45:32,478 | INFO     | smart_grid.hpo |      num_heads                      = 2
+2026-05-02 16:45:32,480 | INFO     | smart_grid.hpo |      num_layers                     = 4
+2026-05-02 16:45:32,480 | INFO     | smart_grid.hpo |      learning_rate                  = 0.0009170344090193549
+2026-05-02 16:45:32,480 | INFO     | smart_grid.hpo |      dropout                        = 0.12
+2026-05-02 16:45:32,480 | INFO     | smart_grid.hpo |      seasonal_blend                 = 0.4
+2026-05-02 16:45:32,480 | INFO     | smart_grid.hpo |      stochastic_depth               = 0.08
+2026-05-02 16:45:32,480 | INFO     | smart_grid.hpo |      use_cosine_decay               = True
+2026-05-02 16:45:32,480 | INFO     | smart_grid.hpo |    Сохранено: C:\Users\Admin\Desktop\smg\smartgrid\results\hpo\optimal\patchtst_best_params.json
+2026-05-02 16:45:32,481 | INFO     | smart_grid.hpo | 
+──────────────────────────────────────────────────────────────────────
+2026-05-02 16:45:32,481 | INFO     | smart_grid.hpo | Запуск HPO для модели: TFT
+2026-05-02 16:45:32,483 | INFO     | smart_grid.hpo | =================================================================
+2026-05-02 16:45:32,484 | INFO     | smart_grid.hpo | HPO [TFT | mode=optimal] n_trials=25 | epochs=80 | days=365
+2026-05-02 16:45:32,484 | INFO     | smart_grid.hpo | =================================================================
+2026-05-02 16:45:32,722 | INFO     | smart_grid.models.transformer | TFT-Lite: WarmupCosineDecay lr=0→1e-04 warmup=1476 steps, cosine→3e-06 total=29520
+2026-05-02 16:45:32,724 | INFO     | smart_grid.models.transformer | TFTLite v2 d=96 h=2 L=2 | 155256 params | RevIN=True denorm=True | WarmupCosine=True warmup=5% | Huber(δ=0.05)
+2026-05-02 17:40:44,039 | INFO     | smart_grid.models.transformer | TFT-Lite: WarmupCosineDecay lr=0→8e-05 warmup=1476 steps, cosine→2e-06 total=29520
+2026-05-02 17:40:44,044 | INFO     | smart_grid.models.transformer | TFTLite v2 d=64 h=8 L=3 | 100248 params | RevIN=True denorm=True | WarmupCosine=True warmup=5% | Huber(δ=0.05)
+2026-05-02 19:07:19,348 | INFO     | smart_grid.models.transformer | TFT-Lite: WarmupCosineDecay lr=0→1e-04 warmup=1476 steps, cosine→3e-06 total=29520
+2026-05-02 19:07:19,355 | INFO     | smart_grid.models.transformer | TFTLite v2 d=128 h=2 L=3 | 388888 params | RevIN=True denorm=True | WarmupCosine=True warmup=5% | Huber(δ=0.05)
+2026-05-02 20:41:21,249 | INFO     | smart_grid.models.transformer | TFTLite v2 d=96 h=8 L=3 | 221016 params | RevIN=True denorm=True | WarmupCosine=False warmup=5% | Huber(δ=0.05)
+2026-05-02 22:51:12,127 | INFO     | smart_grid.models.transformer | TFT-Lite: WarmupCosineDecay lr=0→3e-04 warmup=1476 steps, cosine→5e-06 total=29520
+2026-05-02 22:51:12,152 | INFO     | smart_grid.models.transformer | TFTLite v2 d=96 h=4 L=4 | 286776 params | RevIN=True denorm=True | WarmupCosine=True warmup=5% | Huber(δ=0.05)
+2026-05-03 09:00:24,316 | INFO     | smart_grid.hpo | ======================================================================
+2026-05-03 09:00:24,316 | INFO     | smart_grid.hpo | SMART GRID HPO v1 | mode=optimal | model=xgboost | n_trials=25
+2026-05-03 09:00:24,318 | INFO     | smart_grid.hpo | Search config: days=365 | epochs=80 | batch=16 | patience=20
+2026-05-03 09:00:24,318 | INFO     | smart_grid.hpo | ======================================================================
+2026-05-03 09:00:24,319 | INFO     | smart_grid.hpo | Генерация данных для HPO (365 дней)...
+2026-05-03 09:00:24,321 | INFO     | smart_grid.data.generator | Генерация Smart Grid v6: 365 дней, 1500 домохозяйств, районов=12 | EV=50% Solar=22%
+2026-05-03 09:00:24,669 | INFO     | smart_grid.data.generator | Типы: ранние=420 (28%), стандартные=780 (52%), ночные=300 (20%)
+2026-05-03 09:00:31,306 | INFO     | smart_grid.data.generator | Сгенерировано 8760 записей. Потребление: min=12463.5, mean=36854.3, max=105218.0 кВт·ч
+2026-05-03 09:00:31,306 | INFO     | smart_grid.data.generator |   EV нагрузка: mean=2694.6 кВт (12.0% базовой)  [v5 был: ~1.2% — был time-wrap баг]
+2026-05-03 09:00:31,310 | INFO     | smart_grid.data.generator |   Solar: mean=176.7 кВт, max=986.9 кВт
+2026-05-03 09:00:31,310 | INFO     | smart_grid.data.generator |   DSR событий активно: 84 ч | Industrial: 6 заводов | Cascade max=1.25
+2026-05-03 09:00:31,310 | INFO     | smart_grid.data.generator |   Grid stress max=1.21 | DSR rebound max=0.15
+2026-05-03 09:00:31,311 | INFO     | smart_grid.data.generator |   CV потребления: 0.339
+2026-05-03 09:00:31,381 | INFO     | smart_grid.hpo | Подготовка признаков (history=192)...
+2026-05-03 09:00:31,395 | INFO     | smart_grid.data.preprocessing | Lag-колонки добавлены (bfill): 24/48/168h
+2026-05-03 09:00:31,405 | INFO     | smart_grid.data.preprocessing | Rolling stats пересчитаны per-split (v12 fix): train=6132 val=1314 test=1314 — нет утечки через rolling
+2026-05-03 09:00:31,590 | INFO     | smart_grid.data.preprocessing | Seasonal diff OFF — абсолютные значения ∈ [0.000, 1.000] | Dual Naive хранится для диагностики (naive_type=disabled (seasonal_diff=False))
+2026-05-03 09:00:31,592 | INFO     | smart_grid.data.preprocessing | Данные v12 | train=5917 val=1099 test=1099 | n_features=26 | history=192 | seasonal_diff=False | naive=disabled (seasonal_diff=False)
+2026-05-03 09:00:31,592 | INFO     | smart_grid.data.preprocessing | X_train.shape=(5917, 192, 26)  Y_train.shape=(5917, 24)
+2026-05-03 09:00:31,592 | INFO     | smart_grid.hpo | Данные готовы: train=5917 val=1099
+2026-05-03 09:00:31,593 | INFO     | smart_grid.hpo | 
+──────────────────────────────────────────────────────────────────────
+2026-05-03 09:00:31,593 | INFO     | smart_grid.hpo | Запуск HPO для модели: XGBOOST
+2026-05-03 09:00:31,593 | INFO     | smart_grid.hpo | =================================================================
+2026-05-03 09:00:31,594 | INFO     | smart_grid.hpo | HPO [XGBOOST | mode=optimal] n_trials=25 | epochs=80 | days=365
+2026-05-03 09:00:31,595 | INFO     | smart_grid.hpo | =================================================================
+2026-05-03 09:00:32,671 | INFO     | smart_grid.models.baseline | XGBoost v5 (FullLags + RollingAllChannels + MultiHorizon) | ~165 признаков | 24 независимых модели + val-early-stopping | n_est=400 depth=7 min_cw=7
+2026-05-03 09:04:01,755 | INFO     | smart_grid.models.baseline | XGBoost обучен | lag-features: 386 | Y: (5917, 24)
+2026-05-03 09:04:02,151 | INFO     | smart_grid.hpo |   XGBoost trial MAE=4109.51
+2026-05-03 09:04:02,262 | INFO     | smart_grid.models.baseline | XGBoost v5 (FullLags + RollingAllChannels + MultiHorizon) | ~165 признаков | 24 независимых модели + val-early-stopping | n_est=600 depth=6 min_cw=8
+2026-05-03 09:19:08,351 | INFO     | smart_grid.models.baseline | XGBoost обучен | lag-features: 386 | Y: (5917, 24)
+2026-05-03 09:19:09,128 | INFO     | smart_grid.hpo |   XGBoost trial MAE=4073.88
+2026-05-03 09:19:09,254 | INFO     | smart_grid.models.baseline | XGBoost v5 (FullLags + RollingAllChannels + MultiHorizon) | ~165 признаков | 24 независимых модели + val-early-stopping | n_est=400 depth=5 min_cw=7
+2026-05-03 09:23:59,655 | INFO     | smart_grid.models.baseline | XGBoost обучен | lag-features: 386 | Y: (5917, 24)
+2026-05-03 09:24:00,111 | INFO     | smart_grid.hpo |   XGBoost trial MAE=4055.19
+2026-05-03 09:24:00,227 | INFO     | smart_grid.models.baseline | XGBoost v5 (FullLags + RollingAllChannels + MultiHorizon) | ~165 признаков | 24 независимых модели + val-early-stopping | n_est=500 depth=6 min_cw=5
+2026-05-03 09:34:51,411 | INFO     | smart_grid.models.baseline | XGBoost обучен | lag-features: 386 | Y: (5917, 24)
+2026-05-03 09:34:52,055 | INFO     | smart_grid.hpo |   XGBoost trial MAE=4049.39
+2026-05-03 09:34:52,176 | INFO     | smart_grid.models.baseline | XGBoost v5 (FullLags + RollingAllChannels + MultiHorizon) | ~165 признаков | 24 независимых модели + val-early-stopping | n_est=200 depth=7 min_cw=6
+2026-05-03 09:38:16,856 | INFO     | smart_grid.models.baseline | XGBoost обучен | lag-features: 386 | Y: (5917, 24)
+2026-05-03 09:38:17,173 | INFO     | smart_grid.hpo |   XGBoost trial MAE=4198.95
+2026-05-03 09:38:17,281 | INFO     | smart_grid.models.baseline | XGBoost v5 (FullLags + RollingAllChannels + MultiHorizon) | ~165 признаков | 24 независимых модели + val-early-stopping | n_est=200 depth=5 min_cw=15
+2026-05-03 09:41:17,998 | INFO     | smart_grid.models.baseline | XGBoost обучен | lag-features: 386 | Y: (5917, 24)
+2026-05-03 09:41:18,397 | INFO     | smart_grid.hpo |   XGBoost trial MAE=4192.38
+2026-05-03 09:41:18,506 | INFO     | smart_grid.models.baseline | XGBoost v5 (FullLags + RollingAllChannels + MultiHorizon) | ~165 признаков | 24 независимых модели + val-early-stopping | n_est=600 depth=3 min_cw=19
+2026-05-03 09:43:00,147 | INFO     | smart_grid.models.baseline | XGBoost обучен | lag-features: 386 | Y: (5917, 24)
+2026-05-03 09:43:00,448 | INFO     | smart_grid.hpo |   XGBoost trial MAE=4096.51
+2026-05-03 09:43:00,545 | INFO     | smart_grid.models.baseline | XGBoost v5 (FullLags + RollingAllChannels + MultiHorizon) | ~165 признаков | 24 независимых модели + val-early-stopping | n_est=200 depth=3 min_cw=9
+2026-05-03 09:44:46,020 | INFO     | smart_grid.models.baseline | XGBoost обучен | lag-features: 386 | Y: (5917, 24)
+2026-05-03 09:44:46,342 | INFO     | smart_grid.hpo |   XGBoost trial MAE=4361.26
+2026-05-03 09:44:46,442 | INFO     | smart_grid.models.baseline | XGBoost v5 (FullLags + RollingAllChannels + MultiHorizon) | ~165 признаков | 24 независимых модели + val-early-stopping | n_est=400 depth=5 min_cw=20
+2026-05-03 09:49:32,094 | INFO     | smart_grid.models.baseline | XGBoost обучен | lag-features: 386 | Y: (5917, 24)
+2026-05-03 09:49:32,614 | INFO     | smart_grid.hpo |   XGBoost trial MAE=4017.59
+2026-05-03 09:49:32,746 | INFO     | smart_grid.models.baseline | XGBoost v5 (FullLags + RollingAllChannels + MultiHorizon) | ~165 признаков | 24 независимых модели + val-early-stopping | n_est=200 depth=7 min_cw=6
+2026-05-03 09:55:47,373 | INFO     | smart_grid.models.baseline | XGBoost обучен | lag-features: 386 | Y: (5917, 24)
+2026-05-03 09:55:47,774 | INFO     | smart_grid.hpo |   XGBoost trial MAE=4121.82
+2026-05-03 09:55:47,901 | INFO     | smart_grid.models.baseline | XGBoost v5 (FullLags + RollingAllChannels + MultiHorizon) | ~165 признаков | 24 независимых модели + val-early-stopping | n_est=500 depth=6 min_cw=20
+2026-05-03 10:00:17,124 | INFO     | smart_grid.models.baseline | XGBoost обучен | lag-features: 386 | Y: (5917, 24)
+2026-05-03 10:00:17,587 | INFO     | smart_grid.hpo |   XGBoost trial MAE=4043.75
+2026-05-03 10:00:17,704 | INFO     | smart_grid.models.baseline | XGBoost v5 (FullLags + RollingAllChannels + MultiHorizon) | ~165 признаков | 24 независимых модели + val-early-stopping | n_est=600 depth=6 min_cw=19
+2026-05-03 10:03:54,973 | INFO     | smart_grid.models.baseline | XGBoost обучен | lag-features: 386 | Y: (5917, 24)
+2026-05-03 10:03:55,388 | INFO     | smart_grid.hpo |   XGBoost trial MAE=4049.11
+2026-05-03 10:03:55,506 | INFO     | smart_grid.models.baseline | XGBoost v5 (FullLags + RollingAllChannels + MultiHorizon) | ~165 признаков | 24 независимых модели + val-early-stopping | n_est=200 depth=7 min_cw=20
+2026-05-03 10:08:13,420 | INFO     | smart_grid.models.baseline | XGBoost обучен | lag-features: 386 | Y: (5917, 24)
+2026-05-03 10:08:13,899 | INFO     | smart_grid.hpo |   XGBoost trial MAE=4045.62
+2026-05-03 10:08:14,015 | INFO     | smart_grid.models.baseline | XGBoost v5 (FullLags + RollingAllChannels + MultiHorizon) | ~165 признаков | 24 независимых модели + val-early-stopping | n_est=300 depth=6 min_cw=20
+2026-05-03 10:14:27,022 | INFO     | smart_grid.models.baseline | XGBoost обучен | lag-features: 386 | Y: (5917, 24)
+2026-05-03 10:14:27,540 | INFO     | smart_grid.hpo |   XGBoost trial MAE=4069.69
+2026-05-03 10:14:27,683 | INFO     | smart_grid.models.baseline | XGBoost v5 (FullLags + RollingAllChannels + MultiHorizon) | ~165 признаков | 24 независимых модели + val-early-stopping | n_est=500 depth=3 min_cw=19
+2026-05-03 10:18:06,269 | INFO     | smart_grid.models.baseline | XGBoost обучен | lag-features: 386 | Y: (5917, 24)
+2026-05-03 10:18:06,694 | INFO     | smart_grid.hpo |   XGBoost trial MAE=4063.47
+2026-05-03 10:18:06,811 | INFO     | smart_grid.models.baseline | XGBoost v5 (FullLags + RollingAllChannels + MultiHorizon) | ~165 признаков | 24 независимых модели + val-early-stopping | n_est=500 depth=4 min_cw=15
+2026-05-03 10:21:41,890 | INFO     | smart_grid.models.baseline | XGBoost обучен | lag-features: 386 | Y: (5917, 24)
+2026-05-03 10:21:42,286 | INFO     | smart_grid.hpo |   XGBoost trial MAE=4058.98
+2026-05-03 10:21:42,402 | INFO     | smart_grid.models.baseline | XGBoost v5 (FullLags + RollingAllChannels + MultiHorizon) | ~165 признаков | 24 независимых модели + val-early-stopping | n_est=200 depth=4 min_cw=18
+2026-05-03 10:23:41,457 | INFO     | smart_grid.models.baseline | XGBoost обучен | lag-features: 386 | Y: (5917, 24)
+2026-05-03 10:23:41,796 | INFO     | smart_grid.hpo |   XGBoost trial MAE=4128.96
+2026-05-03 10:23:41,894 | INFO     | smart_grid.models.baseline | XGBoost v5 (FullLags + RollingAllChannels + MultiHorizon) | ~165 признаков | 24 независимых модели + val-early-stopping | n_est=500 depth=6 min_cw=18
+2026-05-03 10:28:00,406 | INFO     | smart_grid.models.baseline | XGBoost обучен | lag-features: 386 | Y: (5917, 24)
+2026-05-03 10:28:00,829 | INFO     | smart_grid.hpo |   XGBoost trial MAE=4061.46
+2026-05-03 10:28:00,946 | INFO     | smart_grid.models.baseline | XGBoost v5 (FullLags + RollingAllChannels + MultiHorizon) | ~165 признаков | 24 независимых модели + val-early-stopping | n_est=700 depth=6 min_cw=14
+2026-05-03 10:40:10,074 | INFO     | smart_grid.models.baseline | XGBoost обучен | lag-features: 386 | Y: (5917, 24)
+2026-05-03 10:40:10,835 | INFO     | smart_grid.hpo |   XGBoost trial MAE=4038.76
+2026-05-03 10:40:10,975 | INFO     | smart_grid.models.baseline | XGBoost v5 (FullLags + RollingAllChannels + MultiHorizon) | ~165 признаков | 24 независимых модели + val-early-stopping | n_est=600 depth=7 min_cw=13
+2026-05-03 10:55:02,830 | INFO     | smart_grid.models.baseline | XGBoost обучен | lag-features: 386 | Y: (5917, 24)
+2026-05-03 10:55:03,820 | INFO     | smart_grid.hpo |   XGBoost trial MAE=4020.32
+2026-05-03 10:55:03,981 | INFO     | smart_grid.models.baseline | XGBoost v5 (FullLags + RollingAllChannels + MultiHorizon) | ~165 признаков | 24 независимых модели + val-early-stopping | n_est=500 depth=7 min_cw=14
+2026-05-03 11:04:46,459 | INFO     | smart_grid.models.baseline | XGBoost обучен | lag-features: 386 | Y: (5917, 24)
+2026-05-03 11:04:47,157 | INFO     | smart_grid.hpo |   XGBoost trial MAE=4022.57
+2026-05-03 11:04:47,287 | INFO     | smart_grid.models.baseline | XGBoost v5 (FullLags + RollingAllChannels + MultiHorizon) | ~165 признаков | 24 независимых модели + val-early-stopping | n_est=500 depth=6 min_cw=11
+2026-05-03 11:12:28,117 | INFO     | smart_grid.models.baseline | XGBoost обучен | lag-features: 386 | Y: (5917, 24)
+2026-05-03 11:12:28,748 | INFO     | smart_grid.hpo |   XGBoost trial MAE=4023.45
+2026-05-03 11:12:28,866 | INFO     | smart_grid.models.baseline | XGBoost v5 (FullLags + RollingAllChannels + MultiHorizon) | ~165 признаков | 24 независимых модели + val-early-stopping | n_est=500 depth=6 min_cw=13
+2026-05-03 11:20:41,525 | INFO     | smart_grid.models.baseline | XGBoost обучен | lag-features: 386 | Y: (5917, 24)
+2026-05-03 11:20:42,223 | INFO     | smart_grid.hpo |   XGBoost trial MAE=4007.29
+2026-05-03 11:20:42,356 | INFO     | smart_grid.models.baseline | XGBoost v5 (FullLags + RollingAllChannels + MultiHorizon) | ~165 признаков | 24 независимых модели + val-early-stopping | n_est=500 depth=6 min_cw=12
+2026-05-03 11:28:38,600 | INFO     | smart_grid.models.baseline | XGBoost обучен | lag-features: 386 | Y: (5917, 24)
+2026-05-03 11:28:39,253 | INFO     | smart_grid.hpo |   XGBoost trial MAE=4012.22
+2026-05-03 11:28:39,376 | INFO     | smart_grid.models.baseline | XGBoost v5 (FullLags + RollingAllChannels + MultiHorizon) | ~165 признаков | 24 независимых модели + val-early-stopping | n_est=300 depth=6 min_cw=11
+2026-05-03 11:33:27,914 | INFO     | smart_grid.models.baseline | XGBoost обучен | lag-features: 386 | Y: (5917, 24)
+2026-05-03 11:33:28,436 | INFO     | smart_grid.hpo |   XGBoost trial MAE=4033.16
+2026-05-03 11:33:28,563 | INFO     | smart_grid.hpo | ─────────────────────────────────────────────────────────────────
+2026-05-03 11:33:28,563 | INFO     | smart_grid.hpo | ✅ XGBOOST ЗАВЕРШЁН | best_val_loss=4007.291504 | trials: 25/25 завершено, 0 обрезано
+2026-05-03 11:33:28,563 | INFO     | smart_grid.hpo |    Время: 152.9 мин
+2026-05-03 11:33:28,563 | INFO     | smart_grid.hpo |    Лучшие параметры:
+2026-05-03 11:33:28,563 | INFO     | smart_grid.hpo |      n_estimators                   = 500
+2026-05-03 11:33:28,564 | INFO     | smart_grid.hpo |      max_depth                      = 6
+2026-05-03 11:33:28,564 | INFO     | smart_grid.hpo |      learning_rate                  = 0.01211923223978861
+2026-05-03 11:33:28,564 | INFO     | smart_grid.hpo |      subsample                      = 0.8500000000000001
+2026-05-03 11:33:28,564 | INFO     | smart_grid.hpo |      colsample_bytree               = 0.25
+2026-05-03 11:33:28,564 | INFO     | smart_grid.hpo |      min_child_weight               = 13
+2026-05-03 11:33:28,564 | INFO     | smart_grid.hpo |      reg_alpha                      = 0.09321374221714501
+2026-05-03 11:33:28,564 | INFO     | smart_grid.hpo |      reg_lambda                     = 0.5042316071319888
+2026-05-03 11:33:28,564 | INFO     | smart_grid.hpo |    Сохранено: C:\Users\Admin\Desktop\smg\smartgrid\results\hpo\optimal\xgboost_best_params.json
+2026-05-03 11:33:28,597 | INFO     | smart_grid.hpo | Сводный отчёт HPO: C:\Users\Admin\Desktop\smg\smartgrid\results\hpo\optimal\hpo_summary.json
+2026-05-03 11:33:28,597 | INFO     | smart_grid.hpo | 
+======================================================================
+2026-05-03 11:33:28,597 | INFO     | smart_grid.hpo | СВОДКА HPO [mode=optimal]
+2026-05-03 11:33:28,598 | INFO     | smart_grid.hpo | Модель                 val_loss     Ok   Обр.      Время
+2026-05-03 11:33:28,598 | INFO     | smart_grid.hpo | ----------------------------------------------------------------------
+2026-05-03 11:33:28,598 | INFO     | smart_grid.hpo | lstm                   0.000835     12     13   1596.3 мин
+2026-05-03 11:33:28,598 | INFO     | smart_grid.hpo | itransformer           0.001558     18      7    445.7 мин
+2026-05-03 11:33:28,598 | INFO     | smart_grid.hpo | patchtst               0.001293      6     19    405.5 мин
+2026-05-03 11:33:28,599 | INFO     | smart_grid.hpo | xgboost             4007.291504     25      0    152.9 мин
+2026-05-03 11:33:28,599 | INFO     | smart_grid.hpo | ======================================================================
+2026-05-03 11:33:28,599 | INFO     | smart_grid.hpo | 
+✅ HPO завершён за 152.9 мин
+2026-05-03 11:33:28,599 | INFO     | smart_grid.hpo | Сводный отчёт: C:\Users\Admin\Desktop\smg\smartgrid\results\hpo\optimal\hpo_summary.json
+2026-05-03 11:33:28,599 | INFO     | smart_grid.hpo | 
+Для применения результатов запустите main.py — 
+2026-05-03 11:33:28,599 | INFO     | smart_grid.hpo | параметры подхватятся автоматически из results/hpo/optimal/

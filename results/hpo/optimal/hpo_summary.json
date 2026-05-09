@@ -1,0 +1,160 @@
+{
+  "mode": "optimal",
+  "models": {
+    "lstm": {
+      "model_name": "lstm",
+      "pipeline_mode": "optimal",
+      "best_value": 0.0008347091497853398,
+      "best_params": {
+        "lstm_units": 192,
+        "tcn_filters": 32,
+        "attn_heads": 2,
+        "dropout": 0.25,
+        "learning_rate": 0.00032829622015720307,
+        "seasonal_blend": 0.8,
+        "huber_delta": 0.02,
+        "use_cosine_decay": false
+      },
+      "config_updates": {
+        "LSTM_UNITS_1": 192,
+        "LSTM_UNITS_2": 192,
+        "LSTM_UNITS_3": 192,
+        "LSTM_TCN_FILTERS": 32,
+        "LSTM_ATTN_HEADS": 2,
+        "DROPOUT_RATE": 0.25,
+        "LSTM_LEARNING_RATE": 0.00032829622015720307,
+        "LSTM_SEASONAL_BLEND_INIT": 0.8,
+        "LSTM_HUBER_DELTA": 0.02,
+        "LSTM_USE_COSINE_DECAY": false
+      },
+      "n_trials_total": 25,
+      "n_completed": 12,
+      "n_pruned": 13,
+      "elapsed_sec": 95779.0,
+      "search_config": {
+        "days": 365,
+        "households": 1500,
+        "epochs": 80,
+        "patience": 20,
+        "batch_size": 16,
+        "n_trials": 25,
+        "history": 192
+      }
+    },
+    "itransformer": {
+      "model_name": "itransformer",
+      "pipeline_mode": "optimal",
+      "best_value": 0.0015581822954118252,
+      "best_params": {
+        "d_model": 64,
+        "num_heads": 8,
+        "num_layers": 2,
+        "dff": 384,
+        "dropout": 0.08,
+        "learning_rate": 0.00015619685042677964,
+        "seasonal_blend": 0.8,
+        "use_cosine_decay": false
+      },
+      "config_updates": {
+        "TRANSFORMER_D_MODEL": 64,
+        "TRANSFORMER_N_HEADS": 8,
+        "ITRANSFORMER_N_LAYERS": 2,
+        "TRANSFORMER_DFF": 384,
+        "TRANSFORMER_DROPOUT": 0.08,
+        "VANILLA_TRANSFORMER_LR": 0.00015619685042677964,
+        "VANILLA_SEASONAL_BLEND_INIT": 0.8,
+        "TRANSFORMER_USE_COSINE_DECAY": false
+      },
+      "n_trials_total": 25,
+      "n_completed": 18,
+      "n_pruned": 7,
+      "elapsed_sec": 26743.2,
+      "search_config": {
+        "days": 365,
+        "households": 1500,
+        "epochs": 80,
+        "patience": 20,
+        "batch_size": 16,
+        "n_trials": 25,
+        "history": 192
+      }
+    },
+    "patchtst": {
+      "model_name": "patchtst",
+      "pipeline_mode": "optimal",
+      "best_value": 0.0012928801588714123,
+      "best_params": {
+        "patch_len": 12,
+        "stride_ratio": 0.75,
+        "d_model": 64,
+        "num_heads": 2,
+        "num_layers": 4,
+        "learning_rate": 0.0009170344090193549,
+        "dropout": 0.12,
+        "seasonal_blend": 0.4,
+        "stochastic_depth": 0.08,
+        "use_cosine_decay": true
+      },
+      "config_updates": {
+        "TRANSFORMER_D_MODEL": 64,
+        "TRANSFORMER_N_HEADS": 2,
+        "TRANSFORMER_N_LAYERS": 4,
+        "PATCHTST_LEARNING_RATE": 0.0009170344090193549,
+        "PATCHTST_DROPOUT": 0.12,
+        "TRANSFORMER_STOCHASTIC_DEPTH": 0.08,
+        "VANILLA_SEASONAL_BLEND_INIT": 0.4,
+        "TRANSFORMER_USE_COSINE_DECAY": true,
+        "_patchtst_patch_len": 12,
+        "_patchtst_stride_ratio": 0.75
+      },
+      "n_trials_total": 25,
+      "n_completed": 6,
+      "n_pruned": 19,
+      "elapsed_sec": 24327.1,
+      "search_config": {
+        "days": 365,
+        "households": 1500,
+        "epochs": 80,
+        "patience": 20,
+        "batch_size": 16,
+        "n_trials": 25,
+        "history": 192
+      }
+    },
+    "xgboost": {
+      "model_name": "xgboost",
+      "pipeline_mode": "optimal",
+      "best_value": 4007.29150390625,
+      "best_params": {
+        "n_estimators": 500,
+        "max_depth": 6,
+        "learning_rate": 0.01211923223978861,
+        "subsample": 0.8500000000000001,
+        "colsample_bytree": 0.25,
+        "min_child_weight": 13,
+        "reg_alpha": 0.09321374221714501,
+        "reg_lambda": 0.5042316071319888
+      },
+      "config_updates": {
+        "XGB_N_ESTIMATORS": 500,
+        "XGB_MAX_DEPTH": 6,
+        "XGB_LR": 0.01211923223978861,
+        "XGB_SUBSAMPLE": 0.8500000000000001,
+        "XGB_COLSAMPLE": 0.25
+      },
+      "n_trials_total": 25,
+      "n_completed": 25,
+      "n_pruned": 0,
+      "elapsed_sec": 9176.9,
+      "search_config": {
+        "days": 365,
+        "households": 1500,
+        "epochs": 80,
+        "patience": 20,
+        "batch_size": 16,
+        "n_trials": 25,
+        "history": 192
+      }
+    }
+  }
+}

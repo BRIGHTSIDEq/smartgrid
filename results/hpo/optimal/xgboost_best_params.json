@@ -1,0 +1,35 @@
+{
+  "model_name": "xgboost",
+  "pipeline_mode": "optimal",
+  "best_value": 4007.29150390625,
+  "best_params": {
+    "n_estimators": 500,
+    "max_depth": 6,
+    "learning_rate": 0.01211923223978861,
+    "subsample": 0.8500000000000001,
+    "colsample_bytree": 0.25,
+    "min_child_weight": 13,
+    "reg_alpha": 0.09321374221714501,
+    "reg_lambda": 0.5042316071319888
+  },
+  "config_updates": {
+    "XGB_N_ESTIMATORS": 500,
+    "XGB_MAX_DEPTH": 6,
+    "XGB_LR": 0.01211923223978861,
+    "XGB_SUBSAMPLE": 0.8500000000000001,
+    "XGB_COLSAMPLE": 0.25
+  },
+  "n_trials_total": 25,
+  "n_completed": 25,
+  "n_pruned": 0,
+  "elapsed_sec": 9176.9,
+  "search_config": {
+    "days": 365,
+    "households": 1500,
+    "epochs": 80,
+    "patience": 20,
+    "batch_size": 16,
+    "n_trials": 25,
+    "history": 192
+  }
+}

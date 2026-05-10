@@ -120,57 +120,66 @@ class SARIMAWrapper:
     def predict(self, X: np.ndarray) -> np.ndarray:
         """
         Строит прогноз на горизонт=24ч для каждого входного окна.
-
-        Для каждого из N окон берёт последний временной шаг как
-        «текущий момент» и делает forecast на 24 шага вперёд.
-
-        При refit=True переобучается на последних refit_window точках
-        исходного ряда (медленнее, но точнее).
-
-        Returns
-        -------
-        np.ndarray shape (N, 24)
+ 
+        ИСПРАВЛЕНИЕ v2 (было: forecast(24) вызывался N раз с одной точки):
+          Statsmodels forecast() каждый раз стартует с конца обучающего ряда,
+          поэтому все N окон получали идентичный прогноз → MAPE=40%, R²=-2.35.
+ 
+          Теперь: один длинный forecast(history+N+23), нарезается на окна:
+            окно i = long_forecast[history+i : history+i+horizon]
+ 
+        Требование к fit(): передавать raw_series = train+val, чтобы конец
+        обучающего ряда совпадал с началом тестового периода.
         """
         if self._fitted_model is None:
             raise RuntimeError("SARIMAWrapper: вызовите fit() перед predict()")
-
+ 
         try:
             from statsmodels.tsa.statespace.sarimax import SARIMAX
         except ImportError:
             raise ImportError("statsmodels >= 0.14 требуется для SARIMA.")
-
-        N = len(X)
-        horizon = 24
-        predictions = np.zeros((N, horizon), dtype=np.float32)
-
+ 
+        N            = len(X)
+        horizon      = 24
+        history_len  = int(X.shape[1]) if X.ndim == 3 else 192
+        predictions  = np.zeros((N, horizon), dtype=np.float32)
+ 
         if not self.refit:
-            # Быстрый режим: один forecast из обученной модели
-            # Сдвигаем точку старта для каждого окна
-            for i in range(N):
-                try:
-                    fc = self._fitted_model.forecast(steps=horizon)
-                    predictions[i] = np.maximum(fc, 0).astype(np.float32)
-                except Exception:
-                    # Fallback: используем последнее значение
-                    predictions[i] = float(X[i, -1, 0]) * np.ones(horizon)
+            # ── Исправленный быстрый режим ────────────────────────────────────
+            # Один длинный прогноз вместо N вызовов forecast(24).
+            # Окно i соответствует временному отрезку:
+            #   [fit_end + history_len + i .. fit_end + history_len + i + horizon]
+            total_steps = history_len + N + horizon - 1
+            try:
+                import warnings
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    long_fc = self._fitted_model.forecast(steps=total_steps)
+ 
+                for i in range(N):
+                    start = history_len + i
+                    predictions[i] = np.maximum(
+                        long_fc[start : start + horizon], 0
+                    ).astype(np.float32)
+ 
+            except Exception as exc:
+                logger.warning("SARIMA forecast(long) ошибка: %s", exc)
+                if self._train_series is not None:
+                    predictions[:] = float(self._train_series[-1])
+ 
         else:
-            # Refit-режим: переобучаемся на скользящем окне
+            # ── Refit-режим (без изменений) ───────────────────────────────────
             if self._train_series is None:
                 raise RuntimeError("raw_series не передана в fit()")
-
+ 
             total_train = len(self._train_series)
             for i in range(N):
                 window_start = max(0, total_train + i - self.refit_window)
-                window_end   = total_train + i
-                # Собираем историю из train + предыдущих test шагов
-                if i == 0:
+                history = self._train_series[window_start : total_train + i]
+                if len(history) < 48:
                     history = self._train_series[-self.refit_window:]
-                else:
-                    history = self._train_series[window_start:total_train]
-                    if len(history) < 48:
-                        history = self._train_series[-self.refit_window:]
-
                 try:
+                    import warnings
                     with warnings.catch_warnings():
                         warnings.simplefilter("ignore")
                         m = SARIMAX(
@@ -180,15 +189,16 @@ class SARIMAWrapper:
                             enforce_stationarity=False,
                             enforce_invertibility=False,
                         ).fit(disp=False, maxiter=100)
-                    fc = m.forecast(steps=horizon)
-                    predictions[i] = np.maximum(fc, 0).astype(np.float32)
+                    predictions[i] = np.maximum(
+                        m.forecast(steps=horizon), 0
+                    ).astype(np.float32)
                 except Exception as exc:
                     logger.debug("SARIMA refit ошибка окно %d: %s", i, exc)
                     predictions[i] = float(history[-1]) * np.ones(horizon)
-
+ 
                 if i % 100 == 0:
                     logger.info("SARIMA predict: %d/%d окон", i, N)
-
+ 
         return predictions
 
     def __repr__(self) -> str:

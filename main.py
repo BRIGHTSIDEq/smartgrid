@@ -8,6 +8,11 @@ main.py — Smart Grid v18.
   + [6b] График сравнения HPO до/после
   + [6c] График SARIMA vs нейросети
   + [9b] MC Dropout с графиком доверительных интервалов (не только лог)
+
+ИСПРАВЛЕНИЕ v18.1:
+  + [5a] SARIMA обучается на raw_train + raw_val (не только raw_train).
+         Иначе стартовая точка прогноза оказывалась за 2628 шагов ДО теста
+         → MAPE=40%, R²=-2.35 (все окна получали идентичный прогноз).
 """
 
 import logging
@@ -64,11 +69,11 @@ def _cleanup_plots_dir(plots_dir: str) -> None:
         "training_", "predictions_comparison", "metrics_comparison",
         "scientific_diagnostics_", "residuals_", "backtesting_",
         "storage_optimization", "attention_summary_", "head_specialization_",
-        # v18 новые графики
         "mc_dropout_uncertainty_",
         "feature_importance_xgboost",
         "hpo_comparison",
         "sarima_vs_neural",
+        "sarima_fixed_vs_fact",
     )
     for p in Path(plots_dir).glob("*"):
         if p.suffix.lower() != ".png":
@@ -166,7 +171,7 @@ def main():
     # ─────────────────────────────────────────────────────────────────────────
     logger.info("\n[4/10] Инициализация моделей...")
 
-    _n_train    = max(len(data["X_train"]) // Config.BATCH_SIZE, 1)
+    _n_train     = max(len(data["X_train"]) // Config.BATCH_SIZE, 1)
     _total_steps = Config.EPOCHS * _n_train
 
     # LSTM
@@ -278,7 +283,7 @@ def main():
         seed=Config.SEED,
     )
 
-    # ── [NEW v18] SARIMA ───────────────────────────────────────────────────────
+    # SARIMA
     sarima_model = build_sarima(
         order=(1, 1, 1),
         seasonal_order=(1, 1, 1, 24),
@@ -296,11 +301,11 @@ def main():
     logger.info("\n[5/10] Обучение моделей...")
 
     models_to_train = [
-        (lstm,         "LSTM",             Config.PATIENCE),
-        (itransformer, "iTransformer",      Config.PATIENCE),
-        (patchtst,     "PatchTST",          Config.PATCHTST_PATIENCE),
-        (lr_model,     "LinearRegression",  Config.PATIENCE),
-        (xgb_model,    "XGBoost",           Config.PATIENCE),
+        (lstm,         "LSTM",            Config.PATIENCE),
+        (itransformer, "iTransformer",     Config.PATIENCE),
+        (patchtst,     "PatchTST",         Config.PATCHTST_PATIENCE),
+        (lr_model,     "LinearRegression", Config.PATIENCE),
+        (xgb_model,    "XGBoost",          Config.PATIENCE),
     ]
     if use_tft and tft_lite is not None:
         models_to_train.append((tft_lite, "TFT-Lite", Config.PATIENCE))
@@ -326,28 +331,32 @@ def main():
             plot_training_history(trainer.history, model_name=name,
                                   plots_dir=Config.PLOTS_DIR)
 
-    # ── [NEW v18] Обучение SARIMA ─────────────────────────────────────────────
+    # ── [5a] Обучение SARIMA ──────────────────────────────────────────────────
     logger.info("\n[5a/10] Обучение SARIMA(1,1,1)(1,1,1,24)...")
-    sarima_trainer = ModelTrainer(sarima_model, "SARIMA",
-                                  Config.MODELS_DIR, Config.PLOTS_DIR)
+    sarima_trainer  = ModelTrainer(sarima_model, "SARIMA",
+                                   Config.MODELS_DIR, Config.PLOTS_DIR)
+    sarima_trained  = False
     try:
-        # SARIMA обучается на сыром ряду, не на нормализованных окнах
+        # ИСПРАВЛЕНИЕ v18.1: обучаем на train+val, а не только на train.
+        # Без этого стартовая точка прогноза оказывается за 2628 шагов
+        # до начала тестового периода → все 2413 окон получают одинаковый
+        # прогноз → MAPE=40%, R²=-2.35.
+        raw_trainval = np.concatenate([data["raw_train"], data["raw_val"]])
         sarima_model.fit(
-            data["X_train"], data["Y_train"],
-            raw_series=data["raw_train"],
+            data["X_train"],
+            data["Y_train"],
+            raw_series=raw_trainval,          # ← исправлено: train+val
         )
         trainers.append(sarima_trainer)
         sarima_trained = True
-        logger.info("SARIMA обучена успешно")
+        logger.info("SARIMA обучена успешно. AIC=%.2f", sarima_model._fitted_model.aic)
     except Exception as exc:
         logger.warning("SARIMA пропущена: %s", exc)
-        sarima_trained = False
 
     # ─────────────────────────────────────────────────────────────────────────
     # [5b/10] WeightedEnsemble
     # ─────────────────────────────────────────────────────────────────────────
     logger.info("\n[5b/10] WeightedEnsemble...")
-    # SARIMA в ансамбль не включаем — разные пространства предсказаний
     ensemble_trainers = [t for t in trainers
                          if t.model_name not in ("TFT-Lite", "SARIMA")]
     ensemble = WeightedEnsemble(ensemble_trainers, model_name="WeightedEnsemble")
@@ -382,7 +391,7 @@ def main():
     )
     plot_metrics_comparison(all_metrics, plots_dir=Config.PLOTS_DIR)
 
-    # Собираем предсказания всех моделей
+    # Предсказания всех моделей
     predictions = {}
     y_true = inverse_scale(scaler, data["Y_test"])
 
@@ -392,9 +401,7 @@ def main():
                 raw = t.predict(data["X_tft_test"])
                 predictions[t.model_name] = inverse_scale(scaler, raw)
             elif t.model_name == "SARIMA" and sarima_trained:
-                # SARIMA предсказывает в raw кВт·ч напрямую
-                raw_pred = sarima_model.predict(data["X_test"])
-                predictions["SARIMA"] = raw_pred
+                predictions["SARIMA"] = sarima_model.predict(data["X_test"])
             else:
                 predictions[t.model_name] = t.predict_absolute(data, split="test")
         except Exception as exc:
@@ -424,7 +431,7 @@ def main():
             plots_dir=Config.PLOTS_DIR,
         )
 
-    # ── [NEW v18] SARIMA vs нейросети ─────────────────────────────────────────
+    # ── [6a] SARIMA vs нейросети ──────────────────────────────────────────────
     logger.info("\n[6a/10] График SARIMA vs нейросети...")
     if predictions:
         try:
@@ -437,27 +444,22 @@ def main():
         except Exception as exc:
             logger.warning("sarima_vs_neural: %s", exc)
 
-    # ── [NEW v18] Feature importance XGBoost ──────────────────────────────────
+    # ── [6b] Feature importance XGBoost ───────────────────────────────────────
     logger.info("\n[6b/10] Feature importance XGBoost...")
-    xgb_trainer = next(
-        (t for t in trainers if t.model_name == "XGBoost"), None
-    )
+    xgb_trainer = next((t for t in trainers if t.model_name == "XGBoost"), None)
     if xgb_trainer is not None:
         try:
             imp_dict = xgb_trainer.model.get_feature_importance(top_n=25)
             if imp_dict is not None:
                 plot_feature_importance_xgboost(
-                    imp_dict,
-                    top_n=25,
-                    plots_dir=Config.PLOTS_DIR,
+                    imp_dict, top_n=25, plots_dir=Config.PLOTS_DIR,
                 )
         except Exception as exc:
             logger.warning("Feature importance: %s", exc)
 
-    # ── [NEW v18] HPO comparison ───────────────────────────────────────────────
+    # ── [6c] HPO comparison ───────────────────────────────────────────────────
     logger.info("\n[6c/10] HPO comparison до/после...")
     try:
-        # all_metrics содержит результаты ПОСЛЕ HPO (текущий запуск)
         results_after_hpo = {
             name: {
                 "MAE":  m["MAE"],
@@ -528,8 +530,8 @@ def main():
         model_name="LSTM",
     )
 
-    # ── [NEW v18] MC Dropout с ГРАФИКОМ ───────────────────────────────────────
-    logger.info("\n[9b/10] MC Dropout (LSTM) — с графиком доверительных интервалов...")
+    # ── [9b] MC Dropout ───────────────────────────────────────────────────────
+    logger.info("\n[9b/10] MC Dropout (LSTM) — доверительные интервалы...")
     try:
         n_mc_samples = 500
         mc_mean_kwh, mc_std_kwh = compute_mc_predictions(
@@ -539,8 +541,6 @@ def main():
             n_samples=30,
         )
         y_true_mc = inverse_scale(scaler, data["Y_test"][:n_mc_samples])
-
-        # График доверительных интервалов
         plot_mc_dropout_uncertainty(
             y_true=y_true_mc,
             mc_mean=mc_mean_kwh,
@@ -549,7 +549,6 @@ def main():
             n_steps=72,
             plots_dir=Config.PLOTS_DIR,
         )
-
         avg_std = float(mc_std_kwh.mean())
         logger.info(
             "MC Dropout | mean uncertainty: ±%.1f кВт·ч (%.2f%% от ср.потребления)",
@@ -620,14 +619,14 @@ def main():
         export_model_bundle(
             best_keras.model, scaler,
             {
-                "HISTORY_LENGTH":    Config.HISTORY_LENGTH,
-                "FORECAST_HORIZON":  Config.FORECAST_HORIZON,
-                "N_FEATURES":        Config.N_FEATURES,
-                "model_name":        best_keras.model_name,
+                "HISTORY_LENGTH":        Config.HISTORY_LENGTH,
+                "FORECAST_HORIZON":      Config.FORECAST_HORIZON,
+                "N_FEATURES":            Config.N_FEATURES,
+                "model_name":            best_keras.model_name,
                 "lag_feature_start_idx": lag_idx,
-                "seasonal_diff":     False,
-                "naive_type":        naive_type,
-                "bias_correction":   getattr(best_keras, "_bias_correction", None),
+                "seasonal_diff":         False,
+                "naive_type":            naive_type,
+                "bias_correction":       getattr(best_keras, "_bias_correction", None),
             },
             export_dir=Config.MODELS_DIR,
             model_name=best_keras.model_name,
@@ -652,6 +651,7 @@ def main():
 
     logger.info("\nНовые графики v18:")
     logger.info("  results/plots/sarima_vs_neural.png")
+    logger.info("  results/plots/sarima_fixed_vs_fact.png")
     logger.info("  results/plots/feature_importance_xgboost.png")
     logger.info("  results/plots/hpo_comparison.png")
     logger.info("  results/plots/mc_dropout_uncertainty_LSTM.png")

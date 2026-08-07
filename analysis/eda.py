@@ -7,6 +7,8 @@ import logging
 import os
 from typing import Optional
 
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -147,5 +149,4 @@ def _save(fig: plt.Figure, plots_dir: str, name: str, save: bool) -> None:
         path = os.path.join(plots_dir, name)
         fig.savefig(path, dpi=150, bbox_inches="tight")
         logger.debug("График сохранён: %s", path)
-    plt.show()
     plt.close(fig)

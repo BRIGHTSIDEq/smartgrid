@@ -4,11 +4,15 @@
 
 Задача прогнозирования почасового потребления электроэнергии относится к классу задач регрессии временных рядов (Time Series Forecasting). Основное требование к модели — способность улавливать как краткосрочные паттерны (переходы «будний день → вечерний пик»), так и долгосрочные зависимости (суточная и недельная периодичность, праздничные эффекты).
 
-В данной работе исследуются четыре класса архитектур:
-1. **Рекуррентные нейронные сети** (LSTM) — стандарт де-факто для временных рядов до 2021 года
+В данной работе исследуются три класса архитектур:
+1. **Рекуррентные нейронные сети** (LSTM, усиленные свёрточным TCN-блоком и механизмом внимания) — стандарт де-факто для временных рядов до 2021 года
 2. **Vanilla Transformer (Encoder-only)** — классический механизм внимания [1]
-3. **Temporal Fusion Transformer Lite** — гибридная архитектура с ковариатами [3]
-4. **PatchTST** — современный подход с патч-токенизацией [4]
+3. **PatchTST** — современный подход с патч-токенизацией [4]
+
+В качестве точки отсчёта дополнительно используются наивные базлайны
+(суточный и недельный повтор, климатологический профиль), а также
+классические модели машинного обучения — Ridge-регрессия и градиентный
+бустинг XGBoost.
 
 ---
 
@@ -88,23 +92,7 @@ t2v(τ)[i>0] = sin(ω_i · τ + φ_i)    (периодические компо�
 
 ## 3.5 Архитектурные инновации
 
-### 3.5.1 Temporal Fusion Transformer (TFT) [Lim et al., 2021]
-
-TFT решает ключевую проблему Vanilla Transformer: **отсутствие информации о контексте** (время суток, день недели, праздники). Модель явно интегрирует временны́е ковариаты через **Gated Residual Network (GRN)**:
-
-```
-GRN(x) = LayerNorm(proj(x) + sigmoid(W·f(x)) ⊙ f(x))
-```
-
-Механизм **гейтинга** позволяет модели «выключать» нерелевантные признаки (например, температуру в мягкий осенний день), что эквивалентно адаптивному выбору признаков.
-
-Гибридная структура:
-```
-Ковариаты + Ряд → GRN → LSTM (локальные паттерны)
-                      → Gate → Transformer Attention (дальние зависимости)
-```
-
-### 3.5.2 PatchTST [Nie et al., 2023]
+### 3.5.1 PatchTST [Nie et al., 2023]
 
 PatchTST переосмысляет токенизацию: вместо отдельных точек — **подпоследовательности (патчи)**.
 
@@ -122,7 +110,7 @@ PatchTST переосмысляет токенизацию: вместо отд�
 
 В оригинальной статье [4] PatchTST превосходит FEDformer на бенчмарке ETTh1 на 16% по MSE.
 
-### 3.5.3 ProbSparse Attention [Zhou et al., 2021 — Informer]
+### 3.5.2 ProbSparse Attention [Zhou et al., 2021 — Informer]
 
 Стандартный Self-Attention шумит на длинных последовательностях: большинство Q-векторов имеют «размытое» распределение ≈ равномерному. Informer отбирает только top-u = c·ln(L) информативных запросов.
 
@@ -138,7 +126,6 @@ PatchTST переосмысляет токенизацию: вместо отд�
 |---|---|---|---|---|
 | LSTM (128-64-32) | ~85 000 | — | — | — |
 | VanillaTransformer (d=64, h=4, L=2) | ~82 000 | — | — | — |
-| TFTLite (d=64, h=4, L=2) | ~95 000 | — | — | — |
 | PatchTST (d=64, h=4, L=2, p=8) | ~88 000 | — | — | — |
 
 *Заполнить по результатам experiments/transformer_ablation.py, Exp 4*
@@ -195,8 +182,6 @@ Self-Attention имеет O(d²·T) параметров в проекционн
 [1] Vaswani, A., Shazeer, N., Parmar, N., et al. (2017). Attention is All You Need. *Advances in Neural Information Processing Systems (NeurIPS)*, 30.
 
 [2] Zhou, H., Zhang, S., Peng, J., et al. (2021). Informer: Beyond Efficient Transformer for Long Sequence Time-Series Forecasting. *AAAI Conference on Artificial Intelligence*.
-
-[3] Lim, B., Arık, S., Loeff, N., & Pfister, T. (2021). Temporal Fusion Transformers for Interpretable Multi-horizon Time Series Forecasting. *International Journal of Forecasting*, 37(4), 1748–1764.
 
 [4] Nie, Y., Nguyen, N. H., Sinthong, P., & Kalagnanam, J. (2023). A Time Series is Worth 64 Words: Long-term Forecasting with Transformers. *International Conference on Learning Representations (ICLR)*.
 

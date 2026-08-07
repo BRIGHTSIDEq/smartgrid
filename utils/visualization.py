@@ -52,7 +52,6 @@ def plot_training_history(
             os.path.join(plots_dir, f"training_{model_name.replace(' ', '_')}.png"),
             dpi=150, bbox_inches="tight",
         )
-    pass  # plt.show() убран: headless Agg backend
     plt.close(fig)
 
 
@@ -83,7 +82,6 @@ def plot_predictions_comparison(
     if save:
         fig.savefig(os.path.join(plots_dir, "predictions_comparison.png"),
                     dpi=150, bbox_inches="tight")
-    pass  # plt.show() убран: headless Agg backend
     plt.close(fig)
 
 
@@ -94,31 +92,181 @@ def plot_metrics_comparison(
     plots_dir: str = "results/plots",
     save: bool = True,
 ) -> None:
-    """Барчарт метрик MAE / RMSE / MAPE / R² по всем моделям."""
-    os.makedirs(plots_dir, exist_ok=True)
-    model_names = list(metrics.keys())
-    metric_names = ["MAE", "RMSE", "MAPE", "R2"]
+    """
+    Барчарт метрик по всем моделям, отсортированный по MAE.
 
-    fig, axes = plt.subplots(1, 4, figsize=(20, 5))
-    fig.suptitle("Сравнение метрик моделей", fontsize=14, fontweight="bold")
+    На панели MASE проводится красная линия на уровне 1.0 — граница
+    практической ценности: столбцы выше неё означают, что модель не превзошла
+    сезонно-наивный прогноз.
+    """
+    os.makedirs(plots_dir, exist_ok=True)
+    model_names = sorted(metrics.keys(), key=lambda n: metrics[n].get("MAE", 9e18))
+    has_mase = any("MASE" in m for m in metrics.values())
+    metric_names = ["MAE", "RMSE", "MAPE", "R2"] + (["MASE"] if has_mase else [])
+
+    fig, axes = plt.subplots(1, len(metric_names), figsize=(5 * len(metric_names), 5))
+    fig.suptitle("Сравнение метрик моделей (тестовая выборка)",
+                 fontsize=14, fontweight="bold")
     colors = sns.color_palette("husl", len(model_names))
 
-    for ax, m in zip(axes, metric_names):
+    for ax, m in zip(np.atleast_1d(axes), metric_names):
         values = [metrics[n].get(m, 0) for n in model_names]
-        bars = ax.bar(model_names, values, color=colors, alpha=0.8, edgecolor="black")
+        bars = ax.bar(model_names, values, color=colors, alpha=0.85, edgecolor="black")
         ax.set_title(m, fontweight="bold")
         ax.set_xticks(range(len(model_names)))
-        ax.set_xticklabels(model_names, rotation=20, ha="right")
+        ax.set_xticklabels(model_names, rotation=25, ha="right", fontsize=8)
         ax.grid(True, alpha=0.3, axis="y")
+        if m == "MASE":
+            ax.axhline(1.0, color="red", ls="--", lw=2,
+                       label="Сезонно-наивный прогноз")
+            ax.legend(fontsize=8)
         for bar, v in zip(bars, values):
             ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height(),
-                    f"{v:.2f}", ha="center", va="bottom", fontsize=9)
+                    f"{v:.2f}", ha="center", va="bottom", fontsize=8)
 
     plt.tight_layout()
     if save:
         fig.savefig(os.path.join(plots_dir, "metrics_comparison.png"),
                     dpi=150, bbox_inches="tight")
-    pass  # plt.show() убран: headless Agg backend
+    plt.close(fig)
+
+
+# ── Деградация прогноза по шагам горизонта ───────────────────────────────────
+
+def plot_metrics_by_horizon(
+    per_horizon: Dict[str, Dict[str, List[float]]],
+    plots_dir: str = "results/plots",
+    save: bool = True,
+) -> None:
+    """
+    Кривые «шаг горизонта → ошибка» для всех моделей.
+
+    Усреднённый MAE скрывает главное: прогноз на 1 час вперёд и на 24 часа —
+    задачи разной сложности. Расхождение кривых показывает, какая модель
+    выигрывает именно на дальних шагах.
+
+    Parameters
+    ----------
+    per_horizon : {имя модели: результат utils.metrics.metrics_by_horizon}
+    """
+    os.makedirs(plots_dir, exist_ok=True)
+    fig, axes = plt.subplots(1, 2, figsize=(15, 5))
+    fig.suptitle("Деградация прогноза с ростом горизонта",
+                 fontsize=14, fontweight="bold")
+    colors = plt.cm.tab10.colors
+
+    for i, (name, m) in enumerate(per_horizon.items()):
+        axes[0].plot(m["h"], m["MAE"], marker="o", ms=3, lw=1.6,
+                     color=colors[i % 10], label=name)
+        axes[1].plot(m["h"], m["R2"], marker="s", ms=3, lw=1.6,
+                     color=colors[i % 10], label=name)
+
+    axes[0].set_title("MAE по шагам горизонта")
+    axes[0].set_xlabel("Шаг прогноза, ч вперёд")
+    axes[0].set_ylabel("MAE, кВт·ч")
+    axes[1].set_title("R² по шагам горизонта")
+    axes[1].set_xlabel("Шаг прогноза, ч вперёд")
+    axes[1].set_ylabel("R²")
+    for ax in axes:
+        ax.legend(fontsize=8)
+        ax.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    if save:
+        fig.savefig(os.path.join(plots_dir, "metrics_by_horizon.png"),
+                    dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+
+# ── Точность против вычислительной стоимости ─────────────────────────────────
+
+def plot_accuracy_vs_cost(
+    metrics: Dict[str, Dict[str, float]],
+    plots_dir: str = "results/plots",
+    save: bool = True,
+) -> None:
+    """
+    Диаграмма «время обучения → MAE» в логарифмическом масштабе по оси X.
+
+    Отвечает на практический вопрос работы: оправдывают ли тяжёлые архитектуры
+    свою вычислительную стоимость. Точки левее и ниже — лучше.
+    """
+    os.makedirs(plots_dir, exist_ok=True)
+    names = [n for n in metrics if "train_time_sec" in metrics[n]]
+    if not names:
+        return
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+    colors = plt.cm.tab10.colors
+    for i, n in enumerate(names):
+        t = max(float(metrics[n]["train_time_sec"]), 0.1)
+        mae = float(metrics[n]["MAE"])
+        params = int(metrics[n].get("n_params", 0))
+        size = 80 + (params / 20000.0 if params else 0)
+        ax.scatter(t, mae, s=min(size, 900), color=colors[i % 10],
+                   alpha=0.75, edgecolor="black", zorder=3)
+        ax.annotate(n, (t, mae), textcoords="offset points", xytext=(8, 6),
+                    fontsize=9)
+
+    ax.set_xscale("log")
+    ax.set_xlabel("Время обучения, сек (лог. шкала)")
+    ax.set_ylabel("MAE на тесте, кВт·ч")
+    ax.set_title("Точность против вычислительной стоимости\n"
+                 "(размер точки ∝ числу параметров)", fontweight="bold")
+    ax.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    if save:
+        fig.savefig(os.path.join(plots_dir, "accuracy_vs_cost.png"),
+                    dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+
+# ── Цена ошибки прогноза для накопителя ──────────────────────────────────────
+
+def plot_forecast_value(
+    storage_results: Dict[str, "StorageResult"],
+    plots_dir: str = "results/plots",
+    save: bool = True,
+) -> None:
+    """
+    Столбчатая диаграмма чистой экономии накопителя по источникам прогноза.
+
+    Верхняя пунктирная линия — результат при идеальном прогнозе. Расстояние до
+    неё и есть денежная стоимость ошибки конкретной модели.
+    """
+    os.makedirs(plots_dir, exist_ok=True)
+    names = sorted(storage_results, key=lambda k: -storage_results[k].net_savings)
+    values = [storage_results[n].net_savings for n in names]
+    oracle = storage_results.get("Идеальный прогноз")
+    oracle_val = oracle.net_savings if oracle is not None else max(values)
+
+    fig, ax = plt.subplots(figsize=(11, 6))
+    colors = ["#2e7d32" if n == "Идеальный прогноз" else "#1976d2" for n in names]
+    bars = ax.bar(names, values, color=colors, alpha=0.85, edgecolor="black")
+
+    ax.axhline(oracle_val, color="red", ls="--", lw=2,
+               label=f"Идеальный прогноз = {oracle_val:,.0f} руб".replace(",", " "))
+    for bar, v in zip(bars, values):
+        shortfall = oracle_val - v
+        label = f"{v:,.0f}".replace(",", " ")
+        if shortfall > 1:
+            label += f"\n(−{shortfall:,.0f})".replace(",", " ")
+        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height(),
+                label, ha="center", va="bottom", fontsize=8)
+
+    ax.set_ylabel("Чистая экономия за горизонт, руб")
+    ax.set_title("Экономический эффект накопителя в зависимости от источника прогноза\n"
+                 "(стратегия срезки пика)", fontweight="bold")
+    ax.set_xticks(range(len(names)))
+    ax.set_xticklabels(names, rotation=20, ha="right", fontsize=9)
+    ax.legend()
+    ax.grid(True, alpha=0.3, axis="y")
+
+    plt.tight_layout()
+    if save:
+        fig.savefig(os.path.join(plots_dir, "forecast_value.png"),
+                    dpi=150, bbox_inches="tight")
     plt.close(fig)
 
 
@@ -198,5 +346,4 @@ def plot_storage_result(
     if save:
         fig.savefig(os.path.join(plots_dir, "storage_optimization.png"),
                     dpi=150, bbox_inches="tight")
-    pass  # plt.show() убран: headless Agg backend
     plt.close(fig)

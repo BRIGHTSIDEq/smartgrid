@@ -54,9 +54,9 @@ def extract_attention_weights(
 
     Parameters
     ----------
-    model    : tf.keras.Model (VanillaTransformer, TFTLite или PatchTST)
+    model    : tf.keras.Model (VanillaTransformer или PatchTST)
     X_sample : np.ndarray shape=(1, history_length, 1)  — один пример
-    covariate_sample : np.ndarray shape=(1, history_length, n_features) — для TFT
+    covariate_sample : np.ndarray shape=(1, history_length, n_features) — доп. вход, если требуется
 
     Returns
     -------

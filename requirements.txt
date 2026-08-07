@@ -22,3 +22,6 @@ seaborn>=0.12
 
 # Progress
 tqdm>=4.65
+
+# Tests
+pytest>=7.4

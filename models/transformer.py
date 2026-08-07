@@ -8,8 +8,7 @@ models/transformer.py — Сравнительное исследование а
 ═══════════════════════════════════════════════════════════════════════════════
 
 1. VanillaTransformer  — Encoder-only с Pre-LN и Sinusoidal/Time2Vec PE
-2. TFTLite             — Temporal Fusion Transformer (упрощённый) с ковариатами
-3. PatchTST            — State-of-the-art (Nie et al., 2023): патчи вместо точек
+2. PatchTST            — Nie et al., 2023: патч-токенизация вместо отдельных точек
 
 НОВЫЕ КОМПОНЕНТЫ v4
 ─────────────────────────────────────────────────────────────────────────────
@@ -42,7 +41,6 @@ models/transformer.py — Сравнительное исследование а
 БИБЛИОГРАФИЯ
   [1] Vaswani A. et al. (2017). Attention is All You Need. NeurIPS.
   [2] Zhou H. et al. (2021). Informer: Beyond Efficient Transformer. AAAI.
-  [3] Lim B. et al. (2021). Temporal Fusion Transformers. IJF.
   [4] Nie Y. et al. (2023). A Time Series is Worth 64 Words. ICLR.
   [5] Kazemi S.M. et al. (2019). Time2Vec. arXiv:1907.05321.
   [6] Kim T. et al. (2022). RevIN: Reversible Instance Normalization. ICLR.
@@ -58,6 +56,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import tensorflow as tf
+
+from models.lstm import SeasonalSkipConnection
 
 logger = logging.getLogger("smart_grid.models.transformer")
 
@@ -554,6 +554,8 @@ class PreLNEncoderBlock(tf.keras.layers.Layer):
 # ══════════════════════════════════════════════════════════════════════════════
 # АРХИТЕКТУРА 1: VANILLA TRANSFORMER
 # ══════════════════════════════════════════════════════════════════════════════
+# АРХИТЕКТУРА 1: VANILLA TRANSFORMER
+# ══════════════════════════════════════════════════════════════════════════════
 
 def build_vanilla_transformer(
     history_length: int = 48,
@@ -568,6 +570,9 @@ def build_vanilla_transformer(
     pe_type: str = "sinusoidal",
     use_prob_sparse: bool = False,
     stochastic_depth_rate: float = 0.10,
+    use_seasonal_residual: bool = True,
+    seasonal_blend_init: float = 0.40,
+    huber_delta: float = 0.05,
 ) -> tf.keras.Model:
     """
     Encoder-only Transformer v4 с StochasticDepth + LearnedQueryPooling.
@@ -639,7 +644,18 @@ def build_vanilla_transformer(
     h = tf.keras.layers.Add(name="head_res")([h, skip])
     h = tf.keras.layers.LayerNormalization(epsilon=1e-6, name="head_ln")(h)
     h = tf.keras.layers.Dropout(dropout, name="head_drop")(h)
-    output = tf.keras.layers.Dense(forecast_horizon, name="output")(h)
+    neural_out = tf.keras.layers.Dense(forecast_horizon, name="neural_head")(h)
+
+    # Сезонный остаточный skip: сеть учит ПОПРАВКУ к суточно-наивному прогнозу,
+    # а не уровень нагрузки с нуля. Вход берётся из сырого канала потребления
+    # в масштабе MinMaxScaler [0,1] — том же, в котором задан таргет.
+    if use_seasonal_residual:
+        naive_slice = inp_series[:, -forecast_horizon:, 0]
+        output = SeasonalSkipConnection(
+            init_neural_weight=seasonal_blend_init, name="seasonal_residual",
+        )([neural_out, naive_slice])
+    else:
+        output = neural_out
 
     model = tf.keras.Model(inputs=inputs, outputs=output,
                            name=f"VanillaTransformer_v4_{pe_type}")
@@ -647,174 +663,21 @@ def build_vanilla_transformer(
 
     model.compile(
         optimizer=tf.keras.optimizers.Adam(learning_rate=learning_rate, clipnorm=1.0),
-        loss=tf.keras.losses.Huber(delta=0.1),
+        loss=tf.keras.losses.Huber(delta=huber_delta),
         metrics=["mae"],
     )
     logger.info(
-        "VanillaTransformer v4 [%s%s] d=%d h=%d L=%d sdrop=%.2f | %d params",
+        "VanillaTransformer [%s%s] d=%d h=%d L=%d sdrop=%.2f "
+        "seasonal_residual=%s | %d params",
         pe_type, "+ProbSparse" if use_prob_sparse else "",
         d_model, num_heads, num_layers, stochastic_depth_rate,
-        count_parameters(model),
+        use_seasonal_residual, count_parameters(model),
     )
     return model
 
-# АРХИТЕКТУРА 2: TFT LITE
-# ══════════════════════════════════════════════════════════════════════════════
-
-class GatedResidualNetwork(tf.keras.layers.Layer):
-    """
-    Gated Residual Network (GRN) — ключевой блок TFT [Lim et al., 2021].
-
-        η1 = ELU(W1·x + b1)
-        η2 = W2·η1 + b2
-        gate = sigmoid(W3·η2 + b3)
-        out = LayerNorm(proj(x) + gate * η2)
-
-    Гейтинг позволяет модели «выключать» нерелевантные признаки
-    (например, праздники в будние дни или температуру в межсезонье).
-    """
-
-    def __init__(self, hidden: int, output_size: int, dropout: float = 0.0, **kwargs) -> None:
-        super().__init__(**kwargs)
-        self.fc1 = tf.keras.layers.Dense(hidden, activation="elu")
-        self.fc2 = tf.keras.layers.Dense(output_size)
-        self.gate = tf.keras.layers.Dense(output_size, activation="sigmoid")
-        self.proj = tf.keras.layers.Dense(output_size)
-        self.ln = tf.keras.layers.LayerNormalization(epsilon=1e-6)
-        self.drop = tf.keras.layers.Dropout(dropout)
-
-    def call(self, x: tf.Tensor, training=None) -> tf.Tensor:
-        h = self.drop(self.fc1(x), training=training)
-        h2 = self.fc2(h)
-        g = self.gate(h2)
-        return self.ln(self.proj(x) + g * h2)
-
-    def get_config(self) -> dict:
-        return {**super().get_config()}
-
-
-def build_tft_lite(
-    history_length: int = 48,
-    forecast_horizon: int = 24,
-    d_model: int = 64,
-    num_heads: int = 4,
-    num_layers: int = 2,
-    dropout: float = 0.10,
-    learning_rate: float = 1e-4,
-    n_covariate_features: int = 4,
-) -> tf.keras.Model:
-    """
-    Temporal Fusion Transformer Lite [Lim et al., 2021 — упрощённая версия].
-
-    Оригинальная TFT — лучшая архитектура для многогоризонтного прогноза
-    с интерпретируемостью (Variable Importance + Attention Weights).
-
-    Гибридная архитектура LSTM + Attention:
-    - LSTM кодирует ЛОКАЛЬНЫЕ паттерны (почасовые переходы, импульсы)
-    - Attention захватывает ДАЛЬНИЕ зависимости (вчера в то же время, неделю назад)
-    - Gate объединяет оба сигнала адаптивно
-
-    Ковариаты (hour_sin, hour_cos, weekday_norm, is_weekend):
-    - Без ковариат Transformer «не знает», что сейчас 19:00 пятница
-    - GRN интегрирует их структурно (не просто конкатенация)
-
-    Входы:
-    - series_input : (B, T, 1) — нормализованный ряд
-    - covariate_input : (B, T, n_covariate_features) — временны́е признаки
-    """
-    assert d_model % num_heads == 0
-
-    inp_series = tf.keras.Input(shape=(history_length, 1), name="series_input")
-    inp_covars = tf.keras.Input(shape=(history_length, n_covariate_features), name="covariate_input")
-
-    s_emb = tf.keras.layers.Dense(d_model)(inp_series)
-    c_emb = tf.keras.layers.Dense(d_model)(inp_covars)
-
-    s_enc = GatedResidualNetwork(d_model, d_model, dropout, name="grn_series")(s_emb)
-    c_enc = GatedResidualNetwork(d_model, d_model, dropout, name="grn_covar")(c_emb)
-
-    fused = tf.keras.layers.Add()([s_enc, c_enc])
-    fused = tf.keras.layers.LayerNormalization(epsilon=1e-6)(fused)
-
-    # LSTM: локальные паттерны
-    lstm_out = tf.keras.layers.LSTM(d_model, return_sequences=True)(fused)
-    lstm_out = tf.keras.layers.Dropout(dropout)(lstm_out)
-
-    gate = tf.keras.layers.Dense(d_model, activation="sigmoid")(lstm_out)
-    gated = gate * lstm_out + (1.0 - gate) * fused
-
-    x = tf.keras.layers.LayerNormalization(epsilon=1e-6)(gated)
-    x = SinusoidalPE(d_model, max_len=max(history_length + 4, 256))(x)
-
-    enc_blocks = []
-    for i in range(num_layers):
-        blk = PreLNEncoderBlock(d_model, num_heads, d_model * 4, dropout, name=f"tft_enc_{i}")
-        x = blk(x)
-        enc_blocks.append(blk)
-
-    x = tf.keras.layers.LayerNormalization(epsilon=1e-6)(x)
-
-    last = x[:, -1, :]
-    avg = tf.keras.layers.GlobalAveragePooling1D()(x)
-    agg = tf.keras.layers.Concatenate()([last, avg])
-
-    agg = GatedResidualNetwork(d_model, d_model // 2, dropout, name="head_grn")(agg)
-    output = tf.keras.layers.Dense(forecast_horizon, name="output")(agg)
-
-    model = tf.keras.Model(inputs=[inp_series, inp_covars], outputs=output, name="TFTLite")
-    model._enc_blocks = enc_blocks
-
-    model.compile(
-        optimizer=tf.keras.optimizers.Adam(learning_rate=learning_rate, clipnorm=1.0),
-        loss=tf.keras.losses.Huber(delta=0.1),  # delta=0.1: граница L1/L2 для нормализованного [0,1] таргета
-        metrics=["mae"],
-    )
-    logger.info("TFTLite d=%d h=%d L=%d | %d params", d_model, num_heads, num_layers, count_parameters(model))
-    return model
-
-
-def prepare_tft_covariates(timestamps: np.ndarray) -> np.ndarray:
-    """
-    Создаёт матрицу ковариат (N, 4) из временны́х меток.
-
-    Признаки:
-    - hour_sin, hour_cos : циклическое кодирование часа (нет артефакта 23→0)
-    - weekday_norm       : день недели / 6
-    - is_weekend         : 0/1
-    """
-    import pandas as pd
-    ts = pd.DatetimeIndex(timestamps)
-    hour = ts.hour.values
-    weekday = ts.weekday.values
-    return np.stack([
-        np.sin(2 * np.pi * hour / 24).astype(np.float32),
-        np.cos(2 * np.pi * hour / 24).astype(np.float32),
-        (weekday / 6.0).astype(np.float32),
-        (weekday >= 5).astype(np.float32),
-    ], axis=-1)
-
-
-def make_tft_windows(
-    scaled_series: np.ndarray,
-    covariates: np.ndarray,
-    history: int,
-    horizon: int,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Нарезает ряд + ковариаты на окна для TFT."""
-    Xs, Xc, Y = [], [], []
-    for i in range(len(scaled_series) - history - horizon + 1):
-        Xs.append(scaled_series[i: i + history])
-        Xc.append(covariates[i: i + history])
-        Y.append(scaled_series[i + history: i + history + horizon])
-    return (
-        np.array(Xs, dtype=np.float32)[:, :, np.newaxis],
-        np.array(Xc, dtype=np.float32),
-        np.array(Y, dtype=np.float32),
-    )
-
 
 # ══════════════════════════════════════════════════════════════════════════════
-# АРХИТЕКТУРА 3: PATCHTST
+# АРХИТЕКТУРА 2: PATCHTST
 # ══════════════════════════════════════════════════════════════════════════════
 
 def build_patchtst(
@@ -831,6 +694,7 @@ def build_patchtst(
     learning_rate: float = 3e-4,
     stochastic_depth_rate: float = 0.10,
     use_revin: bool = True,
+    huber_delta: float = 0.10,
 ) -> tf.keras.Model:
     """
     PatchTST v4 [Nie et al., ICLR 2023] + RevIN + StochasticDepth.
@@ -928,8 +792,8 @@ def build_patchtst(
 
     model.compile(
         optimizer=tf.keras.optimizers.Adam(learning_rate=learning_rate, clipnorm=1.0),
-        loss=tf.keras.losses.Huber(delta=0.1),
-        metrics=["mae"],
+        loss=tf.keras.losses.Huber(delta=huber_delta),
+        metrics=["mae", "mape"],
     )
     logger.info(
         "PatchTST v4 patch=%d stride=%d n_p=%d d=%d h=%d L=%d sdrop=%.2f RevIN=%s | %d params",
@@ -958,7 +822,7 @@ def transformer_grid_search(
 
     Parameters
     ----------
-    arch         : "vanilla" | "tft" | "patchtst"
+    arch         : "vanilla" | "patchtst"
     param_grid   : {param: [values]}. По умолчанию d_model × num_heads × dropout
     target_params: желаемое число параметров (для паритета с LSTM)
                    Пропускаем конфиги, где |params - target| / target > 50%
@@ -989,8 +853,6 @@ def transformer_grid_search(
                     history_length=history_length, forecast_horizon=forecast_horizon, **c),
                 "patchtst": lambda c: build_patchtst(
                     history_length=history_length, forecast_horizon=forecast_horizon, **c),
-                "tft": lambda c: build_tft_lite(
-                    history_length=history_length, forecast_horizon=forecast_horizon, **c),
             }
             model = builders[arch](cfg)
             n_p = count_parameters(model)
@@ -1007,11 +869,6 @@ def transformer_grid_search(
 
             X_tr, Y_tr = data["X_train"], data["Y_train"]
             X_v, Y_v = data["X_val"], data["Y_val"]
-
-            if arch == "tft":
-                cov_tr = data.get("X_covars_train", np.zeros((len(X_tr), history_length, 4)))
-                cov_v = data.get("X_covars_val", np.zeros((len(X_v), history_length, 4)))
-                X_tr, X_v = [X_tr, cov_tr], [X_v, cov_v]
 
             hist = model.fit(
                 X_tr, Y_tr, validation_data=(X_v, Y_v),

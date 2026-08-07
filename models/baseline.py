@@ -1,49 +1,29 @@
 # -*- coding: utf-8 -*-
 """
-models/baseline.py — Базовые модели: XGBoost с лаг-признаками, LinearRegression.
+models/baseline.py — Базовые модели сравнения.
 
-═══════════════════════════════════════════════════════════════════════════════
-РЕРАЙТ v5: выравнивание информационного контекста XGBoost vs LinearRegression
-═══════════════════════════════════════════════════════════════════════════════
+Три уровня базлайнов, от простого к сложному:
 
-ПРОБЛЕМА (v4): неравный информационный контекст
-───────────────────────────────────────────────
-LinearRegression (FlattenWrapper) получает 48×15=720 сырых признаков — прямой
-доступ ко всему 48-часовому окну ВСЕХ 15 каналов. MAE=665.
-XGBoost (LagFeaturesWrapper v4) получал 71 признак из канала 0 + ковариаты
-последнего шага (channel[−1, 1:14]). Только потребление имело историю 48 шагов,
-остальные 14 каналов — одна точка. MAE=1023.
+  1. НАИВНЫЕ (без обучения) — обязательная точка отсчёта для временных рядов.
+     Persistence24  : прогноз = потребление тех же часов предыдущих суток.
+     SeasonalNaive168: прогноз = потребление тех же часов неделю назад.
+     HourlyProfile  : среднее по (час × день недели), посчитанное на train.
+     Если сложная модель не бьёт эти базлайны — она не имеет прогностической
+     ценности, каким бы низким ни был её MAE в абсолютных единицах.
 
-Разрыв MAE объяснялся не слабостью алгоритма, а меньшим объёмом информации.
+  2. ЛИНЕЙНАЯ  — Ridge на полном развёрнутом окне (T×F признаков).
+  3. АНСАМБЛЕВАЯ — XGBoost на агрегированных лаг-признаках, отдельная модель
+     на каждый шаг горизонта.
 
-РЕШЕНИЕ v5: добавить rolling_mean(окна 6,12,24,48) и rolling_std(окна 6,24)
-  ПО ВСЕМ 15 КАНАЛАМ.
-
-  Это даёт XGBoost сопоставимый контекст:
-    rolling_mean(w, ch) ≈ среднее значение канала ch за последние w часов
-    rolling_std(w, ch)  ≈ волатильность канала ch за w часов
-
-  Для непрерывных каналов (temp, humidity, wind, rolling_mean_24h) это прямые
-  физические признаки. Для бинарных (is_weekend, is_holiday) rolling_mean даёт
-  «частоту события за последние w часов» — тоже осмысленный признак.
-
-СОСТАВ ПРИЗНАКОВ v5 (при T=48, F=15):
-  ┌─ 48 лагов потребления (канал 0, все T шагов)
-  ├─ 4 rolling mean cons (окна 3,6,12,24) — перекрытие с новыми, но XGBoost игнорирует
-  ├─ 2 rolling std  cons (окна 6,24)
-  ├─ 3 min/max/range cons последние 24ч
-  ├─ 4 трендовых дельты (delta_1h, delta_3h, delta_24h, ratio_24h)
-  ├─ 14 ковариат последнего шага (каналы 1–14)
-  ├─ 15×4 rolling mean по всем каналам (окна 6,12,24,48)  ★ НОВОЕ
-  └─ 15×2 rolling std  по всем каналам (окна 6,24)        ★ НОВОЕ
-
-  Итого: 48 + 4 + 2 + 3 + 4 + 14 + 60 + 30 = 165 признаков
-  Соотношение 165:6100 = 1:37 — безопасно с регуляризацией XGBoost.
-═══════════════════════════════════════════════════════════════════════════════
+О составе лаг-признаков XGBoost (~165 при T=48, F=26): rolling mean/std
+считаются по ВСЕМ каналам, а не только по потреблению. Это уравнивает
+информационный контекст с Ridge, который видит сырое окно целиком, — иначе
+сравнение алгоритмов подменяется сравнением объёма входных данных.
+История изменений — в CHANGELOG.md.
 """
 
 import logging
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 import numpy as np
 from sklearn.linear_model import Ridge
@@ -51,6 +31,13 @@ from sklearn.base import BaseEstimator
 import xgboost as xgb
 
 logger = logging.getLogger("smart_grid.models.baseline")
+
+# ── Индексы каналов в матрице признаков (см. data/preprocessing.py) ───────────
+CH_CONSUMPTION = 0
+CH_HOUR_SIN = 1
+CH_HOUR_COS = 2
+CH_DOW_SIN = 18
+CH_DOW_COS = 19
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -319,9 +306,160 @@ def build_xgboost(
             return np.stack(preds, axis=1).astype(np.float32)
 
     logger.info(
-        "XGBoost v5 (FullLags + RollingAllChannels + MultiHorizon) | "
-        "~165 признаков | 24 независимых модели + val-early-stopping | "
+        "XGBoost (FullLags + RollingAllChannels + MultiHorizon) | "
+        "~165 признаков | %d независимых моделей + val-early-stopping | "
         "n_est=%d depth=%d min_cw=%d",
-        n_estimators, max_depth, min_child_weight,
+        24, n_estimators, max_depth, min_child_weight,
     )
     return LagFeaturesWrapper(MultiHorizonXGB(), name="XGBoost")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# НАИВНЫЕ БАЗЛАЙНЫ
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# Все три работают в НОРМИРОВАННОМ пространстве (как и остальные модели):
+# на вход подаётся X формы (N, T, F), где канал 0 — масштабированное
+# потребление, на выходе — (N, H) в том же масштабе. Это позволяет прогонять их
+# через тот же ModelTrainer и сравнивать в одной таблице без оговорок.
+
+
+class _SeasonalNaive:
+    """
+    Сезонно-наивный прогноз: ŷ[t+j] = y[t+j-m].
+
+    Значение «m часов назад» для целевого шага j лежит в окне истории на
+    позиции T + j - m. Условие доступности: T >= m (окно должно покрывать
+    целый сезонный период). Иначе автоматический откат на m=24.
+
+    m=24  — прогноз «как вчера в этот же час» (классический базлайн нагрузки);
+    m=168 — «как неделю назад», учитывает различие будни/выходные.
+    """
+
+    def __init__(self, season_length: int = 24, name: str = "") -> None:
+        self.season_length = int(season_length)
+        self.effective_season = self.season_length
+        self.horizon: Optional[int] = None
+        self.name = name or f"Naive{season_length}"
+
+    def fit(self, X_train, Y_train, X_val=None, Y_val=None) -> "_SeasonalNaive":
+        _, T, _ = X_train.shape
+        H = Y_train.shape[1]
+        self.horizon = int(H)
+        if T < self.season_length:
+            fallback = 24 if T >= 24 else T
+            logger.warning(
+                "%s: длина истории T=%d < периода m=%d → откат на m=%d. "
+                "Для корректного недельного базлайна нужен HISTORY_LENGTH >= 168.",
+                self.name, T, self.season_length, fallback,
+            )
+            self.effective_season = fallback
+        else:
+            self.effective_season = self.season_length
+
+        if H > self.effective_season:
+            logger.warning(
+                "%s: горизонт H=%d больше периода m=%d — часть шагов повторит "
+                "начало того же периода.", self.name, H, self.effective_season,
+            )
+        logger.info("%s обучен (обучение не требуется) | m=%d ч",
+                    self.name, self.effective_season)
+        return self
+
+    def predict(self, X: np.ndarray) -> np.ndarray:
+        if self.horizon is None:
+            raise RuntimeError("Модель не обучена: вызовите fit() перед predict().")
+        _, T, _ = X.shape
+        m = self.effective_season
+        start = T - m
+        idx = [(start + j) % T for j in range(self.horizon)]
+        return X[:, idx, CH_CONSUMPTION].astype(np.float32)
+
+
+class _HourlyProfile:
+    """
+    Климатологический базлайн: среднее потребление по (час × день недели),
+    вычисленное на обучающей выборке.
+
+    Час и день недели восстанавливаются из циклических признаков окна
+    (hour_sin/hour_cos, dow_sin/dow_cos) — отдельный календарь не нужен.
+    Это «сезонный профиль без динамики»: он не знает текущего уровня нагрузки
+    и потому показывает, какую долю дисперсии объясняет один лишь календарь.
+    """
+
+    def __init__(self, name: str = "HourlyProfile") -> None:
+        self.name = name
+        self.profile: Optional[np.ndarray] = None   # (7, 24)
+        self.global_mean: float = 0.0
+        self.horizon: Optional[int] = None
+
+    @staticmethod
+    def _decode_hour(x_step: np.ndarray) -> np.ndarray:
+        """Восстанавливает час [0..23] из (hour_sin, hour_cos)."""
+        ang = np.arctan2(x_step[:, CH_HOUR_SIN], x_step[:, CH_HOUR_COS])
+        return np.mod(np.round(ang / (2 * np.pi) * 24), 24).astype(int)
+
+    @staticmethod
+    def _decode_weekday(x_step: np.ndarray) -> np.ndarray:
+        """Восстанавливает день недели [0..6] из (dow_sin, dow_cos)."""
+        ang = np.arctan2(x_step[:, CH_DOW_SIN], x_step[:, CH_DOW_COS])
+        return np.mod(np.round(ang / (2 * np.pi) * 7), 7).astype(int)
+
+    def fit(self, X_train, Y_train, X_val=None, Y_val=None) -> "_HourlyProfile":
+        N, T, _ = X_train.shape
+        self.horizon = int(Y_train.shape[1])
+        # Разворачиваем окна в набор наблюдений (час, день недели, потребление).
+        sums = np.zeros((7, 24), dtype=np.float64)
+        counts = np.zeros((7, 24), dtype=np.float64)
+
+        for step in range(T):
+            xs = X_train[:, step, :]
+            hours = self._decode_hour(xs)
+            wdays = self._decode_weekday(xs)
+            vals = X_train[:, step, CH_CONSUMPTION].astype(np.float64)
+            np.add.at(sums, (wdays, hours), vals)
+            np.add.at(counts, (wdays, hours), 1.0)
+
+        self.global_mean = float(X_train[:, :, CH_CONSUMPTION].mean())
+        with np.errstate(invalid="ignore", divide="ignore"):
+            profile = np.where(counts > 0, sums / np.maximum(counts, 1e-9), self.global_mean)
+        self.profile = profile.astype(np.float32)
+
+        empty = int((counts == 0).sum())
+        logger.info(
+            "%s обучен | профиль 7×24, пустых ячеек=%d, среднее=%.4f",
+            self.name, empty, self.global_mean,
+        )
+        return self
+
+    def predict(self, X: np.ndarray) -> np.ndarray:
+        if self.profile is None or self.horizon is None:
+            raise RuntimeError("Модель не обучена: вызовите fit() перед predict().")
+        H = self.horizon
+        last = X[:, -1, :]
+        h_last = self._decode_hour(last)
+        w_last = self._decode_weekday(last)
+
+        preds = np.empty((X.shape[0], H), dtype=np.float32)
+        for j in range(H):
+            # Целевой шаг j отстоит от последнего шага окна на (j+1) часов.
+            hour = np.mod(h_last + j + 1, 24)
+            day_shift = (h_last + j + 1) // 24
+            wday = np.mod(w_last + day_shift, 7)
+            preds[:, j] = self.profile[wday, hour]
+        return preds
+
+
+def build_persistence_24() -> _SeasonalNaive:
+    """Наивный суточный базлайн: «завтра как вчера в тот же час»."""
+    return _SeasonalNaive(season_length=24, name="Naive24 (сутки)")
+
+
+def build_seasonal_naive_168() -> _SeasonalNaive:
+    """Наивный недельный базлайн: «как в тот же час неделю назад»."""
+    return _SeasonalNaive(season_length=168, name="Naive168 (неделя)")
+
+
+def build_hourly_profile() -> _HourlyProfile:
+    """Климатологический базлайн: среднее по (час × день недели) на train."""
+    return _HourlyProfile()

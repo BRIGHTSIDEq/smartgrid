@@ -1,59 +1,40 @@
 # -*- coding: utf-8 -*-
 """
-optimization/storage.py — Оптимизация BESS (Battery Energy Storage System).
+optimization/storage.py — Оптимизация накопителя энергии (BESS).
 
-═══════════════════════════════════════════════════════════════════════════════
-ИСПРАВЛЕНИЕ v5 — два критических бага экономического расчёта
-═══════════════════════════════════════════════════════════════════════════════
+Симулирует работу батарейной системы на горизонте планирования и считает
+экономический эффект: тарифный арбитраж, снижение платы за мощность,
+стоимость деградации и O&M, срок окупаемости.
 
-БАГ #1 (O&M скачок 3 696 → 55 441 руб, разрыв ×15):
-──────────────────────────────────────────────────────
-  Первый вызов simulate_storage() в main.py не передавал battery_cost_rub.
-  Дефолт функции = 3_000_000, тогда как Config.BATTERY_COST_RUB = 45_000_000.
-  Результат: O&M = 45_000_000 × 0.015 × (720/8766) × (3M/45M) = 3 696 руб
-  → payback = 1.2 года (нереалистично), все последующие вызовы через
-  compare_strategies() давали 55 441 руб (корректно).
+РАЗДЕЛЕНИЕ «ПРОГНОЗ» И «ФАКТ» — ключевой момент методики.
+Контроллер накопителя принимает решения по ПРОГНОЗУ (`forecast`), а физические
+энергопотоки и счёт за электроэнергию определяются ФАКТОМ (`actual`).
+Если передан только `forecast`, он же считается фактом — это идеальный случай
+(oracle), полезный как верхняя граница эффекта. Разница между прогоном на
+прогнозе модели и прогоном на факте и есть денежная цена ошибки прогноза —
+именно она связывает задачу прогнозирования с задачей оптимизации.
 
-  БЫЛО: battery_cost_rub: float = 3_000_000.0  ← тихий дефолт
-  СТАЛО: battery_cost_rub: float — обязательный параметр без дефолта.
-         Отсутствие значения → TypeError при вызове, не в расчёте.
-         main.py передаёт Config.BATTERY_COST_RUB=45_000_000 явно.
+ДВЕ СТРАТЕГИИ УПРАВЛЕНИЯ (`policy`):
+  "tariff"       — календарная: заряд в ночной зоне, разряд в пиковой.
+                   Прогноз не используется вообще, поэтому качество модели
+                   на результат не влияет. Служит контрольной точкой.
+  "peak_shaving" — прогноз-зависимая: порог срезки считается как квантиль
+                   прогноза на ближайшие 24 ч, разряд идёт пропорционально
+                   превышению прогноза над порогом. Ошибка прогноза напрямую
+                   переходит в недобор экономии: заниженный прогноз оставляет
+                   пик несрезанным, завышенный тратит заряд впустую.
 
-БАГ #2 (Demand-charge эффект = 0.00 руб во всех стратегиях):
-──────────────────────────────────────────────────────────────
-  СИМПТОМ: все три стратегии → demand_charge_savings = 0.00 руб.
+ТАРИФНЫЙ КАЛЕНДАРЬ. Зоны определяются часом и днём недели, поэтому вызывающая
+сторона ОБЯЗАНА передать `start_hour` и `start_weekday`, соответствующие первой
+точке ряда. Значения по умолчанию (понедельник 00:00) верны лишь случайно и
+при несовпадении сдвигают все тарифные зоны, обесценивая расчёт.
 
-  ПРИЧИНА: demand-charge считался по максимуму из ВСЕХ 720 часов:
-    baseline_peak_kw  = np.max(forecast)          ← правильно
-    optimized_peak_kw = np.max(energy_from_grid)  ← НЕПРАВИЛЬНО
-
-  При зарядке ночью:
-    grid_energy = demand + grid_draw  (добавляем зарядный ток к нагрузке)
-    Пример: ночная нагрузка 5 000 кВт + зарядка 2 250 кВт = 7 250 кВт
-    → max(energy_from_grid) ≥ max(forecast)  → экономия <= 0 → clamp → 0.
-
-  Физически это некорректно: demand-charge в России выставляется за
-  максимальную мощность в ПИКОВЫЕ БИЛЛИНГОВЫЕ ЧАСЫ (10–17 и 21–23 в будни),
-  а не за ночные часы зарядки.
-
-  БЫЛО: np.max(energy_from_grid) по всем 720 ч → всегда >= baseline
-  СТАЛО: отдельные списки grid_peak_hours_baseline / grid_peak_hours_optimized,
-         np.max() только по zone=="peak" часам → реальное снижение пика.
-
-ОЖИДАЕМЫЙ РЕЗУЛЬТАТ ПОСЛЕ ПАТЧА:
-  Demand-charge эффект: 0 → ненулевое значение (зависит от профиля нагрузки
-  и мощности батареи). При 4500 кВт·ч, ΔE=3780 кВт·ч: ~50–200k руб/30 дней.
-  Payback агрессивной стратегии: 12 лет → 8–10 лет.
-  O&M: единообразно ~55 441 руб во всех вызовах.
-
-═══════════════════════════════════════════════════════════════════════════════
-ИСПРАВЛЕНИЕ v4 (оставлено без изменений): стратегии по SOC, не по C-rate
-═══════════════════════════════════════════════════════════════════════════════
+История изменений — в CHANGELOG.md.
 """
 
 import logging
 from dataclasses import dataclass, field
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import numpy as np
 
@@ -65,20 +46,30 @@ logger = logging.getLogger("smart_grid.optimization.storage")
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _get_zone(hour: int, weekday: int) -> str:
+    """
+    Тарифная зона по часу и дню недели (порядок, действующий в России).
+
+        пиковая     07:00–10:00 и 17:00–21:00 — утренний и вечерний максимумы
+        полупиковая 10:00–17:00 и 21:00–23:00
+        ночная      23:00–07:00
+
+    В выходные и праздничные дни пиковая зона не применяется: сутки делятся
+    только на ночную и полупиковую («дневную») зоны.
+    """
     if hour < 7 or hour >= 23:
         return "night"
     if weekday >= 5:
         return "day"
-    if (10 <= hour < 17) or (21 <= hour < 23):
+    if (7 <= hour < 10) or (17 <= hour < 21):
         return "peak"
     return "day"
 
 
 def build_price_vector(
     n: int,
-    tariff_night: float = 1.80,
-    tariff_day: float = 4.20,
-    tariff_peak: float = 6.50,
+    tariff_night: float = 4.08,
+    tariff_day: float = 7.87,
+    tariff_peak: float = 11.24,
     start_hour: int = 0,
     start_weekday: int = 0,
 ) -> np.ndarray:
@@ -106,6 +97,8 @@ def build_zone_list(n: int, start_hour: int = 0, start_weekday: int = 0) -> List
 @dataclass
 class StorageResult:
     strategy_name: str = ""
+    policy: str = ""
+    forecast_source: str = ""
     baseline_cost: float = 0.0
     optimized_cost: float = 0.0
     degradation_cost: float = 0.0
@@ -124,11 +117,35 @@ class StorageResult:
     payback_years: float = 0.0
     demand_charge_savings: float = 0.0
     om_cost: float = 0.0
+    peak_before_kw: float = 0.0
+    peak_after_kw: float = 0.0
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # ЯДРО СИМУЛЯЦИИ
 # ══════════════════════════════════════════════════════════════════════════════
+
+def _shaving_thresholds(
+    forecast: np.ndarray,
+    quantile: float = 0.85,
+    window: int = 24,
+) -> np.ndarray:
+    """
+    Порог срезки пика для каждого часа: квантиль ПРОГНОЗА на ближайшие
+    `window` часов.
+
+    Контроллер день-вперёд знает только прогноз, поэтому и порог считается по
+    нему. Именно здесь ошибка прогноза превращается в потерю денег: завышенный
+    прогноз поднимает порог и оставляет реальный пик несрезанным.
+    """
+    f = np.asarray(forecast, dtype=np.float64)
+    n = len(f)
+    thr = np.empty(n, dtype=np.float64)
+    for i in range(n):
+        end = min(i + window, n)
+        thr[i] = np.quantile(f[i:end], quantile)
+    return thr
+
 
 def simulate_storage(
     forecast: np.ndarray,
@@ -139,43 +156,55 @@ def simulate_storage(
     min_soc: float = 0.10,
     max_soc: float = 0.90,
     initial_soc: float = 0.50,
-    tariff_night: float = 1.80,
-    tariff_half_peak: float = 4.20,
-    tariff_peak: float = 6.50,
+    tariff_night: float = 4.08,
+    tariff_half_peak: float = 7.87,
+    tariff_peak: float = 11.24,
     start_hour: int = 0,
     start_weekday: int = 0,
-    # ── ИСПРАВЛЕНИЕ v5 #1: убран дефолт battery_cost_rub ────────────────────
-    # БЫЛО: battery_cost_rub: float = 3_000_000.0
-    #   Дефолт молча давал O&M в 15× меньше реального значения.
-    #   3_000_000 × 0.015 × (720/8766) = 3 696 руб (вместо 55 441)
-    # СТАЛО: параметр обязателен. Отсутствие → TypeError на вызове.
-    #   Правильное значение: Config.BATTERY_COST_RUB = 45_000_000
-    battery_cost_rub: float = None,
-    # ────────────────────────────────────────────────────────────────────────
+    battery_cost_rub: Optional[float] = None,
     demand_charge_rub_per_kw_month: float = 950.0,
     annual_om_share: float = 0.015,
     strategy_name: str = "",
+    actual: Optional[np.ndarray] = None,
+    policy: str = "tariff",
+    shave_quantile: float = 0.85,
+    forecast_source: str = "",
 ) -> StorageResult:
     """
-    Симулирует BESS с умной тарифной стратегией.
-
-    ИСПРАВЛЕНИЯ v5:
-      #1 battery_cost_rub обязателен (нет дефолта)
-      #2 demand-charge считается только в пиковые биллинговые часы
+    Симулирует работу накопителя и считает экономический эффект.
 
     Parameters
     ----------
+    forecast : np.ndarray
+        Прогноз нагрузки, по которому контроллер ПРИНИМАЕТ РЕШЕНИЯ.
+    actual : np.ndarray, optional
+        Фактическая нагрузка, определяющая энергопотоки и счёт. Если не задана,
+        считается равной прогнозу (идеальный прогноз, верхняя граница эффекта).
+    policy : {"tariff", "peak_shaving"}
+        Стратегия управления. "tariff" не использует прогноз вообще,
+        "peak_shaving" — использует (см. docstring модуля).
+    shave_quantile : float
+        Квантиль прогноза, задающий порог срезки для policy="peak_shaving".
     battery_cost_rub : float
-        Стоимость батарейной системы в рублях. ОБЯЗАТЕЛЬНЫЙ параметр.
-        Передавайте Config.BATTERY_COST_RUB явно.
-        Типовое значение для 4500 кВт·ч BESS: 45_000_000 руб.
+        Стоимость батарейной системы, руб. ОБЯЗАТЕЛЬНЫЙ параметр: тихий дефолт
+        занижал бы O&M и срок окупаемости в разы.
+    start_hour, start_weekday : int
+        Календарная привязка первой точки ряда. Без неё тарифные зоны
+        сдвигаются относительно данных и весь расчёт теряет смысл.
     """
-    # ── Защита от забытого аргумента ─────────────────────────────────────────
     if battery_cost_rub is None:
         raise TypeError(
             "simulate_storage() требует явный аргумент battery_cost_rub. "
-            "Передайте Config.BATTERY_COST_RUB. "
-            "Дефолт 3_000_000 удалён в v5 — он давал O&M в 15× ниже реального."
+            "Передайте Config.BATTERY_COST_RUB."
+        )
+    if policy not in ("tariff", "peak_shaving"):
+        raise ValueError(f"Неизвестная стратегия policy={policy!r}")
+
+    forecast = np.asarray(forecast, dtype=np.float64)
+    actual_arr = forecast if actual is None else np.asarray(actual, dtype=np.float64)
+    if len(actual_arr) != len(forecast):
+        raise ValueError(
+            f"Длины прогноза ({len(forecast)}) и факта ({len(actual_arr)}) не совпадают"
         )
 
     n = len(forecast)
@@ -185,6 +214,8 @@ def simulate_storage(
         n, tariff_night, tariff_half_peak, tariff_peak, start_hour, start_weekday
     )
     zones = build_zone_list(n, start_hour, start_weekday)
+    thresholds = (_shaving_thresholds(forecast, shave_quantile)
+                  if policy == "peak_shaving" else np.zeros(n))
 
     soc = initial_soc * capacity
     soc_min_kwh = min_soc * capacity
@@ -196,40 +227,59 @@ def simulate_storage(
     hourly_costs: List[float] = []
     total_cycled = 0.0
 
-    # ── ИСПРАВЛЕНИЕ v5 #2: отдельные списки для пиковых биллинговых часов ────
-    # БЫЛО: baseline/optimized peak = np.max(forecast / energy_from_grid) по 720 ч
-    #   Зарядный ток ночью поднимал energy_from_grid выше baseline → savings = 0.
-    # СТАЛО: собираем потребление из сети ТОЛЬКО в zone=="peak" часы.
-    #   В эти часы BESS разряжается → grid_energy < demand → реальное снижение пика.
+    # Плата за мощность в РФ взимается по максимуму в пиковые биллинговые часы
+    # (07–10 и 17–21 в будни), а не по максимуму за все сутки. Поэтому пик
+    # собирается только по zone == "peak": иначе ночной зарядный ток задрал бы
+    # «оптимизированный» максимум выше базового и экономия всегда была бы нулевой.
     grid_peak_hours_baseline: List[float] = []
     grid_peak_hours_optimized: List[float] = []
-    # ────────────────────────────────────────────────────────────────────────
 
     for i in range(n):
-        demand = float(forecast[i])
+        planned = float(forecast[i])       # что видит контроллер
+        real = float(actual_arr[i])        # что произошло на самом деле
         price = float(prices[i])
         zone = zones[i]
 
-        if zone == "night" and soc < soc_max_kwh - 0.1:
-            # ЗАРЯДКА
-            charge_to_batt = min(max_power, soc_max_kwh - soc)
-            grid_draw = charge_to_batt / one_way_eff
-            soc += charge_to_batt
-            grid_energy = demand + grid_draw
-            action = "charge"
-            total_cycled += charge_to_batt
+        charge_cmd = 0.0
+        discharge_cmd = 0.0
 
-        elif zone == "peak" and soc > soc_min_kwh + 0.1:
-            # РАЗРЯДКА
-            can_draw = min(max_power, soc - soc_min_kwh)
+        if policy == "tariff":
+            if zone == "night" and soc < soc_max_kwh - 0.1:
+                charge_cmd = min(max_power, soc_max_kwh - soc)
+            elif zone == "peak" and soc > soc_min_kwh + 0.1:
+                discharge_cmd = min(max_power, soc - soc_min_kwh)
+        else:
+            # Прогноз-зависимая срезка пика: разряжаем ровно столько, сколько
+            # нужно, чтобы опустить ПРОГНОЗНУЮ нагрузку до порога.
+            if zone == "night" and soc < soc_max_kwh - 0.1:
+                charge_cmd = min(max_power, soc_max_kwh - soc)
+            elif zone in ("peak", "day") and soc > soc_min_kwh + 0.1:
+                excess = planned - float(thresholds[i])
+                if excess > 0:
+                    deliverable = min(max_power, soc - soc_min_kwh) * one_way_eff
+                    delivered_target = min(excess, deliverable)
+                    discharge_cmd = delivered_target / one_way_eff
+
+        if charge_cmd > 0:
+            grid_draw = charge_cmd / one_way_eff
+            soc += charge_cmd
+            grid_energy = real + grid_draw
+            action = "charge"
+            # Через батарею энергия проходит один раз за цикл «заряд-разряд»,
+            # поэтому оборот считается только на заряде. Учёт и заряда, и
+            # разряда удвоил бы расчётный износ.
+            total_cycled += charge_cmd
+        elif discharge_cmd > 0:
+            can_draw = min(discharge_cmd, soc - soc_min_kwh)
             delivered = can_draw * one_way_eff
             soc -= can_draw
-            grid_energy = max(0.0, demand - delivered)
+            # Отдать в сеть больше, чем реально потребляется, невозможно —
+            # излишек разряда просто теряется. Так завышенный прогноз
+            # превращается в потраченный впустую заряд.
+            grid_energy = max(0.0, real - delivered)
             action = "discharge"
-            total_cycled += can_draw
-
         else:
-            grid_energy = demand
+            grid_energy = real
             action = "idle"
 
         soc = float(np.clip(soc, 0.0, capacity))
@@ -238,20 +288,18 @@ def simulate_storage(
         energy_from_grid.append(grid_energy)
         hourly_costs.append(grid_energy * price)
 
-        # ── Сбор пика только в биллинговые пиковые часы ─────────────────────
         if zone == "peak":
-            grid_peak_hours_baseline.append(demand)
+            grid_peak_hours_baseline.append(real)
             grid_peak_hours_optimized.append(grid_energy)
-        # ────────────────────────────────────────────────────────────────────
 
     # ── Экономика ─────────────────────────────────────────────────────────────
-    baseline_cost = float(np.dot(forecast, prices))
+    # База сравнения — фактическая нагрузка без накопителя.
+    baseline_cost = float(np.dot(actual_arr, prices))
     optimized_cost = float(sum(hourly_costs))
 
     horizon_days = max(n / 24.0, 1e-9)
     months_in_horizon = horizon_days / 30.4375
 
-    # ── ИСПРАВЛЕНИЕ v5 #2: demand-charge по пиковым часам ────────────────────
     if grid_peak_hours_baseline:
         baseline_peak_kw  = float(np.max(grid_peak_hours_baseline))
         optimized_peak_kw = float(np.max(grid_peak_hours_optimized))
@@ -259,18 +307,17 @@ def simulate_storage(
         # Нестандартный сценарий: пиковых часов нет в горизонте
         logger.warning(
             "В горизонте %d ч не найдено пиковых биллинговых часов "
-            "(zone='peak', 10–17 и 21–23 в будни). "
+            "(zone='peak', 07–10 и 17–21 в будни). "
             "Demand-charge считается по всем часам — возможно некорректно.",
             n
         )
-        baseline_peak_kw  = float(np.max(forecast))
+        baseline_peak_kw  = float(np.max(actual_arr))
         optimized_peak_kw = float(np.max(np.asarray(energy_from_grid, dtype=np.float64)))
 
     demand_charge_savings = max(
         0.0,
         (baseline_peak_kw - optimized_peak_kw) * demand_charge_rub_per_kw_month * months_in_horizon,
     )
-    # ────────────────────────────────────────────────────────────────────────
 
     gross_savings = (baseline_cost - optimized_cost) + demand_charge_savings
     degradation_cost = total_cycled * cycle_cost_per_kwh
@@ -285,6 +332,8 @@ def simulate_storage(
 
     # ── Лог ───────────────────────────────────────────────────────────────────
     logger.info("─" * 50)
+    logger.info("Стратегия управления: %s | источник прогноза: %s",
+                policy, forecast_source or ("факт (oracle)" if actual is None else "модель"))
     logger.info("Горизонт: %d ч (%.1f сут) | SOC %.0f%%→%.0f%% (ΔE=%.0f кВт·ч)",
                 n, n / 24, min_soc * 100, max_soc * 100, (max_soc - min_soc) * capacity)
     logger.info("Базовая стоимость:         %10.2f руб", baseline_cost)
@@ -312,6 +361,10 @@ def simulate_storage(
 
     return StorageResult(
         strategy_name=strategy_name,
+        policy=policy,
+        forecast_source=forecast_source or ("oracle" if actual is None else "model"),
+        peak_before_kw=baseline_peak_kw,
+        peak_after_kw=optimized_peak_kw,
         baseline_cost=baseline_cost,
         optimized_cost=optimized_cost,
         degradation_cost=degradation_cost,
@@ -343,19 +396,25 @@ def compare_strategies(
     max_power: float = 150.0,
     round_trip_efficiency: float = 0.95,
     cycle_cost_per_kwh: float = 0.06,
-    battery_cost_rub: float = None,   # v5: обязательный параметр
-    tariff_night: float = 1.80,
-    tariff_half_peak: float = 4.20,
-    tariff_peak: float = 6.50,
+    battery_cost_rub: Optional[float] = None,
+    tariff_night: float = 4.08,
+    tariff_half_peak: float = 7.87,
+    tariff_peak: float = 11.24,
     demand_charge_rub_per_kw_month: float = 950.0,
     annual_om_share: float = 0.015,
+    start_hour: int = 0,
+    start_weekday: int = 0,
+    actual: Optional[np.ndarray] = None,
+    policy: str = "tariff",
+    shave_quantile: float = 0.85,
+    forecast_source: str = "",
 ) -> Dict[str, StorageResult]:
     """
-    Три стратегии с разным целевым SOC.
+    Три стратегии с разной глубиной разряда (целевым диапазоном SOC).
 
-    Консервативная: SOC 40%→60%  ΔE= 60 кВт·ч — минимальный износ
-    Умеренная:      SOC 25%→75%  ΔE=150 кВт·ч — оптимальный баланс
-    Агрессивная:    SOC  8%→92%  ΔE=252 кВт·ч — максимальная экономия, быстрый износ
+    Консервативная: SOC 40%→60% — минимальный износ, минимальная экономия
+    Умеренная:      SOC 25%→75% — баланс износа и эффекта
+    Агрессивная:    SOC  8%→92% — максимальная экономия, ускоренная деградация
     """
     if battery_cost_rub is None:
         raise TypeError(
@@ -375,6 +434,7 @@ def compare_strategies(
         label = f"{name} (SOC {min_soc*100:.0f}%→{max_soc*100:.0f}%, ΔE={delta_e:.0f} кВт·ч)"
         results[name] = simulate_storage(
             forecast=forecast,
+            actual=actual,
             capacity=capacity,
             max_power=max_power,
             round_trip_efficiency=round_trip_efficiency,
@@ -387,6 +447,11 @@ def compare_strategies(
             tariff_peak=tariff_peak,
             demand_charge_rub_per_kw_month=demand_charge_rub_per_kw_month,
             annual_om_share=annual_om_share,
+            start_hour=start_hour,
+            start_weekday=start_weekday,
+            policy=policy,
+            shave_quantile=shave_quantile,
+            forecast_source=forecast_source,
             strategy_name=label,
         )
 
@@ -405,4 +470,98 @@ def compare_strategies(
     best = max(results, key=lambda k: results[k].net_savings_pct)
     logger.info("🏆 Лучшая: %s | %.2f%% | окупаемость %.1f лет",
                 best, results[best].net_savings_pct, results[best].payback_years)
+    return results
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ЦЕНА ОШИБКИ ПРОГНОЗА
+# ══════════════════════════════════════════════════════════════════════════════
+
+def compare_forecast_sources(
+    actual: np.ndarray,
+    forecasts: Dict[str, np.ndarray],
+    battery_cost_rub: float,
+    capacity: float,
+    max_power: float,
+    round_trip_efficiency: float = 0.95,
+    cycle_cost_per_kwh: float = 0.06,
+    min_soc: float = 0.25,
+    max_soc: float = 0.75,
+    tariff_night: float = 4.08,
+    tariff_half_peak: float = 7.87,
+    tariff_peak: float = 11.24,
+    demand_charge_rub_per_kw_month: float = 950.0,
+    annual_om_share: float = 0.015,
+    start_hour: int = 0,
+    start_weekday: int = 0,
+    shave_quantile: float = 0.85,
+) -> Dict[str, StorageResult]:
+    """
+    Прогоняет прогноз-зависимую стратегию на разных источниках прогноза
+    и измеряет, во сколько обходится ошибка каждой модели.
+
+    Идеальный прогноз (`actual`) задаёт верхнюю границу достижимого эффекта.
+    Недобор экономии относительно него — это и есть денежная стоимость ошибки
+    прогнозирования, то самое звено, которое связывает первую часть работы
+    (прогнозные модели) со второй (оптимизация накопителя).
+
+    Parameters
+    ----------
+    actual : np.ndarray
+        Фактическая нагрузка на горизонте планирования.
+    forecasts : dict {название модели: прогноз той же длины}
+        Ключ "Идеальный прогноз" добавляется автоматически.
+
+    Returns
+    -------
+    dict {источник прогноза: StorageResult}
+    """
+    common = dict(
+        capacity=capacity, max_power=max_power,
+        round_trip_efficiency=round_trip_efficiency,
+        cycle_cost_per_kwh=cycle_cost_per_kwh,
+        min_soc=min_soc, max_soc=max_soc,
+        battery_cost_rub=battery_cost_rub,
+        tariff_night=tariff_night, tariff_half_peak=tariff_half_peak,
+        tariff_peak=tariff_peak,
+        demand_charge_rub_per_kw_month=demand_charge_rub_per_kw_month,
+        annual_om_share=annual_om_share,
+        start_hour=start_hour, start_weekday=start_weekday,
+        policy="peak_shaving", shave_quantile=shave_quantile,
+    )
+
+    sources: Dict[str, np.ndarray] = {"Идеальный прогноз": np.asarray(actual, dtype=np.float64)}
+    for name, f in forecasts.items():
+        sources[name] = np.asarray(f, dtype=np.float64)
+
+    results: Dict[str, StorageResult] = {}
+    for name, f in sources.items():
+        results[name] = simulate_storage(
+            forecast=f, actual=actual, forecast_source=name,
+            strategy_name=f"Peak shaving по прогнозу: {name}", **common,
+        )
+
+    # ── Сводная таблица ───────────────────────────────────────────────────────
+    oracle = results["Идеальный прогноз"].net_savings
+    logger.info("═" * 86)
+    logger.info("ЦЕНА ОШИБКИ ПРОГНОЗА (стратегия peak shaving, SOC %.0f%%→%.0f%%)",
+                min_soc * 100, max_soc * 100)
+    logger.info("─" * 86)
+    logger.info("%-24s %10s %16s %14s %12s",
+                "Источник прогноза", "MAE", "Чистая экон.", "Недобор", "Реализовано")
+    logger.info("─" * 86)
+    for name, res in sorted(results.items(), key=lambda kv: -kv[1].net_savings):
+        if name == "Идеальный прогноз":
+            mae = 0.0
+        else:
+            mae = float(np.mean(np.abs(np.asarray(actual, dtype=np.float64) - sources[name])))
+        shortfall = oracle - res.net_savings
+        realized = (res.net_savings / oracle * 100) if oracle > 0 else float("nan")
+        logger.info("%-24s %10.1f %14.0f руб %10.0f руб %10.1f%%",
+                    name, mae, res.net_savings, shortfall, realized)
+    logger.info("═" * 86)
+    logger.info(
+        "Разница между строками — денежная стоимость ошибки прогноза: "
+        "именно она показывает, окупается ли усложнение модели."
+    )
     return results

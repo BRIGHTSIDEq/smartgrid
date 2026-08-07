@@ -22,8 +22,8 @@ Exp 3: Сравнение позиционных кодировок
 Exp 4: Параметрический паритет LSTM vs Transformer
     Фиксируем число параметров, сравниваем архитектуры.
 
-Exp 5: Сравнение трёх архитектур
-    VanillaTransformer vs TFTLite vs PatchTST
+Exp 5: Сравнение архитектур
+    LSTM vs VanillaTransformer vs PatchTST
 
 ИСПОЛЬЗОВАНИЕ
 ─────────────
@@ -59,11 +59,8 @@ from data.preprocessing import prepare_data, inverse_scale
 from models.lstm import build_lstm_model
 from models.transformer import (
     build_vanilla_transformer,
-    build_tft_lite,
     build_patchtst,
     count_parameters,
-    prepare_tft_covariates,
-    make_tft_windows,
 )
 from utils.metrics import compute_all_metrics
 
@@ -100,7 +97,7 @@ def _quick_train_eval(
     """
     Обучает модель с EarlyStopping и возвращает метрики на тесте.
 
-    x_*_override позволяет передавать кастомные входы (например, [X, covars] для TFT).
+    x_*_override позволяет передавать кастомные входы для нестандартных моделей.
     """
     X_tr = x_train_override if x_train_override is not None else data["X_train"]
     X_v = x_val_override if x_val_override is not None else data["X_val"]
@@ -514,34 +511,16 @@ def experiment_parameter_parity(df: pd.DataFrame) -> List[Dict]:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# ЭКСПЕРИМЕНТ 5: СРАВНЕНИЕ ТРЁХ АРХИТЕКТУР
+# ЭКСПЕРИМЕНТ 5: СРАВНЕНИЕ АРХИТЕКТУР
 # ──────────────────────────────────────────────────────────────────────────────
 
 def experiment_architectures(df: pd.DataFrame) -> List[Dict]:
     """
-    Exp 5: VanillaTransformer vs TFTLite vs PatchTST vs LSTM
+    Exp 5: LSTM vs VanillaTransformer vs PatchTST
 
     Условия: одинаковая длина истории (48ч), близкое число параметров.
     """
     data = prepare_data(df, history_length=48, forecast_horizon=Config.FORECAST_HORIZON)
-
-    # Подготовка ковариат для TFT
-    import pandas as _pd
-    ts = data["timestamps"]
-    all_covars = prepare_tft_covariates(ts)
-    n_covar_features = all_covars.shape[1]
-
-    # Нарезаем ковариаты на окна совпадающие с X_train/val/test
-    cov_scaled = data["scaled_train"]
-    _, X_cov_tr, _ = make_tft_windows(data["scaled_train"], all_covars[:data["train_end_idx"]], 48, 24)
-    _, X_cov_v, _ = make_tft_windows(data["scaled_val"], all_covars[data["train_end_idx"]:data["val_end_idx"]], 48, 24)
-    _, X_cov_te, _ = make_tft_windows(data["scaled_test"], all_covars[data["val_end_idx"]:], 48, 24)
-
-    # Обрезаем до минимального размера
-    n_tr = min(len(data["X_train"]), len(X_cov_tr))
-    n_v = min(len(data["X_val"]), len(X_cov_v))
-    n_te = min(len(data["X_test"]), len(X_cov_te))
-
     results = []
 
     logger.info("\n" + "=" * 60)
@@ -565,14 +544,6 @@ def experiment_architectures(df: pd.DataFrame) -> List[Dict]:
             build_patchtst(history_length=48, forecast_horizon=24,
                            patch_len=8, stride=4, d_model=64, num_heads=4, num_layers=3),
             None, None, None
-        ),
-        "TFTLite": (
-            build_tft_lite(history_length=48, forecast_horizon=24,
-                           d_model=64, num_heads=4, num_layers=2,
-                           n_covariate_features=n_covar_features),
-            [data["X_train"][:n_tr], X_cov_tr[:n_tr]],
-            [data["X_val"][:n_v], X_cov_v[:n_v]],
-            [data["X_test"][:n_te], X_cov_te[:n_te]],
         ),
     }
 

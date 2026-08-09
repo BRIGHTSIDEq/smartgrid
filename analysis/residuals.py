@@ -3,13 +3,16 @@
 analysis/residuals.py — Анализ остатков прогноза.
 Тесты: ADF, KPSS, Ljung-Box, Durbin-Watson, нормальность.
 
-ИСПРАВЛЕНИЕ v2: защита от константных/близко-константных остатков.
-  adfuller() и kpss() бросают ValueError("Invalid input, x is constant")
-  когда residuals.std() ≈ 0. Это происходит когда best_pred ≈ y_true
-  (почти идеальная модель) или когда best_pred является константой
-  (ошибка в пайплайне — например WeightedEnsemble без predict_absolute).
+ВАЖНО о форме данных. Прогноз имеет форму (N, H): N перекрывающихся окон со
+сдвигом 1 час, H шагов горизонта. Развёрнутый в один вектор массив НЕ является
+временным рядом: элемент k = i·H + h соответствует моменту i + h, поэтому
+соседние элементы скачут по времени, а «лаг 24» равен одному часу.
+Прогонять по такому вектору ADF/KPSS/Ljung-Box/DW бессмысленно.
 
-  Решение: проверяем std до вызова тестов, логируем предупреждение.
+Настоящий почасовой ряд — это срез при фиксированном шаге горизонта:
+residuals[:, h] индексируется номером окна, а окна отстоят ровно на час.
+Все тесты ниже выполняются по такому срезу (по умолчанию h=1, прогноз
+на час вперёд).
 """
 
 import logging
@@ -22,15 +25,30 @@ from scipy import stats
 from statsmodels.stats.diagnostic import acorr_ljungbox
 from statsmodels.stats.stattools import durbin_watson
 from statsmodels.tsa.stattools import adfuller, kpss
-from utils.plot_style import apply_publication_style, get_palette, save_figure
 
 logger = logging.getLogger("smart_grid.analysis.residuals")
-apply_publication_style()
-PALETTE = get_palette()
 
-# Минимальный std для запуска статистических тестов
-# При std < порога остатки считаются константными
-_MIN_STD_FOR_TESTS = 1.0   # 1 кВт·ч — практически ноль для нашей задачи
+
+def extract_residual_series(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    horizon_step: int = 0,
+) -> np.ndarray:
+    """
+    Возвращает корректный почасовой ряд остатков — срез при фиксированном
+    шаге горизонта.
+
+    Parameters
+    ----------
+    y_true, y_pred : np.ndarray, shape (N, H) либо (N,)
+    horizon_step : int
+        Индекс шага горизонта (0 = прогноз на 1 час вперёд).
+    """
+    resid = np.atleast_2d(np.asarray(y_true) - np.asarray(y_pred))
+    if resid.shape[0] == 1 and resid.shape[1] > 1:
+        return resid.ravel().astype(np.float64)
+    h = int(np.clip(horizon_step, 0, resid.shape[1] - 1))
+    return resid[:, h].astype(np.float64)
 
 
 def analyze_residuals(
@@ -39,141 +57,107 @@ def analyze_residuals(
     model_name: str = "Model",
     plots_dir: str = "results/plots",
     save: bool = True,
+    horizon_step: int = 0,
 ) -> Dict[str, float]:
     """
     Полный анализ остатков: визуализация + статистические тесты.
 
-    v2: защита от ValueError при константных остатках.
-    Если std(residuals) < 1 кВт·ч — тесты пропускаются с предупреждением.
+    Тесты выполняются по срезу с фиксированным шагом горизонта (см. docstring
+    модуля), гистограмма и Q-Q строятся по всем остаткам целиком.
 
     Parameters
     ----------
-    y_true, y_pred : np.ndarray  — в кВт·ч
-    model_name     : str
-    plots_dir      : str
-    save           : bool
+    y_true, y_pred : np.ndarray, shape (N, H)
+    horizon_step   : int — шаг горизонта для тестов на автокорреляцию
 
     Returns
     -------
-    dict с p-values всех тестов (nan если тест пропущен).
+    dict с p-values всех тестов.
     """
     os.makedirs(plots_dir, exist_ok=True)
-    residuals = y_true.flatten() - y_pred.flatten()
+    residuals = extract_residual_series(y_true, y_pred, horizon_step)
+    residuals_all = (np.asarray(y_true) - np.asarray(y_pred)).flatten()
     n = len(residuals)
-    res_std = float(residuals.std())
 
-    logger.info("Анализ остатков модели: %s (n=%d)", model_name, n)
-    logger.info("  Остатки: mean=%.2f, std=%.2f, min=%.2f, max=%.2f кВт·ч",
-                float(residuals.mean()), res_std,
-                float(residuals.min()), float(residuals.max()))
-
-    # ── Проверка на константность ─────────────────────────────────────────────
-    if res_std < _MIN_STD_FOR_TESTS:
-        logger.warning(
-            "⚠️  Остатки практически константны (std=%.4f кВт·ч < %.1f). "
-            "Статистические тесты пропущены. "
-            "Проверьте корректность предсказания модели '%s'.",
-            res_std, _MIN_STD_FOR_TESTS, model_name,
-        )
-        return {
-            "adf_p": float("nan"), "kpss_p": float("nan"),
-            "lb_p_10": float("nan"), "lb_p_20": float("nan"),
-            "durbin_watson": float("nan"), "normality_p": float("nan"),
-        }
+    logger.info(
+        "Анализ остатков модели: %s | ряд для тестов: n=%d (срез h=%d), "
+        "всего остатков=%d",
+        model_name, n, horizon_step + 1, len(residuals_all),
+    )
 
     # ── Тест ADF (стационарность) ─────────────────────────────────────────────
-    adf_p = float("nan")
-    try:
-        adf_stat, adf_p, *_ = adfuller(residuals)
-        logger.info("ADF тест: stat=%.4f p=%.4f (%s)",
-                    adf_stat, adf_p,
-                    "стационарны" if adf_p < 0.05 else "не стационарны")
-    except ValueError as exc:
-        logger.warning("ADF тест не удался: %s", exc)
+    adf_stat, adf_p, *_ = adfuller(residuals)
+    logger.info("ADF тест: stat=%.4f p=%.4f (%s)",
+                adf_stat, adf_p, "стационарны" if adf_p < 0.05 else "не стационарны")
 
     # ── Тест KPSS ─────────────────────────────────────────────────────────────
-    kpss_p = float("nan")
     try:
         kpss_stat, kpss_p, *_ = kpss(residuals, regression="c", nlags="auto")
         logger.info("KPSS тест: stat=%.4f p=%.4f", kpss_stat, kpss_p)
-    except (ValueError, Exception) as exc:
-        logger.warning("KPSS тест не удался: %s", exc)
+    except Exception:
+        kpss_p = np.nan
+        logger.warning("KPSS тест не удался")
 
-    # ── Тест Ljung-Box (автокорреляция) ───────────────────────────────────────
-    lb_p_10 = lb_p_20 = float("nan")
-    try:
-        lb_result = acorr_ljungbox(residuals, lags=[10, 20], return_df=True)
-        lb_p_10 = float(lb_result["lb_pvalue"].iloc[0])
-        lb_p_20 = float(lb_result["lb_pvalue"].iloc[1])
-        logger.info("Ljung-Box lag=10: p=%.4f  lag=20: p=%.4f", lb_p_10, lb_p_20)
-    except Exception as exc:
-        logger.warning("Ljung-Box не удался: %s", exc)
+    # ── Тест Ljung-Box (автокорреляция) ──────────────────────────────────────
+    lb_result = acorr_ljungbox(residuals, lags=[10, 20], return_df=True)
+    lb_p_10 = float(lb_result["lb_pvalue"].iloc[0])
+    lb_p_20 = float(lb_result["lb_pvalue"].iloc[1])
+    logger.info("Ljung-Box lag=10: p=%.4f  lag=20: p=%.4f", lb_p_10, lb_p_20)
 
     # ── Durbin-Watson ─────────────────────────────────────────────────────────
-    dw_stat = float("nan")
-    try:
-        dw_stat = durbin_watson(residuals)
-        logger.info("Durbin-Watson: %.4f (2.0=нет автокорреляции)", dw_stat)
-    except Exception as exc:
-        logger.warning("Durbin-Watson не удался: %s", exc)
+    dw_stat = durbin_watson(residuals)
+    logger.info("Durbin-Watson: %.4f (2.0=нет автокорреляции)", dw_stat)
 
     # ── Нормальность (Shapiro-Wilk или Jarque-Bera) ───────────────────────────
-    norm_p = float("nan")
-    try:
-        if n <= 5000:
-            sw_stat, sw_p = stats.shapiro(residuals[:5000])
-            logger.info("Shapiro-Wilk: stat=%.4f p=%.4f", sw_stat, sw_p)
-            norm_p = sw_p
-        else:
-            jb_stat, jb_p = stats.jarque_bera(residuals)
-            logger.info("Jarque-Bera: stat=%.4f p=%.4f", jb_stat, jb_p)
-            norm_p = jb_p
-    except Exception as exc:
-        logger.warning("Тест нормальности не удался: %s", exc)
+    if len(residuals_all) <= 5000:
+        sw_stat, sw_p = stats.shapiro(residuals_all[:5000])
+        logger.info("Shapiro-Wilk: stat=%.4f p=%.4f", sw_stat, sw_p)
+        norm_p = sw_p
+    else:
+        jb_stat, jb_p = stats.jarque_bera(residuals_all)
+        logger.info("Jarque-Bera: stat=%.4f p=%.4f", jb_stat, jb_p)
+        norm_p = jb_p
 
     # ── Визуализация ──────────────────────────────────────────────────────────
-    try:
-        fig, axes = plt.subplots(2, 2, figsize=(14, 10))
-        fig.suptitle(f"Анализ остатков — {model_name}")
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    fig.suptitle(f"Анализ остатков — {model_name}", fontsize=14, fontweight="bold")
 
-        axes[0, 0].plot(residuals, color=PALETTE["primary"], alpha=0.8)
-        axes[0, 0].axhline(0, color=PALETTE["negative"], ls="--", lw=1)
-        axes[0, 0].set_title("Остатки во времени [кВт·ч]")
-        axes[0, 0].set_xlabel("Временной индекс [ч]")
-        axes[0, 0].set_ylabel("Остаток [кВт·ч]")
-        axes[0, 0].grid(True, alpha=0.3)
+    # Остатки во времени (корректный почасовой ряд: срез h=horizon_step+1)
+    axes[0, 0].plot(residuals, lw=0.6, alpha=0.7)
+    axes[0, 0].axhline(0, color="red", ls="--", lw=1)
+    axes[0, 0].set_title(f"Остатки во времени (прогноз на {horizon_step + 1} ч вперёд)")
+    axes[0, 0].set_xlabel("Час")
+    axes[0, 0].set_ylabel("Остаток, кВт·ч")
+    axes[0, 0].grid(True, alpha=0.3)
 
-        axes[0, 1].hist(residuals, bins=60, density=True, color=PALETTE["primary"], alpha=0.7)
-        xr = np.linspace(residuals.min(), residuals.max(), 200)
-        axes[0, 1].plot(xr, stats.norm.pdf(xr, residuals.mean(), res_std),
-                        color=PALETTE["negative"], lw=2, label="N(μ,σ)")
-        axes[0, 1].set_title("Распределение остатков [кВт·ч]")
-        axes[0, 1].set_xlabel("Остаток [кВт·ч]")
-        axes[0, 1].set_ylabel("Плотность [1/кВт·ч]")
-        axes[0, 1].legend()
-        axes[0, 1].grid(True, alpha=0.3)
+    # Гистограмма + нормальное распределение (по всем шагам горизонта)
+    axes[0, 1].hist(residuals_all, bins=60, density=True, color="steelblue", alpha=0.7)
+    xr = np.linspace(residuals_all.min(), residuals_all.max(), 200)
+    axes[0, 1].plot(xr, stats.norm.pdf(xr, residuals_all.mean(), residuals_all.std()),
+                    "r-", lw=2, label="N(μ,σ)")
+    axes[0, 1].set_title("Распределение остатков (все шаги горизонта)")
+    axes[0, 1].legend()
+    axes[0, 1].grid(True, alpha=0.3)
 
-        stats.probplot(residuals, plot=axes[1, 0])
-        axes[1, 0].set_title("Q-Q график остатков")
-        axes[1, 0].set_xlabel("Теоретические квантили [-]")
-        axes[1, 0].set_ylabel("Выборочные квантили [кВт·ч]")
-        axes[1, 0].grid(True, alpha=0.3)
+    # Q-Q plot
+    stats.probplot(residuals_all, plot=axes[1, 0])
+    axes[1, 0].set_title("Q-Q Plot")
+    axes[1, 0].grid(True, alpha=0.3)
 
-        axes[1, 1].scatter(y_pred.flatten(), residuals, alpha=0.3, s=2)
-        axes[1, 1].axhline(0, color=PALETTE["negative"], ls="--", lw=1)
-        axes[1, 1].set_xlabel("Предсказание [кВт·ч]")
-        axes[1, 1].set_ylabel("Остаток [кВт·ч]")
-        axes[1, 1].set_title("Остатки vs предсказания [кВт·ч]")
-        axes[1, 1].grid(True, alpha=0.3)
+    # Остатки vs предсказания
+    axes[1, 1].scatter(np.asarray(y_pred).flatten(), residuals_all, alpha=0.3, s=2)
+    axes[1, 1].axhline(0, color="red", ls="--", lw=1)
+    axes[1, 1].set_xlabel("Предсказание, кВт·ч")
+    axes[1, 1].set_ylabel("Остаток, кВт·ч")
+    axes[1, 1].set_title("Остатки vs Предсказания")
+    axes[1, 1].grid(True, alpha=0.3)
 
-        plt.tight_layout()
+    plt.tight_layout()
+    if save:
         path = os.path.join(plots_dir, f"residuals_{model_name.replace(' ', '_')}.png")
-        png_path, _, _ = save_figure(fig, path, save=save)
-        if save:
-            logger.info("График остатков: %s", png_path)
-        plt.close(fig)
-    except Exception as exc:
-        logger.warning("Не удалось построить графики остатков: %s", exc)
+        fig.savefig(path, dpi=150, bbox_inches="tight")
+        logger.info("График остатков: %s", path)
+    plt.close(fig)
 
     return {
         "adf_p": adf_p,

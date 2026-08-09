@@ -1,41 +1,139 @@
 # -*- coding: utf-8 -*-
 """
-config.py — Центральная конфигурация Smart Grid.
+config.py — Единая точка настройки пайплайна.
 
-ИЗМЕНЕНИЯ v18 (HPO интеграция):
-  + Метод load_hpo_params(mode) — загружает best_params из results/hpo/{mode}/
-    и применяет их поверх базовых значений режима.
-  + set_fast_mode / set_optimal_mode / set_full_mode теперь автоматически
-    вызывают load_hpo_params() если файлы существуют.
-  + Метод hpo_status() — показывает, какие HPO результаты доступны.
-  + Константа HPO_AUTO_LOAD = True — можно отключить автозагрузку.
+Все гиперпараметры, пути и режимы прогона собраны здесь: ни один модуль не
+содержит зашитых констант обучения. Режим выбирается флагом --mode у main.py.
+
+Режимы прогона:
+    smoke   ~1 минута   — проверка работоспособности пайплайна целиком.
+                          Данные и модели минимальны, результаты бессмысленны.
+    fast    ~15 минут   — черновые эксперименты, отладка гипотез.
+    optimal ~2 часа     — рабочий режим, пригодный для итоговых таблиц.
+    full    ~10 часов   — максимальное качество: 2 года данных, история 192 ч.
+
+Параметры генератора и экономики откалиброваны по фактическим данным для
+России (Москва). Эталонные значения и источники — в разделе RealWorldReference
+ниже; соответствие проверяется функцией
+data.generator.validate_against_reference() при каждом прогоне.
+
+История изменений — в CHANGELOG.md.
 """
 
 import os
-import json
 import logging
-from dataclasses import dataclass
-from pathlib import Path
 
 
-@dataclass(frozen=True)
-class GeneratorCoefficients:
-    temp_setpoint: float
-    temp_quadratic_coef: float
-    humidity_threshold: float
-    humidity_coef: float
-    wind_temp_threshold: float
-    wind_coef: float
-    early_bird_frac: float
-    night_owl_frac: float
-    ar_phi: float
-    ar_sigma: float
-    seasonal_winter_boost: float
-    seasonal_summer_dip: float
-    ev_penetration: float
-    solar_penetration: float
-    industrial_loads: int
-    city_districts: int
+class RealWorldReference:
+    """
+    Эталонные значения реального мира, по которым калибруется генератор.
+
+    Все цифры относятся к России (Московский регион) и служат двум целям:
+    задают параметры генератора и используются как контрольные значения при
+    автоматической сверке сгенерированного ряда с действительностью.
+
+    ИСТОЧНИКИ
+      Тарифные зоны и ставки — АО «Мосэнергосбыт», трёхзонный тариф для
+        населения Москвы, дома с газовыми плитами, с 01.07.2025.
+        Зоны установлены единым для РФ порядком: пиковая 07–10 и 17–21,
+        полупиковая 10–17 и 21–23, ночная 23–07.
+      Потребление домохозяйства — оценка НИУ ВШЭ: 206 кВт·ч в месяц
+        на домохозяйство в среднем по России.
+      Климат Москвы — климатические нормы: январь −6.5 °C, июль +19.0 °C.
+      Сезонность нагрузки — ЕЭС России: январское потребление примерно
+        на четверть выше июльского.
+      Доля электромобилей — рынок РФ 2025: около 1% продаж новых автомобилей,
+        доля в парке существенно ниже.
+      Стоимость накопителя — мировой рынок BESS 2025: 200–400 $/кВт·ч за
+        систему «под ключ»; для РФ принята верхняя часть диапазона.
+      Ресурс LFP — 6000+ циклов до 70–80% остаточной ёмкости.
+    """
+
+    # ── Потребление ──────────────────────────────────────────────────────────
+    KWH_PER_HOUSEHOLD_MONTH: float = 206.0      # среднее по РФ
+    KWH_PER_HOUSEHOLD_MONTH_RANGE = (150.0, 300.0)
+
+    # Доля непромышленных и промышленных потребителей сверх населения.
+    # Для распределительного фидера городского района коммерческая и мелкая
+    # промышленная нагрузка сопоставима с бытовой.
+    NONRESIDENTIAL_SHARE: float = 0.45
+    NONRESIDENTIAL_SHARE_RANGE = (0.20, 0.90)
+
+    # ── Климат Москвы ────────────────────────────────────────────────────────
+    TEMP_JANUARY_MEAN: float = -6.5
+    TEMP_JULY_MEAN: float = 19.0
+    TEMP_ABS_MIN: float = -35.0                  # практический минимум
+    TEMP_ABS_MAX: float = 38.0                   # рекорд 2010 года ≈ +38.2
+
+    @classmethod
+    def temp_annual_mean(cls) -> float:
+        return (cls.TEMP_JULY_MEAN + cls.TEMP_JANUARY_MEAN) / 2.0
+
+    @classmethod
+    def temp_annual_amplitude(cls) -> float:
+        return (cls.TEMP_JULY_MEAN - cls.TEMP_JANUARY_MEAN) / 2.0
+
+    # ── Сезонность и суточный профиль ────────────────────────────────────────
+    WINTER_SUMMER_RATIO: float = 1.25
+    WINTER_SUMMER_RATIO_RANGE = (1.10, 1.45)
+    WEEKEND_WEEKDAY_RATIO_RANGE = (0.88, 0.99)
+    # Коэффициент заполнения графика (среднее / максимум) сильно зависит от
+    # уровня агрегации: для энергосистемы в целом это 0.70–0.85, для смешанного
+    # городского фидера 0.50–0.70, для чисто бытового — 0.40–0.55. Модель
+    # описывает районный фидер, где на бытовую нагрузку приходится примерно
+    # половина потребления, поэтому диапазон задан соответственно.
+    LOAD_FACTOR_RANGE = (0.42, 0.75)
+    CV_RANGE = (0.12, 0.35)                      # коэффициент вариации
+    MORNING_PEAK_HOURS = (7, 11)
+    EVENING_PEAK_HOURS = (17, 22)
+    ACF24_MIN: float = 0.50
+
+    # ── Тарифы, руб/кВт·ч (Москва, с 01.07.2025, газовые плиты) ─────────────
+    TARIFF_PEAK: float = 11.24
+    TARIFF_HALF_PEAK: float = 7.87
+    TARIFF_NIGHT: float = 4.08
+
+    # ── Накопитель ───────────────────────────────────────────────────────────
+    BATTERY_CAPEX_RUB_PER_KWH: float = 25_000.0  # ≈300 $/кВт·ч под ключ
+    BATTERY_CYCLE_LIFE: int = 6_000              # циклов до 80% ёмкости (LFP)
+    BATTERY_REF_DOD: float = 0.80                # глубина разряда для ресурса
+    BATTERY_ROUND_TRIP_EFF: float = 0.88         # с учётом инвертора
+
+    # Типоразмер накопителя задаётся не абсолютной величиной, а долей от пика
+    # нагрузки: батарея мощностью почти в размер сети физически бессмысленна и
+    # делает экономику заведомо убыточной за счёт капитальных затрат.
+    # Практика сетевых BESS: мощность 15–25% пика, длительность 2–4 часа.
+    BATTERY_POWER_SHARE_OF_PEAK: float = 0.20
+    BATTERY_DURATION_HOURS: float = 4.0
+    TYPICAL_LOAD_FACTOR: float = 0.48            # среднее / пик, см. LOAD_FACTOR_RANGE
+
+    # ── Проникновение технологий Smart Grid ──────────────────────────────────
+    # «current» — состояние на 2025 год, «forward» — перспективный сценарий.
+    # Разница между сценариями показывает, при каком уровне проникновения
+    # распределённые ресурсы начинают заметно влиять на профиль нагрузки.
+    SCENARIOS = {
+        "current": {
+            "ev_penetration": 0.005,     # ≈0.5% домохозяйств, оценка сверху
+            "solar_penetration": 0.002,  # микрогенерация в РФ единична
+            "dsr_events_per_year": 10,
+            "dsr_strength": (0.02, 0.06),
+        },
+        "forward": {
+            "ev_penetration": 0.15,
+            "solar_penetration": 0.030,
+            "dsr_events_per_year": 20,
+            "dsr_strength": (0.05, 0.12),
+        },
+    }
+
+    # ── Электротранспорт: мощность зарядки, кВт ──────────────────────────────
+    EV_HOME_POWER_KW = (3.5, 7.4)                # 16 А и 32 А однофазные
+    EV_PUBLIC_POWER_KW = (22.0, 50.0)
+    EV_FLEET_POWER_KW = (30.0, 60.0)
+
+    # ── Прочее ───────────────────────────────────────────────────────────────
+    ANNUAL_TREND: float = 0.015                  # рост потребления ~1.5%/год
+    SOLAR_PANEL_PEAK_KW: float = 5.0             # типовая бытовая установка
 
 
 class Config:
@@ -61,7 +159,7 @@ class Config:
     LR_FACTOR: float = 0.5
     MIN_DELTA: float = 0.0
 
-    # LSTM v13 (TCN+BiLSTM+Attention)
+    # LSTM (TCN + BiLSTM + Attention)
     LSTM_UNITS_1: int = 96
     LSTM_UNITS_2: int = 64
     LSTM_UNITS_3: int = 64
@@ -69,32 +167,23 @@ class Config:
     LSTM_LEARNING_RATE: float = 2.0e-4
     LSTM_ATTN_HEADS: int = 4
     LSTM_USE_COSINE_DECAY: bool = False
-    LSTM_WARMUP_RATIO: float = 0.05
     LSTM_TCN_FILTERS: int = 48
     LSTM_HUBER_DELTA: float = 0.05
     LSTM_SEASONAL_BLEND_INIT: float = 0.35
 
-    # Transformer / iTransformer (общие)
+    # Transformer
     TRANSFORMER_D_MODEL: int = 192
     TRANSFORMER_N_HEADS: int = 8
     TRANSFORMER_N_LAYERS: int = 5
-    ITRANSFORMER_N_LAYERS: int = 4
     TRANSFORMER_DFF: int = 384
     TRANSFORMER_DROPOUT: float = 0.10
     TRANSFORMER_LEARNING_RATE: float = 2e-4
-    TRANSFORMER_USE_COSINE_DECAY: bool = False
-    TRANSFORMER_WARMUP_RATIO: float = 0.05
     VANILLA_TRANSFORMER_LR: float = 7e-5
     TRANSFORMER_STOCHASTIC_DEPTH: float = 0.06
     PATCHTST_USE_REVIN: bool = True
-    VANILLA_USE_SEASONAL_RESIDUAL: bool = False
+    VANILLA_USE_SEASONAL_RESIDUAL: bool = True
     VANILLA_SEASONAL_BLEND_INIT: float = 0.40
     VANILLA_HUBER_DELTA: float = 0.05
-
-    # PatchTST — отдельные параметры
-    PATCHTST_LEARNING_RATE: float = 3e-4
-    PATCHTST_DROPOUT: float = 0.05
-    PATCHTST_PATIENCE: int = 30
 
     # XGBoost
     XGB_N_ESTIMATORS: int = 500
@@ -103,44 +192,69 @@ class Config:
     XGB_SUBSAMPLE: float = 0.80
     XGB_COLSAMPLE: float = 0.40
 
-    # Generator v6
-    GEN_TEMP_SETPOINT: float = 18.0
-    GEN_TEMP_QUADRATIC_COEF: float = 2.5e-4
+    # ── Генератор данных (калибровка — см. RealWorldReference) ──────────────
+    GEN_SCENARIO: str = "current"
+
+    # Масштаб нагрузки задаётся не абстрактным множителем, а фактическим
+    # среднемесячным потреблением домохозяйства: так ряд остаётся
+    # сопоставимым с реальностью при любом числе домохозяйств.
+    GEN_KWH_PER_HOUSEHOLD_MONTH: float = RealWorldReference.KWH_PER_HOUSEHOLD_MONTH
+    GEN_NONRESIDENTIAL_SHARE: float = RealWorldReference.NONRESIDENTIAL_SHARE
+
+    GEN_TEMP_ANNUAL_MEAN: float = RealWorldReference.temp_annual_mean()
+    GEN_TEMP_ANNUAL_AMPLITUDE: float = RealWorldReference.temp_annual_amplitude()
+    GEN_TEMP_MIN: float = RealWorldReference.TEMP_ABS_MIN
+    GEN_TEMP_MAX: float = RealWorldReference.TEMP_ABS_MAX
+
+    # Отклик на температуру асимметричен: в России отопление преимущественно
+    # центральное или газовое, а кондиционирование распространено слабо,
+    # поэтому холодная ветвь заметно сильнее тёплой.
+    GEN_TEMP_SETPOINT: float = 18.0              # порог включения отопления
+    GEN_COOLING_SETPOINT: float = 24.0           # порог включения охлаждения
+    GEN_HEATING_COEF: float = 2.0e-4
+    GEN_COOLING_COEF: float = 1.2e-4
+
     GEN_HUMIDITY_THRESHOLD: float = 60.0
-    GEN_HUMIDITY_COEF: float = 0.30
+    GEN_HUMIDITY_COEF: float = 0.10
     GEN_WIND_TEMP_THRESHOLD: float = 10.0
-    GEN_WIND_COEF: float = 0.15
+    GEN_WIND_COEF: float = 0.05
     GEN_EARLY_BIRD_FRAC: float = 0.28
     GEN_NIGHT_OWL_FRAC:  float = 0.20
     GEN_AR_PHI: float   = 0.65
-    GEN_AR_SIGMA: float = 0.040
-    GEN_SEASONAL_WINTER_BOOST: float = 0.15
-    GEN_SEASONAL_SUMMER_DIP:   float = 0.10
-    GEN_EV_PENETRATION: float   = 0.50
-    GEN_SOLAR_PENETRATION: float = 0.22
+    GEN_AR_SIGMA: float = 0.030
+    # Остаточная сезонность сверх температурного отклика — небольшая, иначе
+    # отношение зима/лето уходит далеко за фактические 1.25.
+    GEN_SEASONAL_WINTER_BOOST: float = 0.06
+    GEN_SEASONAL_SUMMER_DIP:   float = 0.04
+    GEN_ANNUAL_TREND: float = RealWorldReference.ANNUAL_TREND
     GEN_INDUSTRIAL_LOADS: int   = 8
     GEN_CITY_DISTRICTS: int = 12
 
-    # BESS
+    # Заполняются из сценария в apply_scenario()
+    GEN_EV_PENETRATION: float = 0.005
+    GEN_SOLAR_PENETRATION: float = 0.002
+    GEN_DSR_EVENTS_PER_YEAR: int = 10
+    GEN_DSR_STRENGTH = (0.02, 0.06)
+
+    # ── Накопитель энергии ──────────────────────────────────────────────────
     BATTERY_CAPACITY: float = 4_500.0
-    BATTERY_MAX_POWER: float = 2_250.0
-    BATTERY_EFFICIENCY: float = 0.95
-    BATTERY_CYCLE_COST: float = 0.06
-    BATTERY_COST_RUB: float = 45_000_000.0
+    BATTERY_MAX_POWER: float = 2_250.0            # 0.5C — типично для сетевых BESS
+    BATTERY_EFFICIENCY: float = RealWorldReference.BATTERY_ROUND_TRIP_EFF
     BATTERY_OM_SHARE: float = 0.015
     DEMAND_CHARGE_RUB_PER_KW_MONTH: float = 950.0
     BATTERY_MIN_SOC: float = 0.25
     BATTERY_MAX_SOC: float = 0.75
 
-    TARIFF_PEAK: float = 6.50
-    TARIFF_HALF_PEAK: float = 4.20
-    TARIFF_NIGHT: float = 1.80
+    # Производные величины (пересчитываются в _derive_battery_economics)
+    BATTERY_COST_RUB: float = 0.0
+    BATTERY_CYCLE_COST: float = 0.0
+
+    TARIFF_PEAK: float = RealWorldReference.TARIFF_PEAK
+    TARIFF_HALF_PEAK: float = RealWorldReference.TARIFF_HALF_PEAK
+    TARIFF_NIGHT: float = RealWorldReference.TARIFF_NIGHT
 
     BASE_DIR: str = os.path.dirname(os.path.abspath(__file__))
     OUTPUT_DIR: str  = os.path.join(BASE_DIR, "results")
-    DATA_DIR: str = os.path.join(BASE_DIR, "data", "generated")
-    GENERATED_DATA_CSV: str = os.path.join(DATA_DIR, "smartgrid_dataset.csv")
-    FORCE_REGENERATE_DATA: bool = False
     MODELS_DIR: str  = os.path.join(BASE_DIR, "results", "models")
     PLOTS_DIR: str   = os.path.join(BASE_DIR, "results", "plots")
     LOGS_DIR: str    = os.path.join(BASE_DIR, "results", "logs")
@@ -149,16 +263,90 @@ class Config:
     LOG_FORMAT: str = "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"
     LOG_DATE_FMT: str = "%Y-%m-%d %H:%M:%S"
 
-    # ── HPO интеграция ────────────────────────────────────────────────────────
-    # Установите в False чтобы отключить автозагрузку HPO-результатов
-    HPO_AUTO_LOAD: bool = True
-    HPO_DIR: str = os.path.join(BASE_DIR, "results", "hpo")
-
     @classmethod
     def create_dirs(cls):
-        for d in (cls.OUTPUT_DIR, cls.DATA_DIR, cls.MODELS_DIR,
-                  cls.PLOTS_DIR, cls.LOGS_DIR, cls.HPO_DIR):
+        for d in (cls.OUTPUT_DIR, cls.MODELS_DIR, cls.PLOTS_DIR, cls.LOGS_DIR):
             os.makedirs(d, exist_ok=True)
+
+    # ── Производные параметры ────────────────────────────────────────────────
+
+    @classmethod
+    def apply_scenario(cls, name: str = None):
+        """
+        Применяет сценарий проникновения технологий Smart Grid.
+
+        "current" — фактическое состояние на 2025 год: электромобилей и
+        микрогенерации в России пока единицы процентов, поэтому их вклад в
+        профиль нагрузки мал. "forward" — перспективный сценарий, в котором
+        распределённые ресурсы заметно меняют форму суточного графика.
+
+        Сценарий влияет только на генератор данных и всегда фиксируется
+        в метаданных прогона, чтобы результаты нельзя было перепутать.
+        """
+        name = name or cls.GEN_SCENARIO
+        if name not in RealWorldReference.SCENARIOS:
+            raise ValueError(
+                f"Неизвестный сценарий {name!r}. "
+                f"Доступны: {', '.join(RealWorldReference.SCENARIOS)}"
+            )
+        params = RealWorldReference.SCENARIOS[name]
+        cls.GEN_SCENARIO = name
+        cls.GEN_EV_PENETRATION = params["ev_penetration"]
+        cls.GEN_SOLAR_PENETRATION = params["solar_penetration"]
+        cls.GEN_DSR_EVENTS_PER_YEAR = params["dsr_events_per_year"]
+        cls.GEN_DSR_STRENGTH = params["dsr_strength"]
+        return cls
+
+    @classmethod
+    def expected_peak_load_kw(cls) -> float:
+        """
+        Оценка пиковой нагрузки сети по числу домохозяйств.
+
+        Служит для типоразмера накопителя: сначала считается средняя нагрузка
+        (бытовая плюс непромышленная), затем пик через коэффициент заполнения.
+        """
+        hours_per_month = 8766.0 / 12.0
+        residential = cls.HOUSEHOLDS * cls.GEN_KWH_PER_HOUSEHOLD_MONTH / hours_per_month
+        mean_total = residential * (1.0 + cls.GEN_NONRESIDENTIAL_SHARE)
+        return mean_total / RealWorldReference.TYPICAL_LOAD_FACTOR
+
+    @classmethod
+    def _derive_battery_economics(cls):
+        """
+        Подбирает типоразмер накопителя под нагрузку и пересчитывает экономику.
+
+        РАЗМЕР. Мощность и ёмкость масштабируются от пика сети, а не задаются
+        константой. Иначе при изменении числа домохозяйств батарея оказывается
+        либо ничтожной, либо сопоставимой по мощности со всей сетью — во втором
+        случае капитальные затраты гарантированно перекрывают любую экономию,
+        и расчёт окупаемости теряет смысл.
+
+        СТОИМОСТЬ ДЕГРАДАЦИИ — не произвольная константа, а следствие
+        капитальных затрат и ресурса: каждый кВт·ч, прошедший через батарею,
+        расходует часть её жизненного цикла.
+
+            cycle_cost = CAPEX / (ёмкость × глубина разряда × ресурс в циклах)
+
+        При 25 000 руб/кВт·ч, DoD 80% и 6000 циклах получается около
+        5.2 руб/кВт·ч — величина, сопоставимая с тарифным спредом. Занижение
+        этого параметра делает арбитраж искусственно выгодным.
+        """
+        ref = RealWorldReference
+        peak = cls.expected_peak_load_kw()
+        cls.BATTERY_MAX_POWER = round(peak * ref.BATTERY_POWER_SHARE_OF_PEAK, 1)
+        cls.BATTERY_CAPACITY = round(cls.BATTERY_MAX_POWER * ref.BATTERY_DURATION_HOURS, 1)
+
+        cls.BATTERY_COST_RUB = ref.BATTERY_CAPEX_RUB_PER_KWH * cls.BATTERY_CAPACITY
+        throughput = cls.BATTERY_CAPACITY * ref.BATTERY_REF_DOD * ref.BATTERY_CYCLE_LIFE
+        cls.BATTERY_CYCLE_COST = cls.BATTERY_COST_RUB / throughput
+        return cls
+
+    @classmethod
+    def finalize(cls, scenario: str = None):
+        """Применяет сценарий и пересчитывает производные параметры."""
+        cls.apply_scenario(scenario)
+        cls._derive_battery_economics()
+        return cls
 
     @classmethod
     def setup_logging(cls):
@@ -172,399 +360,155 @@ class Config:
         )
         return logging.getLogger("smart_grid")
 
-    # ══════════════════════════════════════════════════════════════════════════
-    # HPO: загрузка и применение лучших гиперпараметров
-    # ══════════════════════════════════════════════════════════════════════════
-
     @classmethod
-    def load_hpo_params(cls, pipeline_mode: str) -> dict:
+    def set_smoke_mode(cls):
         """
-        Загружает HPO-результаты из results/hpo/{pipeline_mode}/ и применяет
-        их к атрибутам Config, перезаписывая базовые значения режима.
+        Минимальный прогон для проверки работоспособности пайплайна.
 
-        Вызывается автоматически в конце set_fast/optimal/full_mode()
-        если HPO_AUTO_LOAD=True.
-
-        Приоритет применения (от низшего к высшему):
-          1. Дефолтные значения класса Config
-          2. Значения set_*_mode() (режим запуска)
-          3. HPO-оптимизированные значения (наивысший приоритет)
-
-        Returns
-        -------
-        dict {model_name: True/False} — статус применения по моделям
+        Назначение — убедиться, что все стадии отрабатывают без ошибок и
+        совместимы по формам данных. Метрики в этом режиме интерпретации
+        не подлежат: 30 дней данных и 2 эпохи обучения.
         """
-        log = logging.getLogger("smart_grid")
-        hpo_dir = Path(cls.HPO_DIR) / pipeline_mode
-
-        if not hpo_dir.exists():
-            return {}
-
-        # Маппинг: имя файла → список Config-атрибутов которые он может задать
-        # (используется для валидации — не применяем несвязанные атрибуты)
-        ALLOWED_ATTRS = {
-            "lstm": {
-                "LSTM_UNITS_1", "LSTM_UNITS_2", "LSTM_UNITS_3",
-                "LSTM_TCN_FILTERS", "LSTM_ATTN_HEADS", "DROPOUT_RATE",
-                "LSTM_LEARNING_RATE", "LSTM_SEASONAL_BLEND_INIT",
-                "LSTM_HUBER_DELTA", "LSTM_USE_COSINE_DECAY",
-            },
-            "itransformer": {
-                "TRANSFORMER_D_MODEL", "TRANSFORMER_N_HEADS",
-                "ITRANSFORMER_N_LAYERS", "TRANSFORMER_DFF",
-                "TRANSFORMER_DROPOUT", "VANILLA_TRANSFORMER_LR",
-                "VANILLA_SEASONAL_BLEND_INIT", "TRANSFORMER_USE_COSINE_DECAY",
-            },
-            "patchtst": {
-                "TRANSFORMER_D_MODEL", "TRANSFORMER_N_HEADS",
-                "TRANSFORMER_N_LAYERS", "PATCHTST_LEARNING_RATE",
-                "PATCHTST_DROPOUT", "TRANSFORMER_STOCHASTIC_DEPTH",
-                "VANILLA_SEASONAL_BLEND_INIT", "TRANSFORMER_USE_COSINE_DECAY",
-            },
-            "tft": {
-                "TRANSFORMER_D_MODEL", "TRANSFORMER_N_HEADS",
-                "TRANSFORMER_N_LAYERS", "TRANSFORMER_DROPOUT",
-                "TRANSFORMER_LEARNING_RATE", "TRANSFORMER_USE_COSINE_DECAY",
-            },
-            "xgboost": {
-                "XGB_N_ESTIMATORS", "XGB_MAX_DEPTH", "XGB_LR",
-                "XGB_SUBSAMPLE", "XGB_COLSAMPLE",
-            },
-        }
-
-        applied = {}
-        total_applied = 0
-
-        for model_name, allowed in ALLOWED_ATTRS.items():
-            result_path = hpo_dir / f"{model_name}_best_params.json"
-            if not result_path.exists():
-                applied[model_name] = False
-                continue
-
-            try:
-                with open(result_path, encoding="utf-8") as f:
-                    result = json.load(f)
-
-                config_upd = result.get("config_updates", {})
-                model_applied = 0
-
-                for attr, value in config_upd.items():
-                    # Пропускаем служебные и неразрешённые ключи
-                    if attr.startswith("_"):
-                        continue
-                    if attr not in allowed:
-                        continue
-                    if not hasattr(cls, attr):
-                        continue
-
-                    setattr(cls, attr, value)
-                    model_applied += 1
-                    total_applied += 1
-
-                applied[model_name] = True
-                log.info(
-                    "HPO ✓ %-14s | val_loss=%.6f | применено %d параметров",
-                    model_name,
-                    result.get("best_value", float("nan")),
-                    model_applied,
-                )
-
-            except (json.JSONDecodeError, KeyError, TypeError) as exc:
-                log.warning("HPO: ошибка загрузки %s: %s", result_path, exc)
-                applied[model_name] = False
-
-        if total_applied > 0:
-            log.info(
-                "HPO: итого применено %d параметров из %s | "
-                "используйте HPO_AUTO_LOAD=False для отключения",
-                total_applied, hpo_dir
-            )
-
-        return applied
-
-    @classmethod
-    def hpo_status(cls) -> None:
-        """
-        Выводит информацию о доступных HPO-результатах для всех режимов.
-        Удобно для проверки перед запуском main.py.
-        """
-        log = logging.getLogger("smart_grid")
-        log.info("─" * 60)
-        log.info("СТАТУС HPO-РЕЗУЛЬТАТОВ:")
-        for mode in ("fast", "optimal", "full"):
-            hpo_dir = Path(cls.HPO_DIR) / mode
-            if not hpo_dir.exists():
-                log.info("  [%s] — нет результатов", mode)
-                continue
-            models_found = []
-            for model_name in ("lstm", "itransformer", "patchtst", "tft", "xgboost"):
-                p = hpo_dir / f"{model_name}_best_params.json"
-                if p.exists():
-                    try:
-                        with open(p, encoding="utf-8") as f:
-                            r = json.load(f)
-                        models_found.append(
-                            f"{model_name}(val={r.get('best_value', '?'):.5f})"
-                        )
-                    except Exception:
-                        models_found.append(f"{model_name}(err)")
-            if models_found:
-                log.info("  [%s] ✓ %s", mode, ", ".join(models_found))
-            else:
-                log.info("  [%s] — нет результатов", mode)
-        log.info("─" * 60)
-
-    # ══════════════════════════════════════════════════════════════════════════
-    # РЕЖИМЫ ЗАПУСКА
-    # ══════════════════════════════════════════════════════════════════════════
+        cls.DAYS = 40; cls.HOUSEHOLDS = 60; cls.EPOCHS = 2
+        cls.PATIENCE = 2; cls.LR_PATIENCE = 1
+        cls.HISTORY_LENGTH = 48; cls.FORECAST_HORIZON = 24
+        cls.STORAGE_HORIZON = 240; cls.N_FEATURES = 26
+        cls.BATCH_SIZE = 64
+        cls.LSTM_UNITS_1 = 16; cls.LSTM_UNITS_2 = 16; cls.LSTM_UNITS_3 = 16
+        cls.LSTM_ATTN_HEADS = 2; cls.LSTM_TCN_FILTERS = 8
+        cls.DROPOUT_RATE = 0.10; cls.LSTM_LEARNING_RATE = 1e-3
+        cls.LSTM_USE_COSINE_DECAY = False
+        cls.TRANSFORMER_D_MODEL = 16; cls.TRANSFORMER_N_HEADS = 2
+        cls.TRANSFORMER_N_LAYERS = 1; cls.TRANSFORMER_DFF = 32
+        cls.TRANSFORMER_DROPOUT = 0.10; cls.TRANSFORMER_LEARNING_RATE = 1e-3
+        cls.VANILLA_TRANSFORMER_LR = 1e-3; cls.TRANSFORMER_STOCHASTIC_DEPTH = 0.0
+        cls.XGB_N_ESTIMATORS = 20
+        cls.GEN_INDUSTRIAL_LOADS = 2; cls.GEN_CITY_DISTRICTS = 3
+        logging.getLogger("smart_grid").warning(
+            "SMOKE MODE: %d дней, %d эпох — только проверка работоспособности, "
+            "метрики интерпретации не подлежат.", cls.DAYS, cls.EPOCHS,
+        )
 
     @classmethod
     def set_fast_mode(cls):
         cls.DAYS = 365; cls.HOUSEHOLDS = 250; cls.EPOCHS = 120
-        cls.PATIENCE = 20; cls.LR_PATIENCE = 8; cls.MIN_DELTA = 1e-5
+        cls.PATIENCE = 20; cls.LR_PATIENCE = 8
         cls.HISTORY_LENGTH = 48; cls.STORAGE_HORIZON = 720; cls.N_FEATURES = 26
-        cls.BATCH_SIZE = 32
         cls.LSTM_UNITS_1 = 48; cls.LSTM_UNITS_2 = 48; cls.LSTM_UNITS_3 = 48
         cls.LSTM_ATTN_HEADS = 4; cls.LSTM_TCN_FILTERS = 32
-        cls.DROPOUT_RATE = 0.25; cls.LSTM_LEARNING_RATE = 2e-4
-        cls.LSTM_USE_COSINE_DECAY = False
-        cls.LSTM_WARMUP_RATIO = 0.05
-        cls.LSTM_SEASONAL_BLEND_INIT = 0.60; cls.LSTM_HUBER_DELTA = 0.05
+        cls.DROPOUT_RATE = 0.25; cls.LSTM_LEARNING_RATE = 2e-4; cls.LSTM_USE_COSINE_DECAY = False
+        cls.LSTM_SEASONAL_BLEND_INIT = 0.30; cls.LSTM_HUBER_DELTA = 0.05
         cls.TRANSFORMER_D_MODEL = 64; cls.TRANSFORMER_N_HEADS = 4
-        cls.TRANSFORMER_N_LAYERS = 2; cls.ITRANSFORMER_N_LAYERS = 3
-        cls.TRANSFORMER_DFF = 128
+        cls.TRANSFORMER_N_LAYERS = 2; cls.TRANSFORMER_DFF = 128
         cls.TRANSFORMER_DROPOUT = 0.20; cls.TRANSFORMER_LEARNING_RATE = 3e-4
-        cls.TRANSFORMER_USE_COSINE_DECAY = False; cls.TRANSFORMER_WARMUP_RATIO = 0.05
-        cls.VANILLA_TRANSFORMER_LR = 1e-4; cls.TRANSFORMER_STOCHASTIC_DEPTH = 0.05
+        cls.VANILLA_TRANSFORMER_LR = 8e-5; cls.TRANSFORMER_STOCHASTIC_DEPTH = 0.05
         cls.PATCHTST_USE_REVIN = True
-        cls.PATCHTST_LEARNING_RATE = 3e-4
-        cls.PATCHTST_DROPOUT = 0.05
-        cls.PATCHTST_PATIENCE = 20
-        cls.VANILLA_USE_SEASONAL_RESIDUAL = True
-        cls.VANILLA_SEASONAL_BLEND_INIT = 0.60
-        cls.VANILLA_HUBER_DELTA = 0.05
-        cls.XGB_N_ESTIMATORS = 300
-        cls.GEN_EV_PENETRATION = 0.50
+        cls.VANILLA_USE_SEASONAL_RESIDUAL = True; cls.VANILLA_SEASONAL_BLEND_INIT = 0.35
+        cls.VANILLA_HUBER_DELTA = 0.05; cls.XGB_N_ESTIMATORS = 300
         cls.GEN_INDUSTRIAL_LOADS = 4; cls.GEN_CITY_DISTRICTS = 8
-
-        # ── Автозагрузка HPO-результатов ──────────────────────────────────────
-        if cls.HPO_AUTO_LOAD:
-            hpo_applied = cls.load_hpo_params("fast")
-            _mode_log = "fast"
-        else:
-            hpo_applied = {}
-            _mode_log = "fast (HPO отключён)"
-
         logging.getLogger("smart_grid").info(
-            "Fast mode v18: DAYS=%d EPOCHS=%d HISTORY=%d | "
-            "LSTM BiLSTM=%d TCN=%d | "
-            "PatchTST lr=%.0e drop=%.2f patience=%d | "
-            "HPO: %s",
-            cls.DAYS, cls.EPOCHS, cls.HISTORY_LENGTH,
-            cls.LSTM_UNITS_1, cls.LSTM_TCN_FILTERS,
-            cls.PATCHTST_LEARNING_RATE, cls.PATCHTST_DROPOUT, cls.PATCHTST_PATIENCE,
-            "применено" if any(hpo_applied.values()) else "нет данных",
-        )
+            "Fast mode: DAYS=%d HH=%d EPOCHS=%d HIST=%d | LSTM BiLSTM=%d TCN=%d | VanTr LR=%.0e",
+            cls.DAYS, cls.HOUSEHOLDS, cls.EPOCHS, cls.HISTORY_LENGTH,
+            cls.LSTM_UNITS_1, cls.LSTM_TCN_FILTERS, cls.VANILLA_TRANSFORMER_LR)
 
     @classmethod
     def set_optimal_mode(cls):
-        """
-        v18: автозагрузка HPO-результатов после установки базовых параметров.
-        Оптимальный режим — приоритет для HPO.
-        """
-        cls.DAYS = 730; cls.HOUSEHOLDS = 2500; cls.EPOCHS = 300
-        cls.PATIENCE = 50; cls.LR_PATIENCE = 12; cls.MIN_DELTA = 1e-5
-        cls.HISTORY_LENGTH = 192; cls.STORAGE_HORIZON = 720; cls.N_FEATURES = 26
-        cls.FORECAST_HORIZON = 24; cls.BATCH_SIZE = 16
-
-        # LSTM v13 — базовые значения (HPO может переопределить)
-        cls.LSTM_UNITS_1 = 128; cls.LSTM_UNITS_2 = 128; cls.LSTM_UNITS_3 = 128
-        cls.LSTM_ATTN_HEADS = 4; cls.LSTM_TCN_FILTERS = 64
-        cls.DROPOUT_RATE = 0.15
-        cls.LSTM_LEARNING_RATE = 1e-4
-        cls.LSTM_USE_COSINE_DECAY = True
-        cls.LSTM_WARMUP_RATIO = 0.05
-        cls.LSTM_SEASONAL_BLEND_INIT = 0.50
-        cls.LSTM_HUBER_DELTA = 0.05
-
-        # iTransformer / Transformer — базовые значения
-        cls.TRANSFORMER_D_MODEL = 128; cls.TRANSFORMER_N_HEADS = 4
-        cls.TRANSFORMER_N_LAYERS = 3
-        cls.ITRANSFORMER_N_LAYERS = 4
-        cls.TRANSFORMER_DFF = 256
-        cls.TRANSFORMER_DROPOUT = 0.08
-        cls.TRANSFORMER_LEARNING_RATE = 1.0e-4
-        cls.VANILLA_TRANSFORMER_LR = 1e-4
-        cls.TRANSFORMER_STOCHASTIC_DEPTH = 0.08
-        cls.TRANSFORMER_USE_COSINE_DECAY = True
-        cls.TRANSFORMER_WARMUP_RATIO = 0.05
+        # Усиленный режим для достижения более высокого R² у seq-моделей.
+        cls.DAYS = 730; cls.HOUSEHOLDS = 2500; cls.EPOCHS = 240
+        cls.PATIENCE = 25; cls.LR_PATIENCE = 10
+        cls.HISTORY_LENGTH = 48; cls.STORAGE_HORIZON = 720; cls.N_FEATURES = 26
+        cls.LSTM_UNITS_1 = 96; cls.LSTM_UNITS_2 = 96; cls.LSTM_UNITS_3 = 96
+        cls.LSTM_ATTN_HEADS = 4; cls.LSTM_TCN_FILTERS = 48
+        cls.DROPOUT_RATE = 0.12; cls.LSTM_LEARNING_RATE = 2.0e-4; cls.LSTM_USE_COSINE_DECAY = False
+        cls.LSTM_SEASONAL_BLEND_INIT = 0.35; cls.LSTM_HUBER_DELTA = 0.05
+        cls.TRANSFORMER_D_MODEL = 192; cls.TRANSFORMER_N_HEADS = 8
+        cls.TRANSFORMER_N_LAYERS = 5; cls.TRANSFORMER_DFF = 384
+        cls.TRANSFORMER_DROPOUT = 0.10; cls.TRANSFORMER_LEARNING_RATE = 2e-4
+        cls.VANILLA_TRANSFORMER_LR = 7e-5; cls.TRANSFORMER_STOCHASTIC_DEPTH = 0.05
         cls.PATCHTST_USE_REVIN = True
-        cls.VANILLA_USE_SEASONAL_RESIDUAL = True
-        cls.VANILLA_SEASONAL_BLEND_INIT = 0.60
+        cls.VANILLA_USE_SEASONAL_RESIDUAL = True; cls.VANILLA_SEASONAL_BLEND_INIT = 0.40
         cls.VANILLA_HUBER_DELTA = 0.05
-
-        # PatchTST — базовые значения
-        cls.PATCHTST_LEARNING_RATE = 3e-4
-        cls.PATCHTST_DROPOUT = 0.05
-        cls.PATCHTST_PATIENCE = 30
-
-        # XGBoost — базовые значения
-        cls.XGB_N_ESTIMATORS = 700; cls.XGB_COLSAMPLE = 0.50
-        cls.GEN_AR_SIGMA = 0.040
-        cls.GEN_EV_PENETRATION = 0.50
+        cls.XGB_N_ESTIMATORS = 500; cls.XGB_COLSAMPLE = 0.40
+        cls.GEN_AR_SIGMA = 0.030
         cls.GEN_INDUSTRIAL_LOADS = 8; cls.GEN_CITY_DISTRICTS = 12
-
-        # ── Автозагрузка HPO-результатов (ПОВЕРХ базовых значений) ───────────
-        hpo_applied = {}
-        if cls.HPO_AUTO_LOAD:
-            hpo_applied = cls.load_hpo_params("optimal")
-
-        hpo_note = (
-            ", ".join(k for k, v in hpo_applied.items() if v)
-            if any(hpo_applied.values())
-            else "нет — запустите experiments/hyperparameter_tuning.py --mode optimal"
-        )
-
         logging.getLogger("smart_grid").info(
-            "Optimal mode v18: DAYS=%d HISTORY=%d EPOCHS=%d PATIENCE=%d BATCH=%d | "
-            "LSTM TCN=%d BiLSTM=%d heads=%d lr=%.0e drop=%.2f blend=%.2f | "
-            "iTransformer d=%d h=%d L=%d drop=%.2f lr=%.0e | "
-            "PatchTST lr=%.0e drop=%.2f patience=%d | "
-            "HPO применено: [%s]",
-            cls.DAYS, cls.HISTORY_LENGTH, cls.EPOCHS, cls.PATIENCE, cls.BATCH_SIZE,
+            "Optimal mode: DAYS=%d HH=%d EPOCHS=%d HIST=%d | "
+            "LSTM TCN=%d BiLSTM=%d heads=%d lr=%.0e | "
+            "Trans d=%d h=%d L=%d lr=%.0e (VanTr %.0e) | STORAGE=%d ч",
+            cls.DAYS, cls.HOUSEHOLDS, cls.EPOCHS, cls.HISTORY_LENGTH,
             cls.LSTM_TCN_FILTERS, cls.LSTM_UNITS_1, cls.LSTM_ATTN_HEADS,
-            cls.LSTM_LEARNING_RATE, cls.DROPOUT_RATE, cls.LSTM_SEASONAL_BLEND_INIT,
-            cls.TRANSFORMER_D_MODEL, cls.TRANSFORMER_N_HEADS, cls.ITRANSFORMER_N_LAYERS,
-            cls.TRANSFORMER_DROPOUT, cls.VANILLA_TRANSFORMER_LR,
-            cls.PATCHTST_LEARNING_RATE, cls.PATCHTST_DROPOUT, cls.PATCHTST_PATIENCE,
-            hpo_note,
-        )
+            cls.LSTM_LEARNING_RATE,
+            cls.TRANSFORMER_D_MODEL, cls.TRANSFORMER_N_HEADS, cls.TRANSFORMER_N_LAYERS,
+            cls.TRANSFORMER_LEARNING_RATE, cls.VANILLA_TRANSFORMER_LR,
+            cls.STORAGE_HORIZON)
 
     @classmethod
     def set_full_mode(cls):
-        """Максимальное качество (full mode, v18)."""
-        cls.DAYS = 730; cls.HOUSEHOLDS = 2500; cls.EPOCHS = 400
-        cls.PATIENCE = 50; cls.LR_PATIENCE = 14; cls.MIN_DELTA = 1e-5
+        """Максимальное качество (full mode): больше данных + более ёмкие seq-модели."""
+        cls.DAYS = 730; cls.HOUSEHOLDS = 2500; cls.EPOCHS = 320
+        cls.PATIENCE = 35; cls.LR_PATIENCE = 12
         cls.HISTORY_LENGTH = 192; cls.STORAGE_HORIZON = 720; cls.N_FEATURES = 26
         cls.BATCH_SIZE = 8
+        # На 730 днях и большом количестве окон можно использовать более ёмкий LSTM.
         cls.LSTM_UNITS_1 = 128; cls.LSTM_UNITS_2 = 128; cls.LSTM_UNITS_3 = 128
         cls.LSTM_ATTN_HEADS = 8; cls.LSTM_TCN_FILTERS = 64
-        cls.DROPOUT_RATE = 0.15
-        cls.LSTM_LEARNING_RATE = 8e-5
-        cls.LSTM_USE_COSINE_DECAY = True
-        cls.LSTM_WARMUP_RATIO = 0.05
-        cls.LSTM_SEASONAL_BLEND_INIT = 0.65; cls.LSTM_HUBER_DELTA = 0.05
+        cls.DROPOUT_RATE = 0.18; cls.LSTM_LEARNING_RATE = 1.2e-4; cls.LSTM_USE_COSINE_DECAY = False
+        cls.LSTM_SEASONAL_BLEND_INIT = 0.35; cls.LSTM_HUBER_DELTA = 0.05
         cls.TRANSFORMER_D_MODEL = 192; cls.TRANSFORMER_N_HEADS = 8
-        cls.TRANSFORMER_N_LAYERS = 4; cls.ITRANSFORMER_N_LAYERS = 5
-        cls.TRANSFORMER_DFF = 512
-        cls.TRANSFORMER_DROPOUT = 0.10; cls.TRANSFORMER_LEARNING_RATE = 8e-5
-        cls.VANILLA_TRANSFORMER_LR = 8e-5; cls.TRANSFORMER_STOCHASTIC_DEPTH = 0.08
-        cls.TRANSFORMER_USE_COSINE_DECAY = True; cls.TRANSFORMER_WARMUP_RATIO = 0.05
+        cls.TRANSFORMER_N_LAYERS = 5; cls.TRANSFORMER_DFF = 384
+        cls.TRANSFORMER_DROPOUT = 0.12; cls.TRANSFORMER_LEARNING_RATE = 2e-4
+        cls.VANILLA_TRANSFORMER_LR = 5e-5; cls.TRANSFORMER_STOCHASTIC_DEPTH = 0.08
         cls.PATCHTST_USE_REVIN = True
-        cls.PATCHTST_LEARNING_RATE = 5e-4
-        cls.PATCHTST_DROPOUT = 0.05
-        cls.PATCHTST_PATIENCE = 35
-        cls.VANILLA_USE_SEASONAL_RESIDUAL = True
-        cls.VANILLA_SEASONAL_BLEND_INIT = 0.65
+        cls.VANILLA_USE_SEASONAL_RESIDUAL = True; cls.VANILLA_SEASONAL_BLEND_INIT = 0.40
         cls.VANILLA_HUBER_DELTA = 0.05
         cls.XGB_N_ESTIMATORS = 900; cls.XGB_COLSAMPLE = 0.35
-        cls.GEN_AR_SIGMA = 0.035
-        cls.GEN_EV_PENETRATION = 0.55
+        cls.GEN_AR_SIGMA = 0.028
         cls.GEN_INDUSTRIAL_LOADS = 10; cls.GEN_CITY_DISTRICTS = 16
-
-        # ── Автозагрузка HPO-результатов ──────────────────────────────────────
-        # Full mode использует HPO результаты optimal mode как fallback,
-        # если собственных результатов ещё нет.
-        hpo_applied = {}
-        if cls.HPO_AUTO_LOAD:
-            hpo_applied = cls.load_hpo_params("full")
-            if not any(hpo_applied.values()):
-                # Fallback на optimal HPO
-                hpo_applied = cls.load_hpo_params("optimal")
-                if any(hpo_applied.values()):
-                    logging.getLogger("smart_grid").info(
-                        "HPO: full mode результаты не найдены, "
-                        "используются optimal mode параметры"
-                    )
-
-        hpo_note = (
-            ", ".join(k for k, v in hpo_applied.items() if v)
-            if any(hpo_applied.values())
-            else "нет"
-        )
         logging.getLogger("smart_grid").info(
-            "Full mode v18: DAYS=%d HH=%d EPOCHS=%d HIST=%d | "
-            "LSTM BiLSTM=%d TCN=%d attn=%dh lr=%.0e blend=%.2f | "
-            "PatchTST lr=%.0e drop=%.2f patience=%d | "
-            "iTransformer d=%d h=%d L=%d lr=%.0e | "
-            "HPO применено: [%s]",
+            "Full mode: DAYS=%d HH=%d EPOCHS=%d HIST=%d | "
+            "LSTM BiLSTM=%d TCN=%d attn=%dh lr=%.0e drop=%.2f | "
+            "Trans d=%d h=%d L=%d dff=%d lr=%.0e van_lr=%.0e | Districts=%d",
             cls.DAYS, cls.HOUSEHOLDS, cls.EPOCHS, cls.HISTORY_LENGTH,
-            cls.LSTM_UNITS_1, cls.LSTM_TCN_FILTERS, cls.LSTM_ATTN_HEADS,
-            cls.LSTM_LEARNING_RATE, cls.LSTM_SEASONAL_BLEND_INIT,
-            cls.PATCHTST_LEARNING_RATE, cls.PATCHTST_DROPOUT, cls.PATCHTST_PATIENCE,
-            cls.TRANSFORMER_D_MODEL, cls.TRANSFORMER_N_HEADS, cls.ITRANSFORMER_N_LAYERS,
-            cls.VANILLA_TRANSFORMER_LR,
-            hpo_note,
-        )
+            cls.LSTM_UNITS_1, cls.LSTM_TCN_FILTERS, cls.LSTM_ATTN_HEADS, cls.LSTM_LEARNING_RATE, cls.DROPOUT_RATE,
+            cls.TRANSFORMER_D_MODEL, cls.TRANSFORMER_N_HEADS, cls.TRANSFORMER_N_LAYERS, cls.TRANSFORMER_DFF,
+            cls.TRANSFORMER_LEARNING_RATE, cls.VANILLA_TRANSFORMER_LR, cls.GEN_CITY_DISTRICTS)
 
     @classmethod
     def print_summary(cls):
         log = logging.getLogger("smart_grid")
-        log.info("─" * 60)
+        log.info("─" * 50)
         log.info("КОНФИГУРАЦИЯ:")
         log.info("  Данные:      %d дней, %d домохозяйств", cls.DAYS, cls.HOUSEHOLDS)
         log.info("  Признаки:    %d ковариат на шаг", cls.N_FEATURES)
         log.info("  История:     %d ч → прогноз %d ч", cls.HISTORY_LENGTH, cls.FORECAST_HORIZON)
-        log.info("  Обучение:    %d эпох, batch=%d, patience=%d, min_delta=%.0e",
-                 cls.EPOCHS, cls.BATCH_SIZE, cls.PATIENCE, cls.MIN_DELTA)
-        log.info("  LSTM:        BiLSTM=%d TCN=%d attn=%dh drop=%.2f lr=%g huber=%.2f "
-                 "blend=%.2f cosine=%s input=(%d,%d)",
+        log.info("  Обучение:    %d эпох, batch=%d, patience=%d", cls.EPOCHS, cls.BATCH_SIZE, cls.PATIENCE)
+        log.info("  LSTM:        BiLSTM=%d TCN=%d attn=%dh drop=%.2f lr=%g huber=%.2f input=(%d,%d)",
                  cls.LSTM_UNITS_1, cls.LSTM_TCN_FILTERS, cls.LSTM_ATTN_HEADS,
                  cls.DROPOUT_RATE, cls.LSTM_LEARNING_RATE, cls.LSTM_HUBER_DELTA,
-                 cls.LSTM_SEASONAL_BLEND_INIT, cls.LSTM_USE_COSINE_DECAY,
                  cls.HISTORY_LENGTH, cls.N_FEATURES)
-        log.info("  iTransformer: d=%d h=%d L=%d dff=%d drop=%.2f lr=%g "
-                 "seasonal_residual=%s blend=%.2f input=(%d,%d)",
-                 cls.TRANSFORMER_D_MODEL, cls.TRANSFORMER_N_HEADS, cls.ITRANSFORMER_N_LAYERS,
+        log.info("  Transformer: d=%d h=%d L=%d dff=%d drop=%.2f lr=%g (Vanilla lr=%g) input=(%d,%d)",
+                 cls.TRANSFORMER_D_MODEL, cls.TRANSFORMER_N_HEADS, cls.TRANSFORMER_N_LAYERS,
                  cls.TRANSFORMER_DFF, cls.TRANSFORMER_DROPOUT,
-                 cls.VANILLA_TRANSFORMER_LR,
-                 cls.VANILLA_USE_SEASONAL_RESIDUAL, cls.VANILLA_SEASONAL_BLEND_INIT,
+                 cls.TRANSFORMER_LEARNING_RATE, cls.VANILLA_TRANSFORMER_LR,
                  cls.HISTORY_LENGTH, cls.N_FEATURES)
-        log.info("  PatchTST:    lr=%g drop=%.2f patience=%d",
-                 cls.PATCHTST_LEARNING_RATE, cls.PATCHTST_DROPOUT, cls.PATCHTST_PATIENCE)
         log.info("  XGBoost:     n_est=%d depth=%d col=%.2f",
                  cls.XGB_N_ESTIMATORS, cls.XGB_MAX_DEPTH, cls.XGB_COLSAMPLE)
-        log.info("  Generator:   EV=%.0f%% Solar=%.0f%% IndustLoads=%d Districts=%d AR_phi=%.2f AR_sig=%.3f",
-                 cls.GEN_EV_PENETRATION * 100, cls.GEN_SOLAR_PENETRATION * 100,
-                 cls.GEN_INDUSTRIAL_LOADS, cls.GEN_CITY_DISTRICTS,
-                 cls.GEN_AR_PHI, cls.GEN_AR_SIGMA)
-        log.info("  Тарифы:      пик=%.2f день=%.2f ночь=%.2f руб/кВт·ч",
+        log.info("  Сценарий:    %s | EV=%.1f%% Solar=%.1f%% DSR=%d соб./год",
+                 cls.GEN_SCENARIO, cls.GEN_EV_PENETRATION*100,
+                 cls.GEN_SOLAR_PENETRATION*100, cls.GEN_DSR_EVENTS_PER_YEAR)
+        log.info("  Нагрузка:    %.0f кВт·ч/мес на домохозяйство, непром. доля %.0f%%",
+                 cls.GEN_KWH_PER_HOUSEHOLD_MONTH, cls.GEN_NONRESIDENTIAL_SHARE*100)
+        log.info("  Климат:      среднегод %.1f °C, амплитуда ±%.1f °C (янв %.1f / июль %.1f)",
+                 cls.GEN_TEMP_ANNUAL_MEAN, cls.GEN_TEMP_ANNUAL_AMPLITUDE,
+                 cls.GEN_TEMP_ANNUAL_MEAN - cls.GEN_TEMP_ANNUAL_AMPLITUDE,
+                 cls.GEN_TEMP_ANNUAL_MEAN + cls.GEN_TEMP_ANNUAL_AMPLITUDE)
+        log.info("  Тарифы:      пик=%.2f полупик=%.2f ночь=%.2f руб/кВт·ч "
+                 "(пик 07–10 и 17–21)",
                  cls.TARIFF_PEAK, cls.TARIFF_HALF_PEAK, cls.TARIFF_NIGHT)
-        log.info("  Батарея:     %.0f кВт·ч, SOC %.0f%%→%.0f%% (ΔE=%.0f кВт·ч)",
-                 cls.BATTERY_CAPACITY, cls.BATTERY_MIN_SOC * 100, cls.BATTERY_MAX_SOC * 100,
-                 (cls.BATTERY_MAX_SOC - cls.BATTERY_MIN_SOC) * cls.BATTERY_CAPACITY)
-
-        # Показываем статус HPO
-        cls.hpo_status()
-        log.info("─" * 60)
-
-    @classmethod
-    def get_generator_coefficients(cls) -> GeneratorCoefficients:
-        return GeneratorCoefficients(
-            temp_setpoint=cls.GEN_TEMP_SETPOINT,
-            temp_quadratic_coef=cls.GEN_TEMP_QUADRATIC_COEF,
-            humidity_threshold=cls.GEN_HUMIDITY_THRESHOLD,
-            humidity_coef=cls.GEN_HUMIDITY_COEF,
-            wind_temp_threshold=cls.GEN_WIND_TEMP_THRESHOLD,
-            wind_coef=cls.GEN_WIND_COEF,
-            early_bird_frac=cls.GEN_EARLY_BIRD_FRAC,
-            night_owl_frac=cls.GEN_NIGHT_OWL_FRAC,
-            ar_phi=cls.GEN_AR_PHI,
-            ar_sigma=cls.GEN_AR_SIGMA,
-            seasonal_winter_boost=cls.GEN_SEASONAL_WINTER_BOOST,
-            seasonal_summer_dip=cls.GEN_SEASONAL_SUMMER_DIP,
-            ev_penetration=cls.GEN_EV_PENETRATION,
-            solar_penetration=cls.GEN_SOLAR_PENETRATION,
-            industrial_loads=cls.GEN_INDUSTRIAL_LOADS,
-            city_districts=cls.GEN_CITY_DISTRICTS,
-        )
+        log.info("  Батарея:     %.0f кВт·ч, SOC %.0f%%→%.0f%% (ΔE=%.0f кВт·ч), КПД %.0f%%",
+                 cls.BATTERY_CAPACITY, cls.BATTERY_MIN_SOC*100, cls.BATTERY_MAX_SOC*100,
+                 (cls.BATTERY_MAX_SOC-cls.BATTERY_MIN_SOC)*cls.BATTERY_CAPACITY,
+                 cls.BATTERY_EFFICIENCY*100)
+        log.info("  Экономика:   CAPEX %.1f млн руб, деградация %.2f руб/кВт·ч оборота",
+                 cls.BATTERY_COST_RUB/1e6, cls.BATTERY_CYCLE_COST)
+        log.info("─" * 50)

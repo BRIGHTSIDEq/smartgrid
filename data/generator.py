@@ -1,53 +1,39 @@
 # -*- coding: utf-8 -*-
 """
-data/generator.py — Smart Grid v6: исправление EV-бага + усиление нелинейности.
+data/generator.py — синтетический генератор данных Smart Grid.
 
-ИСПРАВЛЕНИЯ v6:
-═══════════════════════════════════════════════════════════════════════════════
+Формирует почасовой ряд агрегированного потребления города и сопутствующие
+физические ковариаты. Учитываемые компоненты:
 
-БАГ #4 (КРИТИЧЕСКИЙ): EV time-wrap — ночная зарядка переносилась в тот же день.
-  БЫЛО:  abs_h = day_idx*24 + (base_h + h) % 24
-         Если base_h=22, h=2: (22+2)%24=0 → abs_h = day_idx*24+0 = 00:00 ТОГО ЖЕ ДНЯ.
-         Все ночные сессии (base_h=22,23,0,1,2,3) накладывались на hour 0 текущего дня.
-         Реальный вклад EV: 29-59 кВт (1.2% базовой нагрузки) вместо расчётных 120-240 кВт.
-  СТАЛО: abs_h = day_idx*24 + base_h + h  (без modulo!)
-         if abs_h >= hours: break
-         Зарядка с 22:00 на 5ч корректно охватывает часы 22,23,0(+1д),1(+1д),2(+1д).
+  Погода          температура (годовой + суточный ход, AR-шум, волны тепла/холода),
+                  влажность, скорость ветра, облачность;
+  Спрос           три поведенческих профиля домохозяйств (ранние/стандартные/
+                  ночные), районная структура города с маятниковой миграцией,
+                  праздники РФ, годовой тренд, режимные переключения;
+  Отклик на погоду квадратичная зависимость от отклонения температуры от уставки,
+                  сигмоидный вклад влажности при T>22°C, ветровой вклад при
+                  T<10°C, тройное взаимодействие температура×влажность×ветер;
+  Электротранспорт домашняя ночная и публичная дневная зарядка, коммерческий
+                  флот, пятничный кластер, всплеск при T<-15°C;
+  Генерация       распределённая солнечная с учётом облачности и сезона;
+  Управление      события Demand Side Response с последующим отскоком спроса;
+  Промышленность  независимые заводские нагрузки с марковским режимом работы;
+  Нелинейности    каскад спроса после аномальных часов и латентное «состояние
+                  сети» с памятью и порогами.
 
-УСИЛЕНИЕ нелинейности (нейросети должны победить LinReg):
-  1. EV penetration: 28% → 50% (больше EVs)
-  2. EV power: 6.5-11 кВт → 11-22 кВт (Level 2 зарядка)
-  3. Добавлен EV коммерческий флот: 3 грузовика × 30-50 кВт × 8-10ч/ночь
-  4. Industrial loads: 4 → 6 заводов, мощность выше
-  5. DSR события: 8 → 15/год, чаще и сильнее
-  6. "Demand cascade": после аномально высокого часа нагрузка держится высокой
-     ещё 3-6ч (AR-эффект на уровне событий, не просто шум)
-  7. Cold-snap EV surge: при T < -15°C EV заряжаются чаще (range anxiety)
+Возвращаются СЫРЫЕ физические величины. Нормировка признаков выполняется
+исключительно в data/preprocessing.py скалерами, обученными только на train, —
+иначе статистика тестовой части просачивается в обучающие признаки.
 
-Ожидаемый результат:
-  EV нагрузка: 1.2% → 8-12% базовой нагрузки
-  CV потребления: 0.386 → 0.42+
-  ACF(24): ~0.84 → ~0.75 (меньше автокорреляция → труднее для LinReg)
+История изменений — в CHANGELOG.md.
 """
 
 import logging
-import os
-import json
 from datetime import timedelta
-from typing import Tuple, Optional
+from typing import Tuple
 
 import numpy as np
 import pandas as pd
-from config import GeneratorCoefficients
-from data.components import (
-    build_household_aggregate,
-    compute_cascade_factor,
-    compute_dsr_rebound,
-    compute_grid_stress_nonlinear,
-    compute_weather,
-    simulate_ev_load,
-    simulate_industrial_load,
-)
 
 logger = logging.getLogger("smart_grid.data.generator")
 
@@ -60,7 +46,31 @@ def _gaussian_peak(hour_arr, center, width):
     return np.exp(-((hour_arr - center)**2) / (2 * width**2))
 
 
-def _build_household_profiles(hour_arr, is_weekend, is_holiday, weekend_scale=0.88):
+def _sample_event_starts(rng, candidate_idx, n_events, min_gap):
+    """
+    Выбирает начала погодных аномалий, разнесённые по всему сезону.
+
+    Наивная выборка «первые N часов сезона с шагом 50» сгруппировала бы все
+    события в первые двое суток, и их эффекты наложились бы друг на друга:
+    например, шесть волн холода подряд опускали среднюю температуру января
+    на несколько градусов ниже климатической нормы. Здесь начала выбираются
+    случайно по всему множеству подходящих часов с минимальным интервалом
+    между событиями.
+    """
+    if len(candidate_idx) == 0 or n_events <= 0:
+        return []
+    chosen = []
+    pool = np.array(candidate_idx)
+    for _ in range(int(n_events)):
+        if len(pool) == 0:
+            break
+        pick = int(rng.choice(pool))
+        chosen.append(pick)
+        pool = pool[np.abs(pool - pick) >= min_gap]
+    return sorted(chosen)
+
+
+def _build_household_profiles(hour_arr, is_weekend, is_holiday, weekend_scale=0.93):
     H = hour_arr.astype(np.float32)
     b = 0.65
     early_wd    = b + 0.90*_gaussian_peak(H,7.0,1.2) + 0.35*_gaussian_peak(H,12.5,1.5) + 0.45*_gaussian_peak(H,18.5,2.0)
@@ -98,41 +108,45 @@ def generate_holiday_mask(days=365, start_date="2024-01-01"):
 
 def generate_smartgrid_data(
     days=365, households=500, start_date="2024-01-01", seed=42,
-    temp_setpoint=18.0, temp_quadratic_coef=2.5e-4,
-    humidity_threshold=60.0, humidity_coef=0.30,
-    wind_temp_threshold=10.0, wind_coef=0.15,
+    temp_setpoint=18.0, cooling_setpoint=24.0,
+    heating_coef=2.0e-4, cooling_coef=1.2e-4,
+    temp_annual_mean=6.25, temp_annual_amplitude=12.75,
+    temp_min=-35.0, temp_max=38.0,
+    humidity_threshold=60.0, humidity_coef=0.10,
+    wind_temp_threshold=10.0, wind_coef=0.05,
     early_bird_frac=0.28, night_owl_frac=0.20,
-    ar_phi=0.65, ar_sigma=0.060,
-    seasonal_winter_boost=0.15, seasonal_summer_dip=0.10,
-    ev_penetration=0.50,          # v6: 28% → 50%
-    solar_penetration=0.22,
-    industrial_loads=6,           # v6: 4 → 6
+    ar_phi=0.65, ar_sigma=0.030,
+    seasonal_winter_boost=0.06, seasonal_summer_dip=0.04,
+    kwh_per_household_month=206.0,
+    nonresidential_share=0.45,
+    annual_trend=0.015,
+    ev_penetration=0.005,
+    ev_home_power_kw=(3.5, 7.4),
+    ev_public_power_kw=(22.0, 50.0),
+    ev_fleet_power_kw=(30.0, 60.0),
+    solar_penetration=0.002,
+    solar_panel_peak_kw=5.0,
+    dsr_events_per_year=10,
+    dsr_strength_range=(0.02, 0.06),
+    industrial_loads=6,
     city_districts=12,
-    coefficients: Optional[GeneratorCoefficients] = None,
 ):
-    if coefficients is not None:
-        temp_setpoint = coefficients.temp_setpoint
-        temp_quadratic_coef = coefficients.temp_quadratic_coef
-        humidity_threshold = coefficients.humidity_threshold
-        humidity_coef = coefficients.humidity_coef
-        wind_temp_threshold = coefficients.wind_temp_threshold
-        wind_coef = coefficients.wind_coef
-        early_bird_frac = coefficients.early_bird_frac
-        night_owl_frac = coefficients.night_owl_frac
-        ar_phi = coefficients.ar_phi
-        ar_sigma = coefficients.ar_sigma
-        seasonal_winter_boost = coefficients.seasonal_winter_boost
-        seasonal_summer_dip = coefficients.seasonal_summer_dip
-        ev_penetration = coefficients.ev_penetration
-        solar_penetration = coefficients.solar_penetration
-        industrial_loads = coefficients.industrial_loads
-        city_districts = coefficients.city_districts
+    """
+    Генерирует почасовой ряд потребления города и сопутствующие ковариаты.
 
+    Масштаб нагрузки задаётся не произвольным множителем, а фактическим
+    среднемесячным потреблением домохозяйства (`kwh_per_household_month`):
+    итоговый ряд принудительно приводится к этому среднему. Благодаря этому
+    абсолютные значения остаются сопоставимыми с реальными счетами и не
+    «уплывают» при изменении числа домохозяйств или состава компонентов.
+    """
     rng = np.random.default_rng(seed)
     city_districts = int(max(1, city_districts))
     logger.info(
-        "Генерация Smart Grid v6: %d дней, %d домохозяйств, районов=%d | EV=%.0f%% Solar=%.0f%%",
-        days, households, city_districts, ev_penetration*100, solar_penetration*100
+        "Генерация данных: %d дней, %d домохозяйств, районов=%d | "
+        "%.0f кВт·ч/мес на домохозяйство | EV=%.1f%% Solar=%.1f%%",
+        days, households, city_districts, kwh_per_household_month,
+        ev_penetration * 100, solar_penetration * 100,
     )
 
     hours = days * 24
@@ -153,13 +167,48 @@ def generate_smartgrid_data(
         if d.month == 1 and 1 <= d.day <= 8:
             ny_mask[i*24:(i+1)*24] = 1.0
 
-    weather = compute_weather(rng=rng, t=t, dates=dates, days=days)
-    temperature = weather.temperature
-    cloud_cover = weather.cloud_cover
-    humidity = weather.humidity
-    wind_speed = weather.wind_speed
-    heat_surge_factor = weather.heat_surge_factor
-    cold_wave_factor = weather.cold_wave_factor
+    # ── Температура ──────────────────────────────────────────────────────────
+    # Годовой ход задан климатическими нормами: средняя температура января и
+    # июля определяют среднее и амплитуду синусоиды.
+    temp_annual  = temp_annual_mean + temp_annual_amplitude*np.sin(2*np.pi*t/(24*365.25) - np.pi/2)
+    temp_diurnal = 3.5*np.sin(2*np.pi*(t%24)/24 - np.pi/4)
+    tn = np.zeros(hours); tn[0] = rng.normal(0,1.5)
+    for i in range(1,hours): tn[i] = 0.97*tn[i-1] + rng.normal(0,0.6)
+    temperature = np.clip(temp_annual + temp_diurnal + tn, temp_min, temp_max).astype(np.float32)
+
+    # Волны тепла и холода. Прирост нагрузки в жару умеренный: доля жилья
+    # с кондиционированием в России невелика, поэтому летние пики выражены
+    # заметно слабее, чем в странах с массовым охлаждением.
+    summer_hours = np.where((dates.month >= 6) & (dates.month <= 8))[0]
+    winter_hours = np.where((dates.month == 12) | (dates.month <= 2))[0]
+
+    heat_surge_factor = np.ones(hours, np.float32)
+    for idx in _sample_event_starts(rng, summer_hours, max(1, int(days/365*2)), min_gap=240):
+        e = min(idx + int(rng.integers(48,120)), hours)
+        temperature[idx:e] = np.clip(temperature[idx:e]+rng.uniform(5,9), temp_min, temp_max)
+        heat_surge_factor[idx:e] = rng.uniform(1.04,1.10)
+
+    cold_wave_factor = np.ones(hours, np.float32)
+    for idx in _sample_event_starts(rng, winter_hours, max(1, int(days/365*3)), min_gap=336):
+        e = min(idx + int(rng.integers(72,168)), hours)
+        temperature[idx:e] = np.clip(temperature[idx:e]-rng.uniform(4,8), temp_min, temp_max)
+        cold_wave_factor[idx:e] = rng.uniform(1.04,1.09)
+
+    # Облачность
+    cloud_annual = 0.52 + 0.18*np.cos(2*np.pi*t/(24*365.25)+np.pi)
+    cn = np.zeros(hours); cn[0] = rng.normal(0,0.08)
+    for i in range(1,hours): cn[i] = 0.92*cn[i-1] + rng.normal(0,0.06)
+    cloud_cover = np.clip(cloud_annual+cn, 0.0, 1.0).astype(np.float32)
+
+    # Влажность
+    hum = 60.0 + 8.0*np.sin(2*np.pi*t/(24*365.25))
+    hn = np.zeros(hours); hn[0]=rng.normal(0,5.0)
+    for i in range(1,hours): hn[i]=0.85*hn[i-1]+rng.normal(0,3.0)
+    humidity = np.clip(hum+hn, 20.0, 98.0).astype(np.float32)
+
+    # Ветер
+    wind_base = 4.0+2.5*np.cos(2*np.pi*t/(24*365.25)+np.pi)
+    wind_speed = np.clip(wind_base+rng.exponential(2.0,hours), 0.0, 30.0).astype(np.float32)
 
     # Профили домохозяйств + behavioral regime switching
     n_early    = int(households * early_bird_frac)
@@ -167,16 +216,15 @@ def generate_smartgrid_data(
     n_standard = households - n_early - n_night
     logger.info("Типы: ранние=%d (%.0f%%), стандартные=%d (%.0f%%), ночные=%d (%.0f%%)",
                 n_early,100*n_early/households, n_standard,100*n_standard/households, n_night,100*n_night/households)
-    agg = build_household_aggregate(
-        rng=rng,
-        hour_arr=t % 24,
-        is_weekend=is_weekend,
-        holiday_mask=holiday_mask,
-        households=households,
-        early_bird_frac=early_bird_frac,
-        night_owl_frac=night_owl_frac,
-        days=days,
-    )
+    ep, sp, np_ = _build_household_profiles(t%24, is_weekend, holiday_mask)
+    agg = (n_early*ep + n_standard*sp + n_night*np_) / households
+    regime = np.ones(hours, np.float32)
+    s = 0
+    while s < days:
+        se = min(s + int(rng.integers(55,90)), days)
+        regime[s*24:se*24] = 1.0 + rng.uniform(-0.09,0.09)
+        s = se
+    agg *= regime
 
     # ── ГОРОДСКАЯ СИМУЛЯЦИЯ: районная структура и маятниковая миграция ─────
     # Каждый район имеет свой профиль + чувствительность к погоде/выходным.
@@ -205,57 +253,143 @@ def generate_smartgrid_data(
     amp  = (seasonal_winter_boost + seasonal_summer_dip)/2
     seasonal_drift = (1.0 + mid + amp*np.cos(2*np.pi*day_of_year/365)).astype(np.float32)
 
-    T_diff = temperature - temp_setpoint
-    temp_q  = temp_quadratic_coef*(T_diff**2)
+    # ── Отклик нагрузки на погоду (асимметричный) ────────────────────────────
+    # В России отопление преимущественно центральное или газовое, а
+    # кондиционирование распространено слабо. Поэтому электрический отклик на
+    # холод (освещение, циркуляционные насосы, локальные обогреватели) заметно
+    # сильнее отклика на жару. Симметричная парабола вокруг уставки, уместная
+    # для стран с электроотоплением и массовым охлаждением, здесь завысила бы
+    # летний пик и исказила сезонность.
+    cold_deg = np.maximum(temp_setpoint - temperature, 0.0)
+    warm_deg = np.maximum(temperature - cooling_setpoint, 0.0)
+    temp_q = (heating_coef*(cold_deg**2) + cooling_coef*(warm_deg**2)).astype(np.float32)
+
     sig_hum = _sigmoid((humidity-humidity_threshold)/10.0)
     hum_fac = np.where(temperature>22.0, humidity_coef*sig_hum, 0.0).astype(np.float32)
     wnd_fac = np.where(temperature<wind_temp_threshold, wind_coef*np.log1p(wind_speed), 0.0).astype(np.float32)
     triple  = np.where((temperature>28.0)&(humidity>68.0)&(wind_speed>6.0),
-                       0.07*sig_hum*np.log1p(wind_speed)/4.0, 0.0).astype(np.float32)
+                       0.03*sig_hum*np.log1p(wind_speed)/4.0, 0.0).astype(np.float32)
     temp_response = (1.0+temp_q+hum_fac+wnd_fac+triple).astype(np.float32)
 
-    trend = (1.0+0.05*(t/(24*365.25))).astype(np.float32)
+    trend = (1.0+annual_trend*(t/(24*365.25))).astype(np.float32)
 
     # Аномалии
+    # Амплитуды подобраны так, чтобы коэффициент заполнения графика
+    # (среднее / максимум) остался в реальном диапазоне 0.55-0.75:
+    # редкие всплески и провалы не должны растягивать размах нагрузки вдвое.
     anomaly_factor = np.ones(hours, np.float32)
     for _ in range(max(2, days//int(rng.integers(30,61)))):
         i = int(rng.integers(24,hours-24))
-        anomaly_factor[i:i+int(rng.integers(3,7))] *= rng.uniform(1.20,1.40)
-    for _ in range(max(1,days//90)):
+        anomaly_factor[i:i+int(rng.integers(3,7))] *= rng.uniform(1.08,1.18)
+    for _ in range(max(1,days//90)):        # плановые отключения
         i = int(rng.integers(48,hours-48))
-        anomaly_factor[i:i+int(rng.integers(4,9))] *= 0.15
-    for _ in range(max(2,days//30)):
+        anomaly_factor[i:i+int(rng.integers(4,9))] *= rng.uniform(0.55,0.70)
+    for _ in range(max(2,days//30)):        # кратковременные провалы
         i = int(rng.integers(24,hours-24))
-        anomaly_factor[i:i+int(rng.integers(1,4))] *= 0.30
+        anomaly_factor[i:i+int(rng.integers(1,4))] *= rng.uniform(0.70,0.85)
 
     # AR шум GARCH
-    pm = ((hour_of_day>=7)&(hour_of_day<10)|(hour_of_day>=18)&(hour_of_day<21)).astype(float)
+    pm = ((hour_of_day>=7)&(hour_of_day<10)|(hour_of_day>=17)&(hour_of_day<21)).astype(float)
     te = (np.abs(temperature-temp_setpoint)>15).astype(float)
     sigma_t = ar_sigma*(1.0+0.7*pm+0.5*te)
     ar = np.zeros(hours); ar[0]=rng.normal(0,ar_sigma)
     for i in range(1,hours): ar[i]=ar_phi*ar[i-1]+rng.normal(0,float(sigma_t[i]))
     ar = ar.astype(np.float32)
 
-    base_scale = float(households)*10.0
-    base_consumption = (
+    # ── Масштабирование к фактическому потреблению ───────────────────────────
+    # Форма профиля собрана из безразмерных множителей; абсолютный уровень
+    # задаётся отдельно — по среднемесячному потреблению домохозяйства.
+    # Нормировка на собственное среднее гарантирует, что добавление любого
+    # нового множителя не сдвинет итоговый уровень нагрузки.
+    base_shape = (
         agg*holiday_base_reduction*seasonal_drift*temp_response
         *district_curve
-        *heat_surge_factor*cold_wave_factor*anomaly_factor*(1.0+ar)*trend*base_scale
+        *heat_surge_factor*cold_wave_factor*anomaly_factor*(1.0+ar)*trend
+    ).astype(np.float64)
+
+    hours_per_month = 8766.0 / 12.0
+    residential_mean_kw = float(households) * kwh_per_household_month / hours_per_month
+    base_consumption = (
+        base_shape * (residential_mean_kw / max(base_shape.mean(), 1e-9))
     ).astype(np.float32)
+
+    logger.info("  Бытовая нагрузка: среднее %.1f кВт (%.0f кВт·ч/мес на домохозяйство)",
+                residential_mean_kw, kwh_per_household_month)
 
     # ══════════════════════════════════════════════════════════════════════
     # EV ЗАРЯДКА (v6: исправлен time-wrap баг + увеличена мощность)
     # ══════════════════════════════════════════════════════════════════════
-    ev_load_raw = simulate_ev_load(
-        rng=rng,
-        days=days,
-        hours=hours,
-        households=households,
-        ev_penetration=ev_penetration,
-        weekday=weekday,
-        holiday_mask_daily=holiday_mask_daily,
-        temperature=temperature,
-    )
+    n_ev = int(households * ev_penetration)
+    ev_load_raw = np.zeros(hours, np.float64)
+
+    for day_idx in range(days):
+        is_we_day  = bool(weekday[day_idx*24] >= 5)
+        is_hol_day = bool(holiday_mask_daily[day_idx] > 0)
+        is_cold    = bool(temperature[day_idx*24] < -15)  # cold snap = range anxiety
+
+        # Больше зарядок в холодные дни (range anxiety)
+        charge_prob = 0.90 if is_cold else 0.85
+        n_charging  = int(rng.binomial(n_ev, charge_prob))
+        home_frac   = 0.72 if (is_we_day or is_hol_day) else 0.62
+
+        for _ in range(n_charging):
+            if rng.random() < home_frac:
+                # Домашняя зарядка: преимущественно ночью. Мощность типична
+                # для российских частных подключений: однофазные 16 А (3.5 кВт)
+                # и 32 А (7.4 кВт). Трёхфазные 11–22 кВт в жилом секторе редки.
+                base_h = int(rng.choice([21, 22, 23, 0, 1, 2, 3, 20]))
+                power = rng.uniform(*ev_home_power_kw)
+            else:
+                # Публичная станция: дневные часы, мощность выше
+                base_h = int(rng.integers(9, 18))
+                power = rng.uniform(*ev_public_power_kw)
+
+            duration = int(rng.integers(3, 9))  # 3-8 часов
+
+            # ── ИСПРАВЛЕНИЕ v6 (КРИТИЧЕСКОЕ) ─────────────────────────────
+            # БЫЛО: abs_h = day_idx*24 + (base_h + h) % 24
+            #   При base_h=22, h=2: (22+2)%24=0 → hour 0 ТЕКУЩЕГО дня!
+            #   Все ночные сессии накладывались на midnight того же дня.
+            #   Реальный EV вклад был в 4-6× ниже расчётного.
+            # СТАЛО: без modulo — правильно распространяется на следующий день.
+            for h_offset in range(duration):
+                abs_h = day_idx * 24 + base_h + h_offset
+                if abs_h >= hours:
+                    break
+                ev_load_raw[abs_h] += power
+            # ── конец исправления ─────────────────────────────────────────
+
+        # Пятничный кластер: часть владельцев заряжается перед выходными
+        if weekday[day_idx*24] == 4 and not is_hol_day:
+            peak_h = day_idx*24 + 21
+            if peak_h < hours:
+                ev_load_raw[peak_h] += n_ev * 0.15 * rng.uniform(0.8, 1.2) * ev_home_power_kw[1]
+
+        # Всплеск в сильный мороз: падение запаса хода вынуждает заряжаться чаще
+        if is_cold:
+            surge_h = day_idx*24 + 19
+            if surge_h < hours:
+                ev_load_raw[surge_h] += n_ev * 0.10 * rng.uniform(0.8, 1.2) * ev_home_power_kw[0]
+
+    # Коммерческий парк: депо заряжает грузовики ночью перед рабочим днём.
+    # Один парк примерно на тысячу домохозяйств — иначе коммерческая зарядка
+    # начинает доминировать над бытовой при низком проникновении легковых EV.
+    n_commercial = max(0, households // 1000)
+    for _ in range(n_commercial):
+        depot_start = int(rng.integers(21, 24))  # Начало зарядки в 21-23ч
+        kw_truck    = rng.uniform(*ev_fleet_power_kw)
+        n_trucks    = int(rng.integers(2, 5))    # 2-4 грузовика
+        for day_idx in range(days):
+            # Заряжаются только если завтра рабочий день
+            next_wd = (day_idx+1) % 7
+            if next_wd < 5 and rng.random() < 0.85:
+                duration = int(rng.integers(8, 11))
+                for h_offset in range(duration):
+                    abs_h = day_idx*24 + depot_start + h_offset
+                    if abs_h >= hours: break
+                    ev_load_raw[abs_h] += kw_truck * n_trucks * rng.uniform(0.90, 1.05)
+
+    ev_load_raw = ev_load_raw.astype(np.float32)
 
     # ── СОЛНЕЧНАЯ ГЕНЕРАЦИЯ ────────────────────────────────────────────────
     n_solar = int(households * solar_penetration)
@@ -263,15 +397,19 @@ def generate_smartgrid_data(
     solar_profile = np.maximum(0.0, np.exp(-((hour_f-12.5)**2)/(2*3.2**2)))
     solar_season  = 0.72 + 0.28*np.sin(2*np.pi*(day_of_year.astype(np.float32)-80)/365)
     cloud_factor  = 1.0 - 0.85*(cloud_cover**0.7)
-    solar_gen_raw = (solar_profile*solar_season*cloud_factor*5.0*n_solar).astype(np.float32)
+    solar_gen_raw = (solar_profile*solar_season*cloud_factor
+                     *solar_panel_peak_kw*n_solar).astype(np.float32)
 
-    # ── DEMAND RESPONSE (v6: чаще и сильнее) ──────────────────────────────
+    # ── УПРАВЛЕНИЕ СПРОСОМ ────────────────────────────────────────────────
+    # В России ценозависимое снижение потребления существует, но охватывает
+    # ограниченный круг участников, поэтому эффект на агрегированную нагрузку
+    # района измеряется единицами процентов, а не десятками.
     dsr_active   = np.zeros(hours, np.float32)
     dsr_strength = np.zeros(hours, np.float32)
-    # v6: 15 событий/год (было 8), длительность 4-8ч (было 2-6), снижение 20-40%
-    n_dsr = max(6, int(days/365*15))
+    n_dsr = max(2, int(days/365*dsr_events_per_year))
+    # События назначаются в пиковые тарифные часы: 07–10 и 17–21 в будни.
     peak_wd = np.where(
-        ((hour_of_day>=10)&(hour_of_day<17)|(hour_of_day>=18)&(hour_of_day<22))
+        (((hour_of_day>=7)&(hour_of_day<10)) | ((hour_of_day>=17)&(hour_of_day<21)))
         &(is_weekend==0)
     )[0]
     used_h = set()
@@ -279,8 +417,8 @@ def generate_smartgrid_data(
         if len(peak_wd) == 0: break
         a = int(rng.choice(peak_wd))
         if a in used_h: continue
-        dur = int(rng.integers(4, 9))    # v6: 4-8ч (было 2-6ч)
-        str_= rng.uniform(0.20, 0.40)   # v6: 20-40% снижение (было 15-32%)
+        dur = int(rng.integers(2, 5))
+        str_= rng.uniform(*dsr_strength_range)
         for h in range(dur):
             idx = a + h
             if idx < hours:
@@ -288,16 +426,45 @@ def generate_smartgrid_data(
                 dsr_strength[idx] = str_
                 used_h.add(idx)
 
-    # ── ПРОМЫШЛЕННЫЕ НАГРУЗКИ (v6: 6 заводов, выше мощность) ─────────────
-    industrial_load_raw = simulate_industrial_load(
-        rng=rng, hours=hours, industrial_loads=industrial_loads, weekday=weekday
-    )
+    # ── КОММЕРЧЕСКАЯ И ПРОМЫШЛЕННАЯ НАГРУЗКА ─────────────────────────────
+    # Мощность отдельных объектов задаётся не абсолютной величиной, а долей от
+    # бытовой нагрузки: так соотношение секторов остаётся правдоподобным при
+    # любом числе домохозяйств. Профиль — марковское чередование смен.
+    industrial_shape = np.zeros(hours, np.float64)
+    for ind_i in range(industrial_loads):
+        weight  = rng.uniform(0.5, 1.5)
+        p_wd = rng.uniform(0.65, 0.90)
+        p_we = rng.uniform(0.15, 0.40)
+        in_work = False
+        till_ch = int(rng.integers(4, 12))
+        for h in range(hours):
+            p = p_wd if weekday[h] < 5 else p_we
+            if till_ch <= 0:
+                in_work = rng.random() < (p if not in_work else (1-p*0.3))
+                till_ch = int(rng.integers(8,17) if in_work else rng.integers(4,9))
+            if in_work:
+                industrial_shape[h] += weight * rng.uniform(0.92, 1.08)
+            till_ch -= 1
+
+    nonres_mean_kw = residential_mean_kw * nonresidential_share
+    industrial_load_raw = (
+        industrial_shape * (nonres_mean_kw / max(industrial_shape.mean(), 1e-9))
+    ).astype(np.float32)
 
     # ── DEMAND CASCADE (v6 новое) ─────────────────────────────────────────
     # После аномально высокого часа нагрузка продолжает быть высокой (инерция).
     # Это требует от модели понимать "состояние" нагрузки, а не только текущие признаки.
     # LinReg с flat features не может уловить этот нелинейный decay-эффект.
-    cascade_factor = compute_cascade_factor(rng=rng, base_consumption=base_consumption, threshold_ratio=1.35)
+    cascade_factor = np.ones(hours, np.float32)
+    cascade_state  = 0.0
+    cascade_threshold = float(base_consumption.mean()) * 1.35  # 35% выше среднего
+    for h in range(hours):
+        bc = float(base_consumption[h])
+        if bc > cascade_threshold:
+            cascade_state = min(cascade_state + rng.uniform(0.02, 0.05), 0.12)
+        else:
+            cascade_state = max(cascade_state - 0.04, 0.0)
+        cascade_factor[h] = 1.0 + cascade_state
 
     # ── НЕЛИНЕЙНОЕ "СОСТОЯНИЕ СЕТИ" (v7): память + пороги + взаимодействия ──
     # Цель: сделать задачу менее линейной, но физически правдоподобной.
@@ -306,17 +473,38 @@ def generate_smartgrid_data(
     #   2) пиковых часов,
     #   3) EV-нагрузки,
     #   4) собственной инерции (latent state).
-    stress_nonlinear = compute_grid_stress_nonlinear(
-        rng=rng,
-        temperature=temperature,
-        temp_setpoint=temp_setpoint,
-        hour_of_day=hour_of_day,
-        ev_load_raw=ev_load_raw,
-        cloud_cover=cloud_cover,
-    )
+    grid_stress = np.zeros(hours, np.float32)
+    ev_norm_proxy = ev_load_raw / (float(ev_load_raw.max()) + 1e-6)
+    temp_extreme = np.clip(np.abs(temperature - temp_setpoint) / 22.0, 0.0, 1.4).astype(np.float32)
+    peak_hours = (((hour_of_day >= 7) & (hour_of_day < 10)) | ((hour_of_day >= 17) & (hour_of_day < 21))).astype(np.float32)
+    stress_state = 0.0
+    for h in range(hours):
+        trigger = (
+            0.40 * float(temp_extreme[h]) +
+            0.25 * float(peak_hours[h]) +
+            0.25 * float(ev_norm_proxy[h]) +
+            0.10 * float(cloud_cover[h])
+        )
+        stress_state = 0.90 * stress_state + 0.10 * trigger + float(rng.normal(0.0, 0.015))
+        stress_state = float(np.clip(stress_state, 0.0, 1.4))
+        grid_stress[h] = stress_state
+    stress_nonlinear = (
+        1.0
+        + 0.09 * _sigmoid(6.0 * (grid_stress - 0.55))
+        + 0.03 * (grid_stress ** 2)
+    ).astype(np.float32)
 
     # ── DSR rebound (v7): после снятия ограничения часть спроса возвращается ──
-    dsr_rebound = compute_dsr_rebound(rng=rng, dsr_active=dsr_active)
+    dsr_rebound = np.zeros(hours, np.float32)
+    for h in range(1, hours):
+        if dsr_active[h - 1] > 0 and dsr_active[h] == 0:
+            rebound_amp = rng.uniform(0.08, 0.16)
+            rebound_len = int(rng.integers(2, 5))
+            for k in range(rebound_len):
+                idx = h + k
+                if idx >= hours:
+                    break
+                dsr_rebound[idx] += rebound_amp * np.exp(-0.65 * k)
 
     # Праздничные спайки
     holiday_spike = np.ones(hours, np.float32)
@@ -325,11 +513,11 @@ def generate_smartgrid_data(
         if d.month == 1 and d.day == 1:
             for ho in [0, 1, 2]:
                 idx = i*24+ho
-                if idx < hours: holiday_spike[idx] = 1.38
+                if idx < hours: holiday_spike[idx] = 1.20
         elif d.month == 5 and d.day == 9:
             for ho in [20, 21, 22]:
                 idx = i*24+ho
-                if idx < hours: holiday_spike[idx] = 1.22
+                if idx < hours: holiday_spike[idx] = 1.12
 
     # ── ИТОГОВОЕ ПОТРЕБЛЕНИЕ ──────────────────────────────────────────────
     consumption = (
@@ -339,7 +527,9 @@ def generate_smartgrid_data(
         - solar_gen_raw
         + base_consumption * dsr_rebound
     ).astype(np.float32)
-    consumption = np.clip(consumption, 200.0, None)
+    # Нижняя отсечка задаётся относительно среднего уровня: абсолютная
+    # константа теряет смысл при изменении масштаба нагрузки.
+    consumption = np.clip(consumption, 0.05*float(np.mean(consumption)), None)
 
     ev_mean = float(ev_load_raw.mean())
     bc_mean = float(base_consumption.mean())
@@ -354,23 +544,27 @@ def generate_smartgrid_data(
                 float(stress_nonlinear.max()), float(dsr_rebound.max()))
     logger.info("  CV потребления: %.3f", float(consumption.std()/consumption.mean()))
 
-    # Нормализованные новые признаки
-    ev_norm    = (ev_load_raw / (float(ev_load_raw.max())+1.0)).astype(np.float32)
-    solar_norm = (solar_gen_raw / (float(solar_gen_raw.max())+1.0)).astype(np.float32)
+    # ── ВАЖНО: нормировка признаков здесь НЕ выполняется ─────────────────────
+    # Раньше ev/solar/temperature² делились на максимум по ВСЕМУ ряду, включая
+    # тестовую часть. Это утечка: статистика теста попадала в обучающие признаки
+    # в обход train-скалеров. Генератор теперь отдаёт сырые физические величины,
+    # а нормировка целиком выполняется в data/preprocessing.py скалерами,
+    # обученными только на train.
 
     # Tariff zones
+    # Тарифные зоны по действующему в РФ порядку: пиковая 07–10 и 17–21,
+    # полупиковая 10–17 и 21–23, ночная 23–07. В выходные и праздники
+    # пиковая зона не применяется.
     tariff_arr = np.empty(hours, dtype=object)
     for i in range(hours):
         h, wd, ih = int(hour_of_day[i]), int(weekday[i]), bool(holiday_mask[i])
         if h<7 or h>=23: tariff_arr[i]="night"
         elif wd>=5 or ih: tariff_arr[i]="day"
-        elif 10<=h<17 or 21<=h<23: tariff_arr[i]="peak"
+        elif (7<=h<10) or (17<=h<21): tariff_arr[i]="peak"
         else: tariff_arr[i]="day"
     is_peak_hour  = (tariff_arr=="peak").astype(np.int8)
     is_night_hour = (tariff_arr=="night").astype(np.int8)
 
-    temp_sq_raw = temperature**2
-    temperature_squared = (temp_sq_raw / (float(temp_sq_raw.max())+1e-8)).astype(np.float32)
     month = dates.month.values.astype(np.int8)
     season_arr = np.where((month>=3)&(month<=5),"spring",
                   np.where((month>=6)&(month<=8),"summer",
@@ -380,8 +574,8 @@ def generate_smartgrid_data(
         "timestamp": dates, "consumption": consumption,
         "temperature": temperature, "humidity": humidity, "wind_speed": wind_speed,
         "cloud_cover": cloud_cover,
-        "ev_load_norm": ev_norm,
-        "solar_gen_norm": solar_norm,
+        "ev_load_kw": ev_load_raw,
+        "solar_gen_kw": solar_gen_raw,
         "dsr_active": dsr_active,
         "hour": hour_of_day, "weekday": weekday.astype(np.int8),
         "is_weekend": is_weekend.astype(np.int8), "is_holiday": holiday_mask.astype(np.int8),
@@ -390,7 +584,6 @@ def generate_smartgrid_data(
         "heating_degree_days": np.maximum(0.0, 18.0-temperature).astype(np.float32),
         "cooling_degree_days": np.maximum(0.0, temperature-24.0).astype(np.float32),
         "day_of_year": day_of_year.astype(np.int16),
-        "temperature_squared": temperature_squared,
     })
     df["rolling_mean_24h"] = df["consumption"].rolling(24, min_periods=1).mean().astype(np.float32)
     df["rolling_std_24h"]  = df["consumption"].rolling(24, min_periods=2).std().fillna(0.0).astype(np.float32)
@@ -399,9 +592,136 @@ def generate_smartgrid_data(
     return df
 
 
+def validate_against_reference(df, households, reference=None, kwh_per_household_month=None):
+    """
+    Сверяет сгенерированный ряд с фактическими показателями реального мира.
+
+    Проверка отвечает на вопрос «похож ли синтетический город на настоящий»
+    и делает это воспроизводимо: при каждом прогоне в лог выводится таблица
+    «показатель — модель — эталон — вердикт». Если калибровка нарушится при
+    правке генератора, это будет видно сразу, а не после защиты.
+
+    Сверяемые показатели:
+      * среднемесячное потребление на домохозяйство;
+      * средняя температура января и июля;
+      * отношение зимнего потребления к летнему;
+      * отношение выходных к будням;
+      * коэффициент заполнения графика (среднее / максимум);
+      * коэффициент вариации;
+      * положение утреннего и вечернего максимумов;
+      * автокорреляция на суточном лаге.
+
+    Returns
+    -------
+    (passed: bool, rows: list[dict]) — вердикт и построчные результаты.
+    """
+    if reference is None:
+        from config import RealWorldReference as reference
+    if kwh_per_household_month is None:
+        kwh_per_household_month = reference.KWH_PER_HOUSEHOLD_MONTH
+
+    cons = df["consumption"].values.astype(np.float64)
+    temp = df["temperature"].values.astype(np.float64)
+    month = pd.DatetimeIndex(df["timestamp"]).month.values
+    hours_per_month = 8766.0 / 12.0
+
+    # Бытовая часть выделяется из общей нагрузки по доле непромышленных
+    # потребителей: сравнивать полное потребление района с бытовым счётом
+    # домохозяйства было бы некорректно.
+    nonres_share = getattr(reference, "NONRESIDENTIAL_SHARE", 0.0)
+    residential_mean = cons.mean() / (1.0 + nonres_share)
+    kwh_per_hh = residential_mean / households * hours_per_month
+
+    jan = temp[month == 1].mean() if (month == 1).any() else float("nan")
+    jul = temp[month == 7].mean() if (month == 7).any() else float("nan")
+
+    winter = cons[np.isin(month, (12, 1, 2))].mean() if np.isin(month, (12, 1, 2)).any() else np.nan
+    summer = cons[np.isin(month, (6, 7, 8))].mean() if np.isin(month, (6, 7, 8)).any() else np.nan
+    winter_summer = winter / summer if summer and not np.isnan(summer) else float("nan")
+
+    we = df[df["is_weekend"] == 1]["consumption"].mean()
+    wd = df[df["is_weekend"] == 0]["consumption"].mean()
+    we_wd = we / wd if wd else float("nan")
+
+    load_factor = cons.mean() / cons.max()
+    cv = cons.std() / cons.mean()
+
+    hourly = df.groupby("hour")["consumption"].mean()
+    morning_peak = int(hourly.loc[6:11].idxmax())
+    evening_peak = int(hourly.loc[16:23].idxmax())
+
+    c = cons - cons.mean()
+    var = np.var(c) + 1e-12
+    acf24 = float(np.mean(c[:-24] * c[24:]) / var) if len(c) > 24 else float("nan")
+
+    def row(name, value, lo, hi, unit=""):
+        # Показатель, который невозможно вычислить на данном периоде (например,
+        # летняя температура при прогоне длиной в два зимних месяца), помечается
+        # как «нет данных» и не считается отклонением от эталона.
+        available = not np.isnan(value)
+        return {"показатель": name, "модель": value, "эталон_мин": lo,
+                "эталон_макс": hi, "единица": unit,
+                "доступен": available,
+                "ok": available and (lo <= value <= hi)}
+
+    rows = [
+        row("Потребление на домохозяйство", kwh_per_hh,
+            *reference.KWH_PER_HOUSEHOLD_MONTH_RANGE, "кВт·ч/мес"),
+        row("Средняя температура января", jan,
+            reference.TEMP_JANUARY_MEAN - 3.0, reference.TEMP_JANUARY_MEAN + 3.0, "°C"),
+        row("Средняя температура июля", jul,
+            reference.TEMP_JULY_MEAN - 3.0, reference.TEMP_JULY_MEAN + 3.0, "°C"),
+        row("Отношение зима/лето", winter_summer,
+            *reference.WINTER_SUMMER_RATIO_RANGE, ""),
+        row("Отношение выходные/будни", we_wd,
+            *reference.WEEKEND_WEEKDAY_RATIO_RANGE, ""),
+        row("Коэффициент заполнения графика", load_factor,
+            *reference.LOAD_FACTOR_RANGE, ""),
+        row("Коэффициент вариации", cv, *reference.CV_RANGE, ""),
+        row("Час утреннего максимума", float(morning_peak),
+            *map(float, reference.MORNING_PEAK_HOURS), "ч"),
+        row("Час вечернего максимума", float(evening_peak),
+            *map(float, reference.EVENING_PEAK_HOURS), "ч"),
+        row("ACF на суточном лаге", acf24, reference.ACF24_MIN, 1.0, ""),
+    ]
+
+    logger.info("─" * 88)
+    logger.info("СВЕРКА С РЕАЛЬНЫМИ ДАННЫМИ (Россия, Московский регион)")
+    logger.info("%-34s %12s %22s %8s", "Показатель", "Модель", "Эталонный диапазон", "Вердикт")
+    logger.info("─" * 88)
+    for r in rows:
+        if not r["доступен"]:
+            verdict, shown = "нет данных", float("nan")
+        else:
+            verdict, shown = ("OK" if r["ok"] else "ОТКЛОН."), r["модель"]
+        logger.info(
+            "%-34s %12.2f %10.2f … %-9.2f %10s %s",
+            r["показатель"], shown, r["эталон_мин"], r["эталон_макс"],
+            verdict, r["единица"],
+        )
+    logger.info("─" * 88)
+
+    failed = [r["показатель"] for r in rows if r["доступен"] and not r["ok"]]
+    skipped = [r["показатель"] for r in rows if not r["доступен"]]
+    if skipped:
+        logger.info(
+            "Не проверялись (период прогона не покрывает нужные месяцы): %s",
+            "; ".join(skipped),
+        )
+    if failed:
+        logger.warning(
+            "Отклонения от эталона: %s. Это не ошибка выполнения, но при "
+            "интерпретации результатов такие расхождения нужно оговаривать.",
+            "; ".join(failed),
+        )
+    else:
+        logger.info("Все проверенные показатели укладываются в эталонные диапазоны.")
+    return (not failed), rows
+
+
 def validate_generated_data(df):
     passed = True
-    logger.info("Валидация данных Smart Grid v6...")
+    logger.info("Валидация сгенерированных данных...")
     bad = df["consumption"].isna().sum() + np.isinf(df["consumption"].values).sum()
     if bad: logger.error("  ❌ NaN/Inf: %d", bad); passed=False
     else: logger.info("  ✅ NaN/Inf: нет")
@@ -424,79 +744,9 @@ def validate_generated_data(df):
     logger.info("  ✅ ACF(lag=24) = %.3f", a24) if a24>=0.35 else logger.warning("  ⚠️  ACF(lag=24)=%.3f<0.35",a24)
     if len(df)>=336:
         logger.info("  ✅ ACF(lag=168) = %.3f", a168) if a168>=0.15 else logger.warning("  ⚠️  ACF(lag=168)=%.3f<0.15",a168)
-    ev_mean = float(df["ev_load_norm"].mean()); solar_mean = float(df["solar_gen_norm"].mean())
-    logger.info("  ℹ️  EV norm mean=%.3f | Solar norm mean=%.3f | DSR ч=%d | CV=%.3f",
+    ev_mean = float(df["ev_load_kw"].mean()); solar_mean = float(df["solar_gen_kw"].mean())
+    logger.info("  ℹ️  EV mean=%.1f кВт | Solar mean=%.1f кВт | DSR ч=%d | CV=%.3f",
                 ev_mean, solar_mean, int(df["dsr_active"].sum()),
                 float(df["consumption"].std()/df["consumption"].mean()))
     logger.info("Валидация %s", "ПРОЙДЕНА" if passed else "ПРОВАЛЕНА")
     return passed
-
-
-
-def load_or_generate_smartgrid_data(
-    csv_path: str,
-    force_regenerate: bool = False,
-    **generator_kwargs,
-) -> pd.DataFrame:
-    """
-    Загружает датасет из CSV, если он уже существует.
-    Иначе генерирует датасет, сохраняет в CSV и возвращает DataFrame.
-    """
-    meta_path = f"{csv_path}.meta.json"
-    expected_days = int(generator_kwargs.get("days", 365))
-    expected_rows = expected_days * 24
-    expected_start = str(generator_kwargs.get("start_date", "2024-01-01"))
-    expected_seed = int(generator_kwargs.get("seed", 42))
-    expected_households = int(generator_kwargs.get("households", 500))
-
-    if os.path.exists(csv_path) and not force_regenerate:
-        logger.info("CSV найден, проверяем совместимость кэша: %s", csv_path)
-        df = pd.read_csv(csv_path, parse_dates=["timestamp"])
-        cache_ok = True
-
-        if len(df) != expected_rows:
-            logger.warning("Кэш несовместим: rows=%d, ожидалось=%d. Будет регенерация.", len(df), expected_rows)
-            cache_ok = False
-        if "timestamp" in df.columns and len(df) > 0:
-            first_ts = str(pd.to_datetime(df["timestamp"].iloc[0]).date())
-            if first_ts != expected_start:
-                logger.warning("Кэш несовместим: start_date=%s, ожидалось=%s. Будет регенерация.", first_ts, expected_start)
-                cache_ok = False
-
-        if os.path.exists(meta_path):
-            try:
-                with open(meta_path, "r", encoding="utf-8") as f:
-                    meta = json.load(f)
-                meta_expected = {
-                    "days": expected_days,
-                    "households": expected_households,
-                    "start_date": expected_start,
-                    "seed": expected_seed,
-                }
-                if any(meta.get(k) != v for k, v in meta_expected.items()):
-                    logger.warning("Кэш-метаданные не совпадают с текущим конфигом. Будет регенерация.")
-                    cache_ok = False
-            except Exception as exc:
-                logger.warning("Не удалось прочитать meta кэша (%s). Будет регенерация.", exc)
-                cache_ok = False
-        else:
-            logger.warning("Meta-файл кэша не найден. Проверка по размеру/дате выполнена частично.")
-
-        if cache_ok:
-            logger.info("Кэш валиден, используем CSV без регенерации.")
-            return df
-
-    os.makedirs(os.path.dirname(csv_path), exist_ok=True)
-    logger.info("CSV не найден (или force_regenerate=True), генерируем данные...")
-    df = generate_smartgrid_data(**generator_kwargs)
-    df.to_csv(csv_path, index=False)
-    meta = {
-        "days": expected_days,
-        "households": expected_households,
-        "start_date": expected_start,
-        "seed": expected_seed,
-    }
-    with open(meta_path, "w", encoding="utf-8") as f:
-        json.dump(meta, f, ensure_ascii=False, indent=2)
-    logger.info("Данные сохранены в CSV: %s", csv_path)
-    return df

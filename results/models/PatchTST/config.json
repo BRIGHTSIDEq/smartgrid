@@ -1,5 +1,0 @@
-{
-  "HISTORY_LENGTH": 48,
-  "FORECAST_HORIZON": 24,
-  "model_name": "PatchTST"
-}

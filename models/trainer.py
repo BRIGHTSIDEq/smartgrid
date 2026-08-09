@@ -1,35 +1,36 @@
 # -*- coding: utf-8 -*-
 """
-models/trainer.py — v8 (ensemble min weight + bias correction).
+models/trainer.py — Универсальный тренер моделей.
 
-ИЗМЕНЕНИЯ v8 vs v7 (audit 2026-04-22):
+Единый интерфейс обучения и оценки для Keras-моделей и для sklearn/xgboost/
+наивных обёрток. Включает:
+  * EarlyStopping + ReduceLROnPlateau (последний отключается, если у оптимизатора
+    уже задано собственное расписание LR);
+  * автоматическое понижение batch_size при OOM;
+  * диагностику режима обучения (переобучение / недообучение);
+  * корректную диагностику автокорреляции остатков (см. ниже).
 
-[1] WeightedEnsemble.optimize_weights(): минимальный вес 0.1%.
-  БЫЛО: PatchTST получал вес 0.000 после Nelder-Mead оптимизации.
-        Это означало, что PatchTST вообще не участвовал в ансамбле,
-        несмотря на то что его MAE конкурентна с iTransformer.
-  СТАЛО: np.maximum(w_opt, 1e-3) перед нормировкой.
-         Каждая модель вносит минимум 0.1% вклада.
-         Итоговая сумма весов остаётся 1.0 после ренормировки.
-
-[2] ModelTrainer.predict_absolute(): поддержка post-hoc bias correction.
-  БЫЛО: нет коррекции систематического занижения.
-  СТАЛО: если trainer._bias_correction установлен (main.py step 5c),
-         он вычитается из предсказания перед возвратом.
-         MBE во всех моделях: −900…−2300 кВт·ч → ближе к 0.
-
-[3] v7 исправление (ReduceLROnPlateau vs CosineDecay) — сохранено.
+О ФОРМЕ ОСТАТКОВ — важно для интерпретации ACF и Durbin–Watson.
+Прогноз имеет форму (N, H): N перекрывающихся окон, H шагов горизонта.
+Окна идут со сдвигом 1 час, поэтому в РАЗВЁРНУТОМ массиве соседние элементы
+не образуют почасовой ряд: элемент k = i·H + h соответствует моменту i + h.
+Из-за этого «лаг 24» по развёрнутому массиву равен одному часу реального
+времени, а не суткам. Корректный почасовой ряд — это срез при ФИКСИРОВАННОМ
+шаге горизонта: residuals[:, h] индексируется номером окна i, а соседние окна
+отстоят ровно на час. Вся диагностика ниже работает именно по срезам.
+История изменений — в CHANGELOG.md.
 """
 
 import logging
 import os
 import time
 import gc
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 import matplotlib
 matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 import tensorflow as tf
 
 from utils.metrics import compute_all_metrics
@@ -39,93 +40,153 @@ logger = logging.getLogger("smart_grid.models.trainer")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+# ДИАГНОСТИКА ОСТАТКОВ
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _optimizer_has_lr_schedule(model: tf.keras.Model) -> bool:
+def _acf_lag(series: np.ndarray, lag: int) -> float:
+    """Выборочная автокорреляция ряда на заданном лаге."""
+    if lag <= 0 or len(series) <= lag:
+        return float("nan")
+    s = series - series.mean()
+    var = np.var(s) + 1e-12
+    return float(np.dot(s[lag:], s[:-lag]) / (len(s) * var))
+
+
+def _durbin_watson(series: np.ndarray) -> float:
+    d = np.diff(series)
+    return float(np.sum(d ** 2) / (np.sum(series ** 2) + 1e-12))
+
+
+def diagnose_residuals(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    model_name: str = "",
+    horizon_step: int = 0,
+) -> Dict[str, Any]:
     """
-    Проверяет, использует ли optimizer LearningRateSchedule.
-    Если True — ReduceLROnPlateau нельзя добавлять.
+    Диагностика остатков: DW и ACF на лагах 1/24/48/168, асимметрия, эксцесс.
+
+    Автокорреляция считается по срезу с ФИКСИРОВАННЫМ шагом горизонта
+    (`residuals[:, horizon_step]`) — только такой срез является настоящим
+    почасовым рядом. Дополнительно возвращается среднее по всем шагам
+    горизонта, чтобы вывод не зависел от выбора одного среза.
+
+    Parameters
+    ----------
+    y_true, y_pred : np.ndarray, shape (N, H) либо (N,)
+    horizon_step : int
+        Шаг горизонта для основной диагностики. 0 = прогноз на 1 час вперёд.
+
+    Returns
+    -------
+    dict: {"DW", "ACF_1", "ACF_24", "ACF_48", "ACF_168",
+           "DW_mean_over_h", "ACF_24_mean_over_h",
+           "skewness", "kurtosis", "recommendations"}
     """
-    if not isinstance(model, tf.keras.Model):
-        return False
-    try:
-        optimizer = model.optimizer
-        if optimizer is None:
-            return False
-        internal_lr = getattr(optimizer, "_learning_rate", None)
-        if internal_lr is not None:
-            return isinstance(
-                internal_lr,
-                tf.keras.optimizers.schedules.LearningRateSchedule,
-            )
-        current_val = optimizer.learning_rate
-        optimizer.learning_rate = current_val
-        return False
-    except TypeError:
-        return True
-    except Exception:
-        return False
+    resid_2d = np.atleast_2d(np.asarray(y_true) - np.asarray(y_pred))
+    if resid_2d.shape[0] == 1 and resid_2d.shape[1] > 1:
+        # Пришёл одномерный непрерывный ряд — трактуем как единственный срез.
+        resid_2d = resid_2d.T
+    n_windows, horizon = resid_2d.shape
 
+    h = int(np.clip(horizon_step, 0, horizon - 1))
+    series = resid_2d[:, h].astype(np.float64)
 
-def diagnose_residuals(y_true, y_pred, model_name=""):
-    residuals = y_true.flatten() - y_pred.flatten()
-    n = len(residuals)
-    diff_resid = np.diff(residuals)
-    dw = float(np.sum(diff_resid**2) / (np.sum(residuals**2) + 1e-12))
+    dw = _durbin_watson(series)
+    acf_1 = _acf_lag(series, 1)
+    acf_24 = _acf_lag(series, 24)
+    acf_48 = _acf_lag(series, 48)
+    acf_168 = _acf_lag(series, 168)
 
-    def acf_lag(s, lag):
-        if len(s) <= lag: return float("nan")
-        s = s - s.mean(); var = np.var(s) + 1e-12
-        return float(np.dot(s[lag:], s[:-lag]) / (len(s)*var))
+    # Усреднение по всем шагам горизонта — устойчивее к выбору среза.
+    dw_all = [_durbin_watson(resid_2d[:, k].astype(np.float64)) for k in range(horizon)]
+    acf24_all = [_acf_lag(resid_2d[:, k].astype(np.float64), 24) for k in range(horizon)]
+    dw_mean = float(np.nanmean(dw_all))
+    acf24_mean = float(np.nanmean(acf24_all))
 
-    acf_1   = acf_lag(residuals, 1)
-    acf_24  = acf_lag(residuals, 24)
-    acf_48  = acf_lag(residuals, 48)
-    acf_168 = acf_lag(residuals, 168)
-    std  = np.std(residuals) + 1e-12
-    kurt = float(np.mean((residuals-residuals.mean())**4) / std**4)
-    skew = float(np.mean((residuals-residuals.mean())**3) / std**3)
+    flat = resid_2d.flatten()
+    std = np.std(flat) + 1e-12
+    kurt = float(np.mean((flat - flat.mean()) ** 4) / std ** 4)
+    skew = float(np.mean((flat - flat.mean()) ** 3) / std ** 3)
 
-    recs = []
-    if dw < 1.5:   recs.append(f"DW={dw:.3f} < 1.5: автокорреляция первого порядка.")
-    if abs(acf_24) > 0.10:
-        recs.append(f"ACF(24)={acf_24:.3f} > 0.10: суточная компонента в остатках.")
+    recommendations: List[str] = []
+    if dw_mean < 1.5:
+        recommendations.append(
+            f"DW={dw_mean:.3f} < 1.5: остатки положительно автокоррелированы — "
+            "модель систематически запаздывает за уровнем нагрузки."
+        )
+    if abs(acf24_mean) > 0.10:
+        recommendations.append(
+            f"ACF(24)={acf24_mean:.3f} > 0.10: суточная компонента не устранена "
+            "полностью, несмотря на наличие load_lag_24h среди признаков."
+        )
     if abs(acf_168) > 0.10:
-        recs.append(f"ACF(168)={acf_168:.3f} > 0.10: недельная компонента в остатках.")
-    if kurt > 5:   recs.append(f"Kurtosis={kurt:.2f} > 5: тяжёлые хвосты → Huber loss.")
-    elif kurt > 3: recs.append(f"Kurtosis={kurt:.2f} > 3 → используется Huber loss.")
+        recommendations.append(
+            f"ACF(168)={acf_168:.3f} > 0.10: недельная компонента не устранена."
+        )
+    if kurt > 5:
+        recommendations.append(
+            f"Kurtosis={kurt:.2f} > 5: очень тяжёлые хвосты — редкие крупные "
+            "промахи на аномалиях. Точечный прогноз стоит дополнить интервальным."
+        )
+    elif kurt > 3:
+        recommendations.append(
+            f"Kurtosis={kurt:.2f} > 3: тяжёлые хвосты, Huber loss оправдан."
+        )
 
     log = logging.getLogger("smart_grid.models.trainer")
-    log.info("─ Диагностика: %s (n=%d) ─", model_name or "?", n)
-    log.info("  DW=%.4f  ACF(1)=%.4f  ACF(24)=%.4f  ACF(48)=%.4f  ACF(168)=%.4f",
-             dw, acf_1, acf_24, acf_48, acf_168)
+    log.info("─ Диагностика остатков: %s (окон=%d, горизонт=%d, срез h=%d) ──",
+             model_name or "?", n_windows, horizon, h + 1)
+    log.info("  По срезу h=%d: DW=%.4f  ACF(1)=%.4f  ACF(24)=%.4f  ACF(48)=%.4f  ACF(168)=%.4f",
+             h + 1, dw, acf_1, acf_24, acf_48, acf_168)
+    log.info("  Среднее по всем шагам горизонта: DW=%.4f  ACF(24)=%.4f",
+             dw_mean, acf24_mean)
     log.info("  Skewness=%.4f  Kurtosis=%.4f", skew, kurt)
-    if recs:
-        log.info("  Рекомендации:")
-        for r in recs: log.info("    → %s", r)
+    if recommendations:
+        log.info("  ⚠️  Замечания:")
+        for rec in recommendations:
+            log.info("    → %s", rec)
     else:
-        log.info("  ✅ Остатки в норме.")
+        log.info("  ✅ Остатки в норме (DW≥1.5, |ACF(24)|<0.10, Kurt<3).")
+
     return {
-        "model": model_name, "n": n,
-        "DW": round(dw,4), "ACF_1": round(acf_1,4),
-        "ACF_24": round(acf_24,4), "ACF_48": round(acf_48,4),
-        "ACF_168": round(acf_168,4),
-        "skewness": round(skew,4), "kurtosis": round(kurt,4),
-        "recommendations": recs,
+        "model":              model_name,
+        "n_windows":          n_windows,
+        "horizon":            horizon,
+        "horizon_step":       h + 1,
+        "DW":                 round(dw, 4),
+        "ACF_1":              round(acf_1, 4),
+        "ACF_24":             round(acf_24, 4),
+        "ACF_48":             round(acf_48, 4),
+        "ACF_168":            round(acf_168, 4),
+        "DW_mean_over_h":     round(dw_mean, 4),
+        "ACF_24_mean_over_h": round(acf24_mean, 4),
+        "skewness":           round(skew, 4),
+        "kurtosis":           round(kurt, 4),
+        "recommendations":    recommendations,
     }
 
+# ══════════════════════════════════════════════════════════════════════════════
+# TRAINER
 
-def diagnose_training_regime(history, overfit_gap=0.02, underfit_floor=0.08):
+def diagnose_training_regime(history: Dict[str, List[float]], overfit_gap: float = 0.02, underfit_floor: float = 0.08) -> Dict[str, Any]:
+    """Simple heuristic detector of overfitting/underfitting by train/val MAE."""
     train_mae = history.get("mae") or history.get("mean_absolute_error") or []
-    val_mae   = history.get("val_mae") or history.get("val_mean_absolute_error") or []
+    val_mae = history.get("val_mae") or history.get("val_mean_absolute_error") or []
     if not train_mae or not val_mae:
         return {"status": "unknown", "reason": "mae_history_missing"}
-    train_last = float(train_mae[-1]); val_last = float(val_mae[-1])
+
+    train_last = float(train_mae[-1])
+    val_last = float(val_mae[-1])
     gap = val_last - train_last
-    if gap >= overfit_gap and train_last < underfit_floor:   status = "overfitting"
-    elif train_last >= underfit_floor and val_last >= underfit_floor: status = "underfitting"
-    else:                                                             status = "balanced"
+
+    if gap >= overfit_gap and train_last < underfit_floor:
+        status = "overfitting"
+    elif train_last >= underfit_floor and val_last >= underfit_floor:
+        status = "underfitting"
+    else:
+        status = "balanced"
+
     return {
         "status": status,
         "train_mae_last": train_last,
@@ -134,125 +195,98 @@ def diagnose_training_regime(history, overfit_gap=0.02, underfit_floor=0.08):
     }
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# СОСТАВНАЯ МЕТРИКА
-# ══════════════════════════════════════════════════════════════════════════════
-
-def composite_score(metrics):
-    """0.5*MAE + 0.3*RMSE + 0.2*|ACF24|*MAE — ниже = лучше."""
-    mae   = metrics.get("MAE",   float("inf"))
-    rmse  = metrics.get("RMSE",  float("inf"))
-    acf24 = abs(metrics.get("ACF_24", 0.0))
-    return 0.5 * mae + 0.3 * rmse + 0.2 * acf24 * mae
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# РЕКОНСТРУКЦИЯ ПРЕДСКАЗАНИЙ
-# ══════════════════════════════════════════════════════════════════════════════
-
-def _reconstruct_predictions(
-    y_model_output: np.ndarray,
-    data: Dict[str, Any],
-    split: str,
-) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    Реконструирует абсолютные предсказания и истинные значения в кВт·ч.
-
-    seasonal_diff=True:  y_pred = inverse_scale((y_out + Y_naive).clip(0))
-    seasonal_diff=False: y_pred = inverse_scale(y_out)
-    """
-    scaler = data["scaler"]
-    Y_true_target = data[f"Y_{split}"]
-
-    if data.get("seasonal_diff", False):
-        naive = data[f"Y_seasonal_naive_{split}"]
-        y_pred_abs = (y_model_output + naive).clip(0)
-        y_true_abs = (Y_true_target  + naive).clip(0)
-        y_pred = inverse_scale(scaler, y_pred_abs)
-        y_true = inverse_scale(scaler, y_true_abs)
-    else:
-        y_pred = inverse_scale(scaler, y_model_output)
-        y_true = inverse_scale(scaler, Y_true_target)
-
-    return y_pred, y_true
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# MODEL TRAINER
-# ══════════════════════════════════════════════════════════════════════════════
-
 class ModelTrainer:
-    """Универсальный тренер: Keras + sklearn через единый интерфейс."""
+    """
+    Универсальный тренер: Keras + sklearn/xgboost через единый интерфейс.
+    """
 
-    def __init__(self, model, model_name, models_dir="results/models", plots_dir="results/plots"):
-        self.model      = model
+    def __init__(
+        self,
+        model: Any,
+        model_name: str,
+        models_dir: str = "results/models",
+        plots_dir: str = "results/plots",
+    ) -> None:
+        self.model = model
         self.model_name = model_name
         self.models_dir = models_dir
-        self.plots_dir  = plots_dir
-        self.history    = None
-        self.train_time = 0.0
-        # Post-hoc bias correction (устанавливается из main.py step 5c)
-        # bias_correction = mean(y_pred_val - y_true_val) в кВт·ч
-        self._bias_correction: Optional[float] = None
+        self.plots_dir = plots_dir
+        self.history: Optional[tf.keras.callbacks.History] = None
+        self.train_time: float = 0.0
 
-    def train(self, data, epochs=200, batch_size=32, patience=25,
-              lr_patience=10, lr_factor=0.5, min_delta=1e-5):
+    def train(
+        self,
+        data: Dict[str, Any],
+        epochs: int = 200,
+        batch_size: int = 32,
+        patience: int = 25,
+        lr_patience: int = 10,
+        lr_factor: float = 0.5,
+        min_delta: float = 1e-5,
+    ) -> "ModelTrainer":
         logger.info("=" * 60)
         logger.info("Обучение модели: %s", self.model_name)
         logger.info("=" * 60)
+
         t0 = time.time()
         if isinstance(self.model, tf.keras.Model):
             self._train_keras(data, epochs, batch_size, patience,
                               lr_patience, lr_factor, min_delta)
         else:
             self._train_sklearn(data)
+
         self.train_time = time.time() - t0
         logger.info("%s обучена за %.1f сек", self.model_name, self.train_time)
         return self
 
-    def _train_keras(self, data, epochs, batch_size, patience,
-                     lr_patience, lr_factor, min_delta):
-        os.makedirs(self.models_dir, exist_ok=True)
+    def _train_keras(
+        self,
+        data: Dict[str, Any],
+        epochs: int,
+        batch_size: int,
+        patience: int,
+        lr_patience: int,
+        lr_factor: float,
+        min_delta: float,
+    ) -> None:
+        _has_schedule = False
+        try:
+            _opt = self.model.optimizer
+            _lr_cfg = _opt.get_config().get("learning_rate", None)
+            if isinstance(_lr_cfg, dict) and "class_name" in _lr_cfg:
+                _has_schedule = True
+            elif isinstance(_lr_cfg, tf.keras.optimizers.schedules.LearningRateSchedule):
+                _has_schedule = True
+        except Exception:
+            _has_schedule = False
 
-        use_lr_schedule = _optimizer_has_lr_schedule(self.model)
-
-        early_stop = tf.keras.callbacks.EarlyStopping(
-            monitor="val_loss",
-            patience=patience,
-            min_delta=min_delta,
-            restore_best_weights=True,
-            verbose=1,
-        )
-        checkpoint = tf.keras.callbacks.ModelCheckpoint(
-            filepath=os.path.join(self.models_dir, f"{self.model_name}_best.keras"),
-            monitor="val_loss",
-            save_best_only=True,
-            verbose=0,
-        )
-        callbacks = [early_stop, checkpoint]
-
-        if not use_lr_schedule:
-            reduce_lr = tf.keras.callbacks.ReduceLROnPlateau(
+        callbacks: List[tf.keras.callbacks.Callback] = [
+            tf.keras.callbacks.EarlyStopping(
+                monitor="val_loss",
+                patience=patience,
+                min_delta=min_delta,
+                restore_best_weights=True,
+                verbose=1,
+            ),
+        ]
+        if not _has_schedule:
+            callbacks.append(tf.keras.callbacks.ReduceLROnPlateau(
                 monitor="val_loss",
                 factor=lr_factor,
                 patience=lr_patience,
                 min_delta=min_delta,
-                min_lr=1e-7,
+                min_lr=1e-6,
                 verbose=1,
-            )
-            callbacks.append(reduce_lr)
-            logger.info("%s: использует ReduceLROnPlateau (float LR)", self.model_name)
+            ))
         else:
-            logger.info(
-                "%s: использует CosineDecay schedule — ReduceLROnPlateau отключён",
-                self.model_name,
-            )
+            logger.info("%s: LR schedule обнаружен → ReduceLROnPlateau отключён",
+                        self.model_name)
 
-        current_batch = batch_size
-        last_exc = None
+        current_batch = int(batch_size)
+        last_exc: Optional[Exception] = None
         while current_batch >= 4:
             try:
-                logger.info("%s: fit batch_size=%d", self.model_name, current_batch)
+                logger.info("%s: старт fit с batch_size=%d", self.model_name, current_batch)
                 self.history = self.model.fit(
                     data["X_train"], data["Y_train"],
                     validation_data=(data["X_val"], data["Y_val"]),
@@ -262,332 +296,249 @@ class ModelTrainer:
                     verbose=1,
                 )
                 actual_epochs = len(self.history.history["loss"])
-                best_epoch = int(np.argmin(
-                    self.history.history.get("val_loss", self.history.history["loss"])
-                )) + 1
-                best_val_loss = float(np.min(
-                    self.history.history.get("val_loss", self.history.history["loss"])
-                ))
-                logger.info("%s: %d эпох | best_epoch=%d | best_val_loss=%.6f",
-                            self.model_name, actual_epochs, best_epoch, best_val_loss)
-                diag = diagnose_training_regime(self.history.history)
+                logger.info("%s: обучение завершено за %d эпох",
+                            self.model_name, actual_epochs)
+                fit_diag = diagnose_training_regime(self.history.history)
                 logger.info(
-                    "%s: regime=%s train_mae=%.4f val_mae=%.4f gap=%.4f",
-                    self.model_name, diag.get("status","?"),
-                    diag.get("train_mae_last", float("nan")),
-                    diag.get("val_mae_last",   float("nan")),
-                    diag.get("generalization_gap", float("nan")),
+                    "%s: training regime=%s | train_mae=%.4f val_mae=%.4f gap=%.4f",
+                    self.model_name,
+                    fit_diag.get("status", "unknown"),
+                    fit_diag.get("train_mae_last", float("nan")),
+                    fit_diag.get("val_mae_last", float("nan")),
+                    fit_diag.get("generalization_gap", float("nan")),
                 )
                 return
             except tf.errors.ResourceExhaustedError as exc:
                 last_exc = exc
+                next_batch = current_batch // 2
+                logger.warning(
+                    "%s: ResourceExhausted/OOM при batch_size=%d. Повтор с batch_size=%d",
+                    self.model_name, current_batch, next_batch
+                )
                 gc.collect()
-                current_batch //= 2
-                logger.warning("%s: OOM. Повтор batch=%d", self.model_name, current_batch)
+                current_batch = next_batch
             except Exception as exc:
-                err_str = str(exc).lower()
-                if "out of memory" in err_str or "oom" in err_str:
+                if "out of memory" in str(exc).lower() or "oom" in str(exc).lower():
                     last_exc = exc
+                    next_batch = current_batch // 2
+                    logger.warning(
+                        "%s: OOM-подобная ошибка при batch_size=%d. Повтор с batch_size=%d",
+                        self.model_name, current_batch, next_batch
+                    )
                     gc.collect()
-                    current_batch //= 2
-                    logger.warning("%s: OOM. Повтор batch=%d", self.model_name, current_batch)
+                    current_batch = next_batch
                 else:
-                    logger.error("Ошибка %s: %s", self.model_name, exc)
+                    logger.error("Ошибка при обучении %s: %s", self.model_name, exc)
                     raise
 
-        if last_exc:
+        logger.error("%s: не удалось обучить модель даже с batch_size=4", self.model_name)
+        if last_exc is not None:
             raise last_exc
-        raise RuntimeError(f"{self.model_name}: training failed (all batch sizes exhausted)")
+        raise RuntimeError(f"{self.model_name}: training failed for unknown reason")
 
-    def _train_sklearn(self, data):
-        self.model.fit(
-            data["X_train"], data["Y_train"],
-            X_val=data.get("X_val"),
-            Y_val=data.get("Y_val"),
-        )
+    def _train_sklearn(self, data: Dict[str, Any]) -> None:
+        try:
+            self.model.fit(
+                data["X_train"], data["Y_train"],
+                X_val=data.get("X_val"),
+                Y_val=data.get("Y_val"),
+            )
+        except Exception as exc:
+            logger.error("Ошибка при обучении %s: %s", self.model_name, exc)
+            raise
 
-    def predict(self, X):
-        """Возвращает сырой output модели в нормированном пространстве."""
+    def predict(self, X: np.ndarray) -> np.ndarray:
         if isinstance(self.model, tf.keras.Model):
             return self.model.predict(X, verbose=0)
         return self.model.predict(X)
 
-    def _get_split_inputs(self, data: Dict[str, Any], split: str):
-        """Подбирает корректный входной тензор для конкретной модели."""
-        tft_key = f"X_tft_{split}"
-        if self.model_name == "TFT-Lite" and tft_key in data:
-            return data[tft_key]
-        return data[f"X_{split}"]
-
-    def predict_absolute(self, data: Dict[str, Any], split: str = "test") -> np.ndarray:
+    def mc_predict(
+        self,
+        X: np.ndarray,
+        n_samples: int = 50,
+    ) -> tuple:
         """
-        Возвращает предсказание в кВт·ч.
+        Monte Carlo Dropout: n_samples прогонов с training=True.
 
-        v8: если установлен _bias_correction (post-hoc, вычислен на val),
-            он вычитается из предсказания:
-              y_corrected = y_pred - bias_correction
-            где bias_correction = mean(y_pred_val - y_true_val).
-            Это снижает систематическое занижение (MBE < 0).
+        Returns
+        -------
+        mean : np.ndarray shape=(N, horizon)
+        std  : np.ndarray shape=(N, horizon)
         """
-        X = self._get_split_inputs(data, split)
-        y_out, _ = _reconstruct_predictions(self.predict(X), data, split)
-
-        if self._bias_correction is not None:
-            y_out = y_out - self._bias_correction
-            logger.debug(
-                "%s: bias_correction=%.1f кВт·ч применена к split=%s",
-                self.model_name, self._bias_correction, split
-            )
-
-        return y_out
-
-    def mc_predict(self, X, n_samples=50):
         if not isinstance(self.model, tf.keras.Model):
-            raise TypeError("mc_predict только для Keras-моделей")
+            raise TypeError("mc_predict доступен только для Keras-моделей")
+
         preds = np.stack(
             [self.model(X, training=True).numpy() for _ in range(n_samples)],
             axis=0,
         )
         return preds.mean(axis=0), preds.std(axis=0)
 
-    def evaluate(self, data, split="test", run_residual_diagnostics=True):
-        """
-        Вычисляет метрики в кВт·ч.
-        Применяет bias correction если установлена.
-        """
-        X = self._get_split_inputs(data, split)
-        y_raw = self.predict(X)
-        y_pred, y_true = _reconstruct_predictions(y_raw, data, split)
+    def predict_original_scale(
+        self,
+        data: Dict[str, Any],
+        split: str = "test",
+    ) -> np.ndarray:
+        """Прогноз на split-е, приведённый к исходному масштабу (кВт·ч)."""
+        return inverse_scale(data["scaler"], self.predict(data[f"X_{split}"]))
 
-        # Применяем bias correction если есть
-        if self._bias_correction is not None:
-            y_pred = y_pred - self._bias_correction
+    def evaluate(
+        self,
+        data: Dict[str, Any],
+        split: str = "test",
+        run_residual_diagnostics: bool = True,
+    ) -> Dict[str, float]:
+        """
+        Оценка модели на split-е с опциональной диагностикой остатков.
 
-        metrics = compute_all_metrics(y_true, y_pred, model_name=self.model_name)
+        Если в `data` присутствует ключ "mase_scale" (см.
+        utils.metrics.seasonal_naive_scale), дополнительно считается MASE —
+        главная метрика для ответа на вопрос «лучше ли модель наивного прогноза».
+
+        Parameters
+        ----------
+        run_residual_diagnostics : bool
+            Если True — запускает diagnose_residuals() и выводит DW/ACF/Kurt
+            в лог. По умолчанию включено для всех моделей.
+        """
+        X = data[f"X_{split}"]
+        Y_true_scaled = data[f"Y_{split}"]
+        scaler = data["scaler"]
+
+        Y_pred_scaled = self.predict(X)
+        Y_true = inverse_scale(scaler, Y_true_scaled)
+        Y_pred = inverse_scale(scaler, Y_pred_scaled)
+
+        metrics = compute_all_metrics(
+            Y_true, Y_pred,
+            model_name=self.model_name,
+            mase_scale=data.get("mase_scale"),
+        )
+        metrics["train_time_sec"] = round(self.train_time, 1)
+        metrics["n_params"] = self.count_params()
+
         if run_residual_diagnostics:
-            diag = diagnose_residuals(y_true, y_pred, model_name=self.model_name)
-            metrics["DW"]       = diag["DW"]
-            metrics["ACF_24"]   = diag["ACF_24"]
+            diag = diagnose_residuals(Y_true, Y_pred, model_name=self.model_name)
+            metrics["DW"]       = diag["DW_mean_over_h"]
+            metrics["ACF_24"]   = diag["ACF_24_mean_over_h"]
             metrics["ACF_168"]  = diag["ACF_168"]
             metrics["kurtosis"] = diag["kurtosis"]
-        metrics["composite_score"] = composite_score(metrics)
+
         return metrics
 
-    def save(self):
+    def count_params(self) -> int:
+        """Число обучаемых параметров (0 для моделей без параметров)."""
+        if isinstance(self.model, tf.keras.Model):
+            return int(self.model.count_params())
+        return 0
+
+    def save(self) -> str:
         os.makedirs(self.models_dir, exist_ok=True)
         path = os.path.join(self.models_dir, self.model_name)
-        if isinstance(self.model, tf.keras.Model):
-            save_path = path + ".keras"
-            self.model.save(save_path)
-            logger.info("Сохранено: %s", save_path)
-            return save_path
-        else:
-            import pickle
-            save_path = path + ".pkl"
-            with open(save_path, "wb") as f:
-                pickle.dump(self.model, f)
-            logger.info("Сохранено: %s", save_path)
-            return save_path
+        try:
+            if isinstance(self.model, tf.keras.Model):
+                save_path = path + ".keras"
+                self.model.save(save_path)
+                logger.info("Keras-модель сохранена: %s", save_path)
+                return save_path
+            else:
+                import pickle
+                save_path = path + ".pkl"
+                with open(save_path, "wb") as f:
+                    pickle.dump(self.model, f)
+                logger.info("Sklearn-модель сохранена: %s", save_path)
+                return save_path
+        except Exception as exc:
+            logger.error("Ошибка сохранения %s: %s", self.model_name, exc)
+            raise
 
     @classmethod
-    def load_keras(cls, path, model_name=""):
-        from models.transformer import (
-            iTransformerBlock, PreLNEncoderBlock, SinusoidalPE,
-            Time2Vec, GatedResidualNetwork, WarmupCosineDecay as WCD_tr)
-        from models.lstm import TemporalAttentionBlock, TCNBlock, _SeasonalSkipLayer, WarmupCosineDecay
-        model = tf.keras.models.load_model(path, custom_objects={
-            "iTransformerBlock":     iTransformerBlock,
-            "PreLNEncoderBlock":     PreLNEncoderBlock,
-            "SinusoidalPE":          SinusoidalPE,
-            "Time2Vec":              Time2Vec,
-            "GatedResidualNetwork":  GatedResidualNetwork,
-            "WarmupCosineDecay":     WarmupCosineDecay,
-            "TemporalAttentionBlock":TemporalAttentionBlock,
-            "TCNBlock":              TCNBlock,
-            "_SeasonalSkipLayer":    _SeasonalSkipLayer,
-        })
-        return cls(model, model_name or os.path.basename(path))
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# WEIGHTED ENSEMBLE
-# ══════════════════════════════════════════════════════════════════════════════
-
-class WeightedEnsemble:
-    """
-    Взвешенный ансамбль с оптимизацией весов на val-set (Nelder-Mead).
-
-    v8: минимальный вес 0.1% для каждой модели (ранее PatchTST получал 0.000).
-    """
-
-    def __init__(self, trainers, weights=None, model_name="WeightedEnsemble"):
-        if not trainers:
-            raise ValueError("trainers не может быть пустым")
-        self.trainers   = trainers
-        self.model_name = model_name
-        self.history    = None
-        self.train_time = 0.0
-        n = len(trainers)
-        if weights is not None:
-            w = np.array(weights, dtype=np.float64)
-            self.weights = w / w.sum()
-        else:
-            self.weights = np.ones(n, dtype=np.float64) / n
-
-    def predict(self, X):
-        """Weighted average сырых предсказаний (нормированное пространство)."""
-        preds = np.stack([t.predict(X) for t in self.trainers], axis=0)
-        return np.einsum("m,mnh->nh", self.weights, preds).astype(np.float32)
-
-    def optimize_weights(self, data: Dict[str, Any], split: str = "val") -> np.ndarray:
-        """
-        Оптимизирует веса по MAE в кВт·ч на val-set.
-
-        v8 FIX: минимальный вес 1e-3 (0.1%) после оптимизации.
-          БЫЛО: PatchTST получал w=0.000 → не участвовал в ансамбле вообще.
-          СТАЛО: np.maximum(w_opt, 1e-3) → минимум 0.1% вклада каждой модели.
-        """
+    def load_keras(cls, path: str, model_name: str = "") -> "ModelTrainer":
         try:
-            from scipy.optimize import minimize
-        except ImportError:
-            logger.warning("scipy не установлен. Используем равные веса.")
-            return self.weights
-
-        X_split = data[f"X_{split}"]
-        n = len(self.trainers)
-
-        # Кэшируем абсолютные предсказания каждой модели
-        abs_preds = []
-        for t in self.trainers:
-            y_raw = t.predict(X_split)
-            y_abs, _ = _reconstruct_predictions(y_raw, data, split)
-            abs_preds.append(y_abs)
-        abs_preds_arr = np.stack(abs_preds, axis=0)   # (M, N, H)
-
-        # Истинные абсолютные значения
-        scaler = data["scaler"]
-        if data.get("seasonal_diff", False):
-            naive = data[f"Y_seasonal_naive_{split}"]
-            y_true_abs_s = (data[f"Y_{split}"] + naive).clip(0)
-            y_true = inverse_scale(scaler, y_true_abs_s)
-        else:
-            y_true = inverse_scale(scaler, data[f"Y_{split}"])
-
-        def objective(w):
-            w_abs  = np.abs(w)
-            w_norm = w_abs / (w_abs.sum() + 1e-8)
-            pred   = np.einsum("m,mnh->nh", w_norm, abs_preds_arr)
-            return float(np.mean(np.abs(pred - y_true)))
-
-        x0      = np.ones(n) / n
-        mae_eq  = objective(x0)
-        result  = minimize(objective, x0, method="Nelder-Mead",
-                           options={"maxiter": 3000, "xatol": 1e-5, "fatol": 1e-6})
-
-        # v8 FIX: минимальный вес 0.1% для каждой модели
-        w_opt  = np.abs(result.x)
-        w_opt  = np.maximum(w_opt, 1e-3)   # ← минимум 0.1%
-        w_opt /= w_opt.sum()
-        self.weights = w_opt
-
-        logger.info(
-            "Ensemble weights оптимизированы (%s):",
-            ", ".join(f"{t.model_name}={w:.3f}" for t, w in zip(self.trainers, self.weights))
-        )
-        logger.info(
-            "  MAE (равные)=%.2f → MAE (оптим)=%.2f | Δ=%.1f%%",
-            mae_eq, result.fun,
-            (mae_eq - result.fun) / mae_eq * 100 if mae_eq > 0 else 0.0,
-        )
-        return self.weights
-
-    def predict_absolute(self, data, split="test"):
-        """Возвращает взвешенное предсказание ансамбля в кВт·ч."""
-        X = data[f"X_{split}"]
-        y_raw = self.predict(X)
-        y_out, _ = _reconstruct_predictions(y_raw, data, split)
-        return y_out
-
-    def evaluate(self, data, split="test", run_residual_diagnostics=True):
-        X      = data[f"X_{split}"]
-        y_raw  = self.predict(X)
-        y_pred, y_true = _reconstruct_predictions(y_raw, data, split)
-
-        metrics = compute_all_metrics(y_true, y_pred, model_name=self.model_name)
-        if run_residual_diagnostics:
-            diag = diagnose_residuals(y_true, y_pred, model_name=self.model_name)
-            metrics["DW"]       = diag["DW"]
-            metrics["ACF_24"]   = diag["ACF_24"]
-            metrics["ACF_168"]  = diag["ACF_168"]
-            metrics["kurtosis"] = diag["kurtosis"]
-        metrics["composite_score"] = composite_score(metrics)
-        metrics["ensemble_weights"] = {
-            t.model_name: round(float(w), 4)
-            for t, w in zip(self.trainers, self.weights)
-        }
-        return metrics
-
-    def __repr__(self):
-        wstr = ", ".join(
-            f"{t.model_name}={w:.3f}" for t, w in zip(self.trainers, self.weights)
-        )
-        return f"WeightedEnsemble([{wstr}])"
+            from models.transformer import (
+                PreLNEncoderBlock, SinusoidalPE, Time2Vec,
+            )
+            from models.lstm import (
+                TemporalAttentionBlock, TCNBlock, SeasonalSkipConnection, ConsumptionRevIN,
+            )
+            model = tf.keras.models.load_model(
+                path,
+                custom_objects={
+                    "PreLNEncoderBlock":      PreLNEncoderBlock,
+                    "SinusoidalPE":           SinusoidalPE,
+                    "Time2Vec":               Time2Vec,
+                    "TemporalAttentionBlock": TemporalAttentionBlock,
+                    "TCNBlock":               TCNBlock,
+                    "SeasonalSkipConnection": SeasonalSkipConnection,
+                    "ConsumptionRevIN":       ConsumptionRevIN,
+                },
+            )
+            trainer = cls(model, model_name or os.path.basename(path))
+            logger.info("Загружена модель: %s", path)
+            return trainer
+        except Exception as exc:
+            logger.error("Ошибка загрузки %s: %s", path, exc)
+            raise
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# СРАВНЕНИЕ ТРЕНЕРОВ
-# ══════════════════════════════════════════════════════════════════════════════
+# ── Сравнение тренеров ────────────────────────────────────────────────────────
 
 def compare_trainers(
-    trainers: List[Any],
+    trainers: List[ModelTrainer],
     data: Dict[str, Any],
     split: str = "test",
-    select_by: str = "composite",
-) -> Tuple[Dict[str, Dict[str, float]], str]:
+) -> Dict[str, Dict[str, float]]:
     """
-    Вычисляет метрики всех моделей в абсолютном пространстве (кВт·ч).
+    Оценивает все модели на одном split-е и печатает сводную таблицу.
+
+    Колонка MASE — ключевая: значение >= 1 означает, что модель не превзошла
+    сезонно-наивный прогноз и практической ценности не имеет.
     """
-    results = {}
-    logger.info("\n%s", "=" * 72)
-    logger.info(
-        "СРАВНЕНИЕ МОДЕЛЕЙ (split=%s, select_by=%s, seasonal_diff=%s)",
-        split.upper(), select_by, data.get("seasonal_diff", False),
-    )
-    logger.info("%s", "=" * 72)
-    logger.info(
-        "%-24s %8s %8s %7s %7s %6s %7s %10s",
-        "Модель", "MAE", "RMSE", "sMAPE", "R2", "DW", "ACF24", "Composite",
-    )
-    logger.info("%s", "-" * 80)
+    results: Dict[str, Dict[str, float]] = {}
+    logger.info("\n%s", "=" * 92)
+    logger.info("СРАВНЕНИЕ МОДЕЛЕЙ (split=%s)", split.upper())
+    logger.info("%s", "=" * 92)
 
     for trainer in trainers:
         try:
-            m = trainer.evaluate(data, split=split, run_residual_diagnostics=True)
-            results[trainer.model_name] = m
-            logger.info(
-                "%-24s %8.2f %8.2f %7.2f%% %6.4f %6s %7s %10.3f",
-                trainer.model_name,
-                m["MAE"], m["RMSE"],
-                m.get("sMAPE", m["MAPE"]),
-                m["R2"],
-                f"{m.get('DW', float('nan')):.3f}",
-                f"{m.get('ACF_24', float('nan')):.3f}",
-                m.get("composite_score", float("nan")),
+            results[trainer.model_name] = trainer.evaluate(
+                data, split=split, run_residual_diagnostics=True
             )
         except Exception as exc:
             logger.error("Ошибка оценки %s: %s", trainer.model_name, exc)
 
     if not results:
-        return results, ""
+        return results
 
-    logger.info("%s", "-" * 80)
-    key_map = {"composite": "composite_score", "mae": "MAE", "rmse": "RMSE"}
-    sort_key = key_map.get(select_by, "composite_score")
-    best_name = min(results, key=lambda k: results[k].get(sort_key, float("inf")))
-    logger.info(
-        "Лучшая по %s: %s | MAE=%.2f | composite=%.3f",
-        sort_key, best_name,
-        results[best_name]["MAE"],
-        results[best_name].get("composite_score", float("nan")),
-    )
-    return results, best_name
+    logger.info("\n%s", "─" * 92)
+    logger.info("%-22s %9s %9s %7s %8s %7s %7s %7s",
+                "Модель", "MAE", "RMSE", "MAPE%", "R2", "MASE", "DW", "ACF24")
+    logger.info("%s", "─" * 92)
+    for name in sorted(results, key=lambda k: results[k]["MAE"]):
+        m = results[name]
+        logger.info(
+            "%-22s %9.2f %9.2f %6.2f%% %8.4f %7s %7.3f %7.3f",
+            name, m["MAE"], m["RMSE"], m["MAPE"], m["R2"],
+            f"{m['MASE']:.4f}" if "MASE" in m else "н/д",
+            m.get("DW", float("nan")), m.get("ACF_24", float("nan")),
+        )
+    logger.info("%s", "─" * 92)
+
+    best = min(results, key=lambda k: results[k]["MAE"])
+    logger.info("Лучшая модель по MAE (%s): %s", split, best)
+
+    # Проверка на прогностическую ценность относительно наивного базлайна.
+    if "MASE" in results[best]:
+        skilled = [n for n, m in results.items() if m.get("MASE", 9e9) < 1.0]
+        if skilled:
+            logger.info(
+                "Модели лучше сезонно-наивного прогноза (MASE<1): %s",
+                ", ".join(sorted(skilled, key=lambda n: results[n]["MASE"])),
+            )
+        else:
+            logger.warning(
+                "⚠️  НИ ОДНА модель не превзошла сезонно-наивный прогноз (MASE>=1). "
+                "Это главный результат, который нужно объяснить в работе."
+            )
+
+    return results

@@ -1,18 +1,29 @@
 # -*- coding: utf-8 -*-
 """
-models/baseline.py — Базовые модели: XGBoost, LinearRegression, SARIMA.
+models/baseline.py — Базовые модели сравнения.
 
-ИЗМЕНЕНИЯ v6:
-  + SARIMAWrapper — SARIMA(1,1,1)(1,1,1,24) как классическая статистическая
-    базовая линия. Стандарт в академических работах по энергопотреблению.
-  + get_feature_importance() в LagFeaturesWrapper — для анализа важности
-    признаков XGBoost (feature_importances_ + визуализация).
-  + XGBoost: выравнивание информационного контекста с LinearRegression (v5).
+Три уровня базлайнов, от простого к сложному:
+
+  1. НАИВНЫЕ (без обучения) — обязательная точка отсчёта для временных рядов.
+     Persistence24  : прогноз = потребление тех же часов предыдущих суток.
+     SeasonalNaive168: прогноз = потребление тех же часов неделю назад.
+     HourlyProfile  : среднее по (час × день недели), посчитанное на train.
+     Если сложная модель не бьёт эти базлайны — она не имеет прогностической
+     ценности, каким бы низким ни был её MAE в абсолютных единицах.
+
+  2. ЛИНЕЙНАЯ  — Ridge на полном развёрнутом окне (T×F признаков).
+  3. АНСАМБЛЕВАЯ — XGBoost на агрегированных лаг-признаках, отдельная модель
+     на каждый шаг горизонта.
+
+О составе лаг-признаков XGBoost (~165 при T=48, F=26): rolling mean/std
+считаются по ВСЕМ каналам, а не только по потреблению. Это уравнивает
+информационный контекст с Ridge, который видит сырое окно целиком, — иначе
+сравнение алгоритмов подменяется сравнением объёма входных данных.
+История изменений — в CHANGELOG.md.
 """
 
 import logging
-import warnings
-from typing import List, Optional, Dict, Any
+from typing import Dict, List, Optional
 
 import numpy as np
 from sklearn.linear_model import Ridge
@@ -21,259 +32,106 @@ import xgboost as xgb
 
 logger = logging.getLogger("smart_grid.models.baseline")
 
-
-# ══════════════════════════════════════════════════════════════════════════════
-# SARIMA WRAPPER
-# ══════════════════════════════════════════════════════════════════════════════
-
-class SARIMAWrapper:
-    """
-    SARIMA(1,1,1)(1,1,1,24) — классическая статистическая базовая линия.
-
-    Используется как академический benchmark: если нейросети и XGBoost
-    не превосходят SARIMA, это сигнал о проблемах с данными или моделью.
-    В задачах почасового энергопотребления SARIMA(1,1,1)(1,1,1,24) —
-    стандарт (Box & Jenkins, 1976; Taylor, 2003).
-
-    Стратегия прогноза:
-      - Обучается на train-выборке (raw кВт·ч, без нормализации).
-      - Прогноз: скользящее окно — для каждого тестового окна переобучается
-        на последних refit_window точках + делает predict(horizon).
-      - При refit=False использует одну обученную модель для всех окон
-        (быстрее, но хуже на нестационарных данных).
-
-    Parameters
-    ----------
-    order           : tuple (p,d,q) — ARIMA порядок
-    seasonal_order  : tuple (P,D,Q,m) — сезонный порядок
-    refit           : bool — переобучаться на каждом тестовом окне
-    refit_window    : int — сколько точек истории использовать при refit
-    """
-
-    def __init__(
-        self,
-        order: tuple = (1, 1, 1),
-        seasonal_order: tuple = (1, 1, 1, 24),
-        refit: bool = False,
-        refit_window: int = 24 * 30,
-    ):
-        self.order          = order
-        self.seasonal_order = seasonal_order
-        self.refit          = refit
-        self.refit_window   = refit_window
-        self._fitted_model  = None
-        self._train_series: Optional[np.ndarray] = None
-        self.name = "SARIMA"
-
-    def fit(
-        self,
-        X_train: np.ndarray,
-        Y_train: np.ndarray,
-        X_val: Optional[np.ndarray] = None,
-        Y_val: Optional[np.ndarray] = None,
-        raw_series: Optional[np.ndarray] = None,
-    ) -> "SARIMAWrapper":
-        """
-        Обучает SARIMA на сырых значениях потребления.
-
-        Parameters
-        ----------
-        X_train    : не используется (оставлен для совместимости интерфейса)
-        Y_train    : не используется напрямую
-        raw_series : np.ndarray — сырой ряд кВт·ч (train split).
-                     Если None — извлекается из X_train[:, -1, 0] как прокси.
-        """
-        try:
-            from statsmodels.tsa.statespace.sarimax import SARIMAX
-        except ImportError:
-            raise ImportError("statsmodels >= 0.14 требуется для SARIMA. "
-                              "Установите: pip install statsmodels")
-
-        if raw_series is not None:
-            series = np.asarray(raw_series, dtype=np.float64)
-        else:
-            # Прокси: берём последний шаг окна как приблизительный ряд
-            series = X_train[:, -1, 0].astype(np.float64)
-
-        self._train_series = series
-
-        logger.info(
-            "SARIMA(%d,%d,%d)(%d,%d,%d,%d) обучается на %d точках...",
-            *self.order, *self.seasonal_order, len(series)
-        )
-
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            model = SARIMAX(
-                series,
-                order=self.order,
-                seasonal_order=self.seasonal_order,
-                enforce_stationarity=False,
-                enforce_invertibility=False,
-            )
-            self._fitted_model = model.fit(disp=False, maxiter=200)
-
-        aic = self._fitted_model.aic
-        logger.info("SARIMA обучена: AIC=%.2f", aic)
-        return self
-
-    def predict(self, X: np.ndarray) -> np.ndarray:
-        """
-        Строит прогноз на горизонт=24ч для каждого входного окна.
- 
-        ИСПРАВЛЕНИЕ v2 (было: forecast(24) вызывался N раз с одной точки):
-          Statsmodels forecast() каждый раз стартует с конца обучающего ряда,
-          поэтому все N окон получали идентичный прогноз → MAPE=40%, R²=-2.35.
- 
-          Теперь: один длинный forecast(history+N+23), нарезается на окна:
-            окно i = long_forecast[history+i : history+i+horizon]
- 
-        Требование к fit(): передавать raw_series = train+val, чтобы конец
-        обучающего ряда совпадал с началом тестового периода.
-        """
-        if self._fitted_model is None:
-            raise RuntimeError("SARIMAWrapper: вызовите fit() перед predict()")
- 
-        try:
-            from statsmodels.tsa.statespace.sarimax import SARIMAX
-        except ImportError:
-            raise ImportError("statsmodels >= 0.14 требуется для SARIMA.")
- 
-        N            = len(X)
-        horizon      = 24
-        history_len  = int(X.shape[1]) if X.ndim == 3 else 192
-        predictions  = np.zeros((N, horizon), dtype=np.float32)
- 
-        if not self.refit:
-            # ── Исправленный быстрый режим ────────────────────────────────────
-            # Один длинный прогноз вместо N вызовов forecast(24).
-            # Окно i соответствует временному отрезку:
-            #   [fit_end + history_len + i .. fit_end + history_len + i + horizon]
-            total_steps = history_len + N + horizon - 1
-            try:
-                import warnings
-                with warnings.catch_warnings():
-                    warnings.simplefilter("ignore")
-                    long_fc = self._fitted_model.forecast(steps=total_steps)
- 
-                for i in range(N):
-                    start = history_len + i
-                    predictions[i] = np.maximum(
-                        long_fc[start : start + horizon], 0
-                    ).astype(np.float32)
- 
-            except Exception as exc:
-                logger.warning("SARIMA forecast(long) ошибка: %s", exc)
-                if self._train_series is not None:
-                    predictions[:] = float(self._train_series[-1])
- 
-        else:
-            # ── Refit-режим (без изменений) ───────────────────────────────────
-            if self._train_series is None:
-                raise RuntimeError("raw_series не передана в fit()")
- 
-            total_train = len(self._train_series)
-            for i in range(N):
-                window_start = max(0, total_train + i - self.refit_window)
-                history = self._train_series[window_start : total_train + i]
-                if len(history) < 48:
-                    history = self._train_series[-self.refit_window:]
-                try:
-                    import warnings
-                    with warnings.catch_warnings():
-                        warnings.simplefilter("ignore")
-                        m = SARIMAX(
-                            history,
-                            order=self.order,
-                            seasonal_order=self.seasonal_order,
-                            enforce_stationarity=False,
-                            enforce_invertibility=False,
-                        ).fit(disp=False, maxiter=100)
-                    predictions[i] = np.maximum(
-                        m.forecast(steps=horizon), 0
-                    ).astype(np.float32)
-                except Exception as exc:
-                    logger.debug("SARIMA refit ошибка окно %d: %s", i, exc)
-                    predictions[i] = float(history[-1]) * np.ones(horizon)
- 
-                if i % 100 == 0:
-                    logger.info("SARIMA predict: %d/%d окон", i, N)
- 
-        return predictions
-
-    def __repr__(self) -> str:
-        return (f"SARIMA({self.order})({self.seasonal_order}) "
-                f"refit={self.refit}")
-
-
-def build_sarima(
-    order: tuple = (1, 1, 1),
-    seasonal_order: tuple = (1, 1, 1, 24),
-    refit: bool = False,
-) -> SARIMAWrapper:
-    """
-    Создаёт SARIMA(1,1,1)(1,1,1,24) — стандарт для почасового энергопотребления.
-
-    Параметры обоснованы:
-      p=1, d=1, q=1  — AR(1) + разность + MA(1) устраняют нестационарность
-      P=1, D=1, Q=1  — сезонный аналог для периода m=24ч
-      m=24           — суточная сезонность
-
-    References
-    ----------
-    Box, G.E.P. & Jenkins, G.M. (1976). Time Series Analysis.
-    Taylor, J.W. (2003). Short-term electricity demand forecasting
-      using double seasonal exponential smoothing. Journal of OR Society.
-    """
-    logger.info(
-        "SARIMA(%d,%d,%d)(%d,%d,%d,%d) инициализирована | refit=%s",
-        *order, *seasonal_order, refit
-    )
-    return SARIMAWrapper(order=order, seasonal_order=seasonal_order, refit=refit)
+# ── Индексы каналов в матрице признаков (см. data/preprocessing.py) ───────────
+CH_CONSUMPTION = 0
+CH_HOUR_SIN = 1
+CH_HOUR_COS = 2
+CH_DOW_SIN = 18
+CH_DOW_COS = 19
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# ФУНКЦИЯ ПОСТРОЕНИЯ ЛАГ-ПРИЗНАКОВ (v5, без изменений)
+# ФУНКЦИЯ ПОСТРОЕНИЯ ЛАГ-ПРИЗНАКОВ
 # ══════════════════════════════════════════════════════════════════════════════
 
 def build_lag_features(X: np.ndarray) -> np.ndarray:
     """
     Преобразует 3D окно (N, T, F) в 2D матрицу признаков (N, ~165).
-    v5: rolling_mean/std по всем F каналам для параметрического паритета с Ridge.
+
+    v5 vs v4: добавлены rolling_mean(6,12,24,48) и rolling_std(6,24)
+    ПО ВСЕМ F КАНАЛАМ — выравнивает информационный контекст с LinearRegression.
+
+    LinearRegression получает 48×15=720 сырых значений (весь тензор).
+    XGBoost v5 получает 165 агрегированных — сопоставимая информационная
+    ёмкость при лучшей инвариантности к шуму.
+
+    Состав (при T=48, F=15):
+      ЧАСТЬ 1 — потребление (канал 0), всё окно:
+        48 лагов + 4 rolling mean(3,6,12,24) + 2 rolling std(6,24)
+        + 3 (min/max/range 24ч) + 4 тренда = 61 признак
+
+      ЧАСТЬ 2 — ковариаты последнего шага:
+        F-1 = 14 признаков (каналы 1..F-1)
+
+      ЧАСТЬ 3 ★ NEW — rolling_mean(6,12,24,48) × F каналов = 4F признаков
+      ЧАСТЬ 4 ★ NEW — rolling_std(6,24) × F каналов = 2F признаков
+
+    Итого: 61 + 14 + 60 + 30 = 165 признаков (при F=15).
+
+    Примечание: rolling по каналу 0 в частях 3–4 дублирует часть 1,
+    но XGBoost через feature importance самостоятельно занулит дубликаты.
+
+    Parameters
+    ----------
+    X : np.ndarray, shape (N, T, F)
+
+    Returns
+    -------
+    features : np.ndarray, shape (N, 61 + (F-1) + 6*F)
     """
     N, T, F = X.shape
-    cons = X[:, :, 0]
+    cons = X[:, :, 0]   # (N, T) — нормализованное потребление
 
     feature_list = []
 
-    # Часть 1: потребление (канал 0)
+    # ── ЧАСТЬ 1: Потребление (канал 0) ────────────────────────────────────────
+
+    # 1a. Все T лагов потребления
     for i in range(T):
         feature_list.append(cons[:, i])
+
+    # 1b. Скользящие агрегаты потребления
     for window in [3, 6, 12, 24]:
         w = min(window, T)
         feature_list.append(cons[:, -w:].mean(axis=1))
     for window in [6, 24]:
         w = min(window, T)
         feature_list.append(cons[:, -w:].std(axis=1))
+
+    # 1c. Min / max / range за 24ч
     w24 = min(24, T)
     cons_24 = cons[:, -w24:]
     feature_list.append(cons_24.min(axis=1))
     feature_list.append(cons_24.max(axis=1))
     feature_list.append(cons_24.max(axis=1) - cons_24.min(axis=1))
+
+    # 1d. Трендовые дельты
     feature_list.append(cons[:, -1] - cons[:, -2]  if T >= 2  else np.zeros(N, np.float32))
     feature_list.append(cons[:, -1] - cons[:, -4]  if T >= 4  else np.zeros(N, np.float32))
     feature_list.append(cons[:, -1] - cons[:, -25] if T >= 25 else np.zeros(N, np.float32))
     feature_list.append(cons[:, -1] / (cons[:, -25] + 1e-8) if T >= 25 else np.ones(N, np.float32))
 
-    # Часть 2: ковариаты последнего шага
+    # ── ЧАСТЬ 2: Ковариаты последнего шага (каналы 1..F-1) ────────────────────
     for ch in range(1, F):
         feature_list.append(X[:, -1, ch])
 
-    # Части 3-4: rolling по всем каналам
+    # ── ЧАСТЬ 3: rolling_mean(6,12,24,48) по ВСЕМ F каналам ★ ────────────────
+    # Физический смысл:
+    #   channel=0 (cons):       среднее потребление за w часов
+    #   channel=7 (temp):       средняя температура за w часов
+    #   channel=11 (humidity):  средняя влажность за w часов
+    #   channel=12 (wind):      средний ветер за w часов
+    #   channel=3/4 (is_peak):  доля пиковых часов за w часов
+    # LinearRegression видит эти значения напрямую в сыром окне.
+    # Здесь мы даём XGBoost агрегированный эквивалент.
     for window in [6, 12, 24, 48]:
         w = min(window, T)
         for ch in range(F):
             feature_list.append(X[:, -w:, ch].mean(axis=1))
+
+    # ── ЧАСТЬ 4: rolling_std(6,24) по ВСЕМ F каналам ★ ──────────────────────
+    # Std температуры за 6ч = вариабельность погоды в ближайшие часы.
+    # Std потребления за 24ч = амплитуда суточного профиля.
     for window in [6, 24]:
         w = min(window, T)
         for ch in range(F):
@@ -283,67 +141,19 @@ def build_lag_features(X: np.ndarray) -> np.ndarray:
     return result
 
 
-def build_feature_names(n_features: int = 26, history_length: int = 48) -> List[str]:
-    """
-    Строит список имён признаков для feature importance анализа.
-    Порядок должен совпадать с build_lag_features().
-    """
-    from data.preprocessing import FEATURE_NAMES
-    names = []
-    T = history_length
-    F = n_features
-
-    # Лаги потребления
-    for i in range(T):
-        names.append(f"cons_lag_{T-i}h")
-
-    # Rolling consumption
-    for w in [3, 6, 12, 24]:
-        names.append(f"cons_mean_{min(w,T)}h")
-    for w in [6, 24]:
-        names.append(f"cons_std_{min(w,T)}h")
-
-    # Min/max/range
-    names += ["cons_min_24h", "cons_max_24h", "cons_range_24h"]
-
-    # Тренды
-    names += ["delta_1h", "delta_3h", "delta_24h", "ratio_24h"]
-
-    # Ковариаты последнего шага
-    feat_names = FEATURE_NAMES if len(FEATURE_NAMES) == F else [f"feat_{i}" for i in range(F)]
-    for ch in range(1, F):
-        names.append(f"last_{feat_names[ch]}")
-
-    # Rolling по всем каналам
-    for w in [6, 12, 24, 48]:
-        for ch in range(F):
-            fn = feat_names[ch] if ch < len(feat_names) else f"feat_{ch}"
-            names.append(f"mean{min(w,T)}h_{fn}")
-
-    for w in [6, 24]:
-        for ch in range(F):
-            fn = feat_names[ch] if ch < len(feat_names) else f"feat_{ch}"
-            names.append(f"std{min(w,T)}h_{fn}")
-
-    return names
-
-
 # ══════════════════════════════════════════════════════════════════════════════
 # ОБЁРТКИ
 # ══════════════════════════════════════════════════════════════════════════════
 
 class LagFeaturesWrapper:
     """
-    Обёртка для XGBoost: 3D (N,T,F) → лаг-признаки → fit/predict.
-    v6: добавлен get_feature_importance() для анализа важности признаков.
+    Обёртка для XGBoost: 3D (N,T,F) → лаг-признаки (N,~31) → fit/predict.
+    Использует MultiOutputRegressor для независимого обучения по каждому шагу.
     """
 
     def __init__(self, estimator: BaseEstimator, name: str = "") -> None:
         self.estimator = estimator
         self.name = name or type(estimator).__name__
-        self._feature_names: Optional[List[str]] = None
-        self._n_features_in: int = 26
-        self._history_length: int = 48
 
     def fit(
         self,
@@ -352,8 +162,6 @@ class LagFeaturesWrapper:
         X_val: Optional[np.ndarray] = None,
         Y_val: Optional[np.ndarray] = None,
     ) -> "LagFeaturesWrapper":
-        self._history_length = X_train.shape[1]
-        self._n_features_in  = X_train.shape[2]
         X2d = build_lag_features(X_train)
         if X_val is not None and Y_val is not None:
             X_val_2d = build_lag_features(X_val)
@@ -370,74 +178,6 @@ class LagFeaturesWrapper:
         X2d = build_lag_features(X)
         return self.estimator.predict(X2d)
 
-    def get_feature_importance(
-        self,
-        top_n: int = 30,
-    ) -> Optional[Dict[str, np.ndarray]]:
-        """
-        Возвращает важность признаков XGBoost усреднённую по 24 горизонтам.
-
-        Returns
-        -------
-        dict {
-            "names":       np.ndarray имён признаков (top_n),
-            "importances": np.ndarray важностей (top_n),
-            "all_names":   полный список имён,
-            "all_importances": полный массив важностей,
-        }
-        или None если estimator не поддерживает feature_importances_.
-        """
-        inner = self.estimator
-        # MultiHorizonXGB хранит список моделей
-        models_list = getattr(inner, "models", None)
-        if models_list is None or len(models_list) == 0:
-            logger.warning("get_feature_importance: модели не обучены")
-            return None
-
-        # Усредняем важность по всем 24 горизонтам
-        all_imp = []
-        for m in models_list:
-            fi = getattr(m, "feature_importances_", None)
-            if fi is not None:
-                all_imp.append(fi)
-
-        if not all_imp:
-            logger.warning("get_feature_importance: feature_importances_ не найден")
-            return None
-
-        mean_imp = np.mean(all_imp, axis=0)
-
-        # Строим имена признаков
-        try:
-            feat_names = build_feature_names(
-                n_features=self._n_features_in,
-                history_length=self._history_length,
-            )
-        except Exception:
-            feat_names = [f"feat_{i}" for i in range(len(mean_imp))]
-
-        # Выравниваем длину
-        n = min(len(mean_imp), len(feat_names))
-        mean_imp  = mean_imp[:n]
-        feat_names = feat_names[:n]
-
-        # Сортируем по убыванию
-        idx_sorted = np.argsort(mean_imp)[::-1]
-        top_idx    = idx_sorted[:top_n]
-
-        result = {
-            "names":            np.array(feat_names)[top_idx],
-            "importances":      mean_imp[top_idx],
-            "all_names":        np.array(feat_names),
-            "all_importances":  mean_imp,
-        }
-        logger.info(
-            "Feature importance: топ-5: %s",
-            ", ".join(f"{n}={v:.4f}"
-                      for n, v in zip(result["names"][:5], result["importances"][:5]))
-        )
-        return result
-
     def __repr__(self) -> str:
         return f"LagFeaturesWrapper({self.name})"
 
@@ -445,6 +185,7 @@ class LagFeaturesWrapper:
 class FlattenWrapper:
     """
     Разворачивает 3D тензоры (N, T, F) → 2D (N, T×F) для sklearn.
+    Используется для LinearRegression (Ridge работает хорошо на полном окне).
     """
 
     def __init__(self, estimator: BaseEstimator, name: str = "") -> None:
@@ -476,6 +217,11 @@ class FlattenWrapper:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def build_linear_regression(alpha: float = 1.0) -> FlattenWrapper:
+    """
+    Ridge regression на полном сглаженном окне (N, 528).
+    Ridge нечувствителен к мультиколлинеарности — сырое окно ему подходит.
+    alpha=1.0 — умеренная регуляризация.
+    """
     return FlattenWrapper(Ridge(alpha=alpha), name="LinearRegression")
 
 
@@ -488,14 +234,32 @@ def build_xgboost(
     min_child_weight: int = 10,
     seed: int = 42,
 ) -> LagFeaturesWrapper:
-    """XGBoost на расширенных лаг-признаках (~165 фич) + MultiOutputRegressor."""
+    """
+    XGBoost на расширенных лаг-признаках (~165 фич) + MultiOutputRegressor.
 
+    ИЗМЕНЕНИЯ v5 vs v4:
+      v4: 71 признак — только потребление имело историю 48 шагов,
+          остальные 14 каналов — одна точка на последнем шаге.
+      v5: 165 признаков — rolling_mean(6,12,24,48) и rolling_std(6,24)
+          добавлены ПО ВСЕМ 15 КАНАЛАМ. XGBoost теперь видит историю
+          температуры, влажности, ветра — те же данные что LinearRegression,
+          но в агрегированном виде.
+
+      colsample_bytree=0.80: 165×0.8≈132 признака/дерево — сохраняем разнообразие.
+      min_child_weight=10: с 165 признаками пространство разбивается точнее,
+                           листья могут быть чуть меньше чем при 71 признаке.
+      Соотношение 165:6100 = 1:37 — безопасно при reg_alpha+reg_lambda.
+    """
     class MultiHorizonXGB:
+        """
+        Обучает отдельный XGBRegressor на каждый шаг горизонта.
+        Поддерживает early stopping по валидации для снижения переобучения.
+        """
         def __init__(self) -> None:
             self.models: List[xgb.XGBRegressor] = []
             self.horizon: Optional[int] = None
 
-        def _make_estimator(self, offset: int = 0) -> xgb.XGBRegressor:
+        def _make_estimator(self, random_state_offset: int = 0) -> xgb.XGBRegressor:
             return xgb.XGBRegressor(
                 n_estimators=n_estimators,
                 learning_rate=learning_rate,
@@ -505,7 +269,7 @@ def build_xgboost(
                 min_child_weight=min_child_weight,
                 reg_alpha=0.1,
                 reg_lambda=2.0,
-                random_state=seed + offset,
+                random_state=seed + random_state_offset,
                 n_jobs=1,
                 verbosity=0,
                 tree_method="hist",
@@ -520,27 +284,182 @@ def build_xgboost(
             Y_val: Optional[np.ndarray] = None,
         ) -> "MultiHorizonXGB":
             self.horizon = Y_train.shape[1]
-            self.models  = []
+            self.models = []
             use_val = X_val is not None and Y_val is not None
             for h in range(self.horizon):
-                m = self._make_estimator(offset=h)
+                model = self._make_estimator(random_state_offset=h)
                 if use_val:
-                    m.fit(X_train, Y_train[:, h],
-                          eval_set=[(X_val, Y_val[:, h])], verbose=False)
+                    model.fit(
+                        X_train, Y_train[:, h],
+                        eval_set=[(X_val, Y_val[:, h])],
+                        verbose=False,
+                    )
                 else:
-                    m.fit(X_train, Y_train[:, h], verbose=False)
-                self.models.append(m)
+                    model.fit(X_train, Y_train[:, h], verbose=False)
+                self.models.append(model)
             return self
 
         def predict(self, X: np.ndarray) -> np.ndarray:
             if not self.models:
-                raise RuntimeError("Модель не обучена.")
-            return np.stack([m.predict(X) for m in self.models],
-                            axis=1).astype(np.float32)
+                raise RuntimeError("Модель не обучена: вызовите fit() перед predict().")
+            preds = [m.predict(X) for m in self.models]
+            return np.stack(preds, axis=1).astype(np.float32)
 
     logger.info(
-        "XGBoost v5 | ~165 признаков | 24 модели | "
+        "XGBoost (FullLags + RollingAllChannels + MultiHorizon) | "
+        "~165 признаков | %d независимых моделей + val-early-stopping | "
         "n_est=%d depth=%d min_cw=%d",
-        n_estimators, max_depth, min_child_weight,
+        24, n_estimators, max_depth, min_child_weight,
     )
     return LagFeaturesWrapper(MultiHorizonXGB(), name="XGBoost")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# НАИВНЫЕ БАЗЛАЙНЫ
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# Все три работают в НОРМИРОВАННОМ пространстве (как и остальные модели):
+# на вход подаётся X формы (N, T, F), где канал 0 — масштабированное
+# потребление, на выходе — (N, H) в том же масштабе. Это позволяет прогонять их
+# через тот же ModelTrainer и сравнивать в одной таблице без оговорок.
+
+
+class _SeasonalNaive:
+    """
+    Сезонно-наивный прогноз: ŷ[t+j] = y[t+j-m].
+
+    Значение «m часов назад» для целевого шага j лежит в окне истории на
+    позиции T + j - m. Условие доступности: T >= m (окно должно покрывать
+    целый сезонный период). Иначе автоматический откат на m=24.
+
+    m=24  — прогноз «как вчера в этот же час» (классический базлайн нагрузки);
+    m=168 — «как неделю назад», учитывает различие будни/выходные.
+    """
+
+    def __init__(self, season_length: int = 24, name: str = "") -> None:
+        self.season_length = int(season_length)
+        self.effective_season = self.season_length
+        self.horizon: Optional[int] = None
+        self.name = name or f"Naive{season_length}"
+
+    def fit(self, X_train, Y_train, X_val=None, Y_val=None) -> "_SeasonalNaive":
+        _, T, _ = X_train.shape
+        H = Y_train.shape[1]
+        self.horizon = int(H)
+        if T < self.season_length:
+            fallback = 24 if T >= 24 else T
+            logger.warning(
+                "%s: длина истории T=%d < периода m=%d → откат на m=%d. "
+                "Для корректного недельного базлайна нужен HISTORY_LENGTH >= 168.",
+                self.name, T, self.season_length, fallback,
+            )
+            self.effective_season = fallback
+        else:
+            self.effective_season = self.season_length
+
+        if H > self.effective_season:
+            logger.warning(
+                "%s: горизонт H=%d больше периода m=%d — часть шагов повторит "
+                "начало того же периода.", self.name, H, self.effective_season,
+            )
+        logger.info("%s обучен (обучение не требуется) | m=%d ч",
+                    self.name, self.effective_season)
+        return self
+
+    def predict(self, X: np.ndarray) -> np.ndarray:
+        if self.horizon is None:
+            raise RuntimeError("Модель не обучена: вызовите fit() перед predict().")
+        _, T, _ = X.shape
+        m = self.effective_season
+        start = T - m
+        idx = [(start + j) % T for j in range(self.horizon)]
+        return X[:, idx, CH_CONSUMPTION].astype(np.float32)
+
+
+class _HourlyProfile:
+    """
+    Климатологический базлайн: среднее потребление по (час × день недели),
+    вычисленное на обучающей выборке.
+
+    Час и день недели восстанавливаются из циклических признаков окна
+    (hour_sin/hour_cos, dow_sin/dow_cos) — отдельный календарь не нужен.
+    Это «сезонный профиль без динамики»: он не знает текущего уровня нагрузки
+    и потому показывает, какую долю дисперсии объясняет один лишь календарь.
+    """
+
+    def __init__(self, name: str = "HourlyProfile") -> None:
+        self.name = name
+        self.profile: Optional[np.ndarray] = None   # (7, 24)
+        self.global_mean: float = 0.0
+        self.horizon: Optional[int] = None
+
+    @staticmethod
+    def _decode_hour(x_step: np.ndarray) -> np.ndarray:
+        """Восстанавливает час [0..23] из (hour_sin, hour_cos)."""
+        ang = np.arctan2(x_step[:, CH_HOUR_SIN], x_step[:, CH_HOUR_COS])
+        return np.mod(np.round(ang / (2 * np.pi) * 24), 24).astype(int)
+
+    @staticmethod
+    def _decode_weekday(x_step: np.ndarray) -> np.ndarray:
+        """Восстанавливает день недели [0..6] из (dow_sin, dow_cos)."""
+        ang = np.arctan2(x_step[:, CH_DOW_SIN], x_step[:, CH_DOW_COS])
+        return np.mod(np.round(ang / (2 * np.pi) * 7), 7).astype(int)
+
+    def fit(self, X_train, Y_train, X_val=None, Y_val=None) -> "_HourlyProfile":
+        N, T, _ = X_train.shape
+        self.horizon = int(Y_train.shape[1])
+        # Разворачиваем окна в набор наблюдений (час, день недели, потребление).
+        sums = np.zeros((7, 24), dtype=np.float64)
+        counts = np.zeros((7, 24), dtype=np.float64)
+
+        for step in range(T):
+            xs = X_train[:, step, :]
+            hours = self._decode_hour(xs)
+            wdays = self._decode_weekday(xs)
+            vals = X_train[:, step, CH_CONSUMPTION].astype(np.float64)
+            np.add.at(sums, (wdays, hours), vals)
+            np.add.at(counts, (wdays, hours), 1.0)
+
+        self.global_mean = float(X_train[:, :, CH_CONSUMPTION].mean())
+        with np.errstate(invalid="ignore", divide="ignore"):
+            profile = np.where(counts > 0, sums / np.maximum(counts, 1e-9), self.global_mean)
+        self.profile = profile.astype(np.float32)
+
+        empty = int((counts == 0).sum())
+        logger.info(
+            "%s обучен | профиль 7×24, пустых ячеек=%d, среднее=%.4f",
+            self.name, empty, self.global_mean,
+        )
+        return self
+
+    def predict(self, X: np.ndarray) -> np.ndarray:
+        if self.profile is None or self.horizon is None:
+            raise RuntimeError("Модель не обучена: вызовите fit() перед predict().")
+        H = self.horizon
+        last = X[:, -1, :]
+        h_last = self._decode_hour(last)
+        w_last = self._decode_weekday(last)
+
+        preds = np.empty((X.shape[0], H), dtype=np.float32)
+        for j in range(H):
+            # Целевой шаг j отстоит от последнего шага окна на (j+1) часов.
+            hour = np.mod(h_last + j + 1, 24)
+            day_shift = (h_last + j + 1) // 24
+            wday = np.mod(w_last + day_shift, 7)
+            preds[:, j] = self.profile[wday, hour]
+        return preds
+
+
+def build_persistence_24() -> _SeasonalNaive:
+    """Наивный суточный базлайн: «завтра как вчера в тот же час»."""
+    return _SeasonalNaive(season_length=24, name="Naive24 (сутки)")
+
+
+def build_seasonal_naive_168() -> _SeasonalNaive:
+    """Наивный недельный базлайн: «как в тот же час неделю назад»."""
+    return _SeasonalNaive(season_length=168, name="Naive168 (неделя)")
+
+
+def build_hourly_profile() -> _HourlyProfile:
+    """Климатологический базлайн: среднее по (час × день недели) на train."""
+    return _HourlyProfile()

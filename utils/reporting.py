@@ -27,7 +27,7 @@ import pandas as pd
 logger = logging.getLogger("smart_grid.utils.reporting")
 
 # Порядок колонок в сводной таблице: сначала то, что идёт в записку.
-_METRIC_ORDER = ["model", "seed", "split", "MAE", "RMSE", "MAPE", "sMAPE", "R2",
+_METRIC_ORDER = ["model", "mode", "scenario", "seed", "split", "MAE", "RMSE", "MAPE", "sMAPE", "R2",
                  "MASE", "DW", "ACF_24", "ACF_168", "kurtosis",
                  "n_params", "train_time_sec"]
 
@@ -176,6 +176,8 @@ def export_metrics(
     split: str = "test",
     run_meta: Optional[Dict[str, Any]] = None,
     append: bool = True,
+    mode: str = "",
+    scenario: str = "",
 ) -> str:
     """
     Сохраняет сводную таблицу метрик в CSV и JSON.
@@ -188,9 +190,16 @@ def export_metrics(
         каждый прогон добавляет свои строки, а агрегация делается по колонке seed.
     """
     os.makedirs(output_dir, exist_ok=True)
+    # Режим и сценарий обязаны попасть в таблицу: без них строки прогонов
+    # smoke, fast и optimal с одним сидом неразличимы, затирают друг друга при
+    # дозаписи, а агрегация по сидам смешивает несопоставимые результаты.
+    mode = mode or (run_meta or {}).get("mode", "")
+    scenario = scenario or (run_meta or {}).get("scenario", "")
+
     rows = []
     for name, m in all_metrics.items():
-        row: Dict[str, Any] = {"model": name, "seed": seed, "split": split}
+        row: Dict[str, Any] = {"model": name, "mode": mode, "scenario": scenario,
+                               "seed": seed, "split": split}
         row.update({k: v for k, v in m.items()})
         rows.append(row)
 
@@ -200,8 +209,13 @@ def export_metrics(
     if append and os.path.exists(csv_path):
         try:
             df_old = pd.read_csv(csv_path)
-            # Строки того же сида и сплита перезаписываются, а не дублируются.
-            mask = ~((df_old.get("seed") == seed) & (df_old.get("split") == split))
+            # Перезаписывается только та же комбинация режим+сценарий+сид+сплит.
+            same = (df_old.get("seed") == seed) & (df_old.get("split") == split)
+            if "mode" in df_old.columns:
+                same &= df_old["mode"].fillna("") == mode
+            if "scenario" in df_old.columns:
+                same &= df_old["scenario"].fillna("") == scenario
+            mask = ~same
             df_new = pd.concat([df_old[mask], df_new], ignore_index=True)
         except Exception as exc:
             logger.warning("Не удалось прочитать существующий metrics.csv (%s), "
@@ -350,6 +364,31 @@ def export_markdown_tables(
     return path
 
 
+def copy_plots_to_run(plots_dir: str, run_dir: str) -> int:
+    """
+    Копирует графики прогона в его собственный каталог.
+
+    Графики строятся в общий results/plots, поэтому каждый следующий запуск
+    затирает предыдущий: после optimal картинки от fast исчезают. Копия рядом
+    с метриками сохраняет полный комплект результатов каждого прогона.
+    """
+    import shutil
+
+    target = os.path.join(run_dir, "plots")
+    os.makedirs(target, exist_ok=True)
+    copied = 0
+    for name in sorted(os.listdir(plots_dir)) if os.path.isdir(plots_dir) else []:
+        if not name.lower().endswith(".png"):
+            continue
+        try:
+            shutil.copy2(os.path.join(plots_dir, name), os.path.join(target, name))
+            copied += 1
+        except OSError as exc:
+            logger.warning("Не удалось скопировать график %s: %s", name, exc)
+    logger.info("Графики прогона сохранены: %s (%d шт.)", target, copied)
+    return copied
+
+
 def aggregate_seeds(output_dir: str) -> Optional[str]:
     """
     Агрегирует metrics.csv по сидам: mean ± std для каждой модели.
@@ -365,6 +404,16 @@ def aggregate_seeds(output_dir: str) -> Optional[str]:
     if "seed" not in df.columns or df["seed"].nunique() < 2:
         logger.info("Агрегация по сидам пропущена: в metrics.csv один сид. "
                     "Запустите пайплайн с --seed 0,1,2 для оценки разброса.")
+        return None
+
+    # Агрегируются только сопоставимые прогоны: смешивать режимы нельзя.
+    if "mode" in df.columns and df["mode"].nunique() > 1:
+        latest = df.sort_index().iloc[-1]["mode"]
+        logger.info("В metrics.csv несколько режимов — агрегация только по '%s'.", latest)
+        df = df[df["mode"] == latest]
+    df = df[df.get("split", "test") == "test"] if "split" in df.columns else df
+    if df["seed"].nunique() < 2:
+        logger.info("Агрегация по сидам пропущена: в выбранном режиме один сид.")
         return None
 
     num_cols = [c for c in ("MAE", "RMSE", "MAPE", "sMAPE", "R2", "MASE")

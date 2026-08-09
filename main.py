@@ -520,6 +520,7 @@ def main(argv=None) -> int:
     reporting.export_markdown_tables(test_metrics, run_dir,
                                      dm_rows=dm_rows,
                                      storage_results=storage_results or None)
+    reporting.copy_plots_to_run(Config.PLOTS_DIR, run_dir)
     reporting.aggregate_seeds(Config.OUTPUT_DIR)
 
     # Экспорт бандла лучшей модели (только для Keras — sklearn-обёртки

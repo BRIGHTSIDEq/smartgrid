@@ -200,7 +200,13 @@ class FlattenWrapper:
         Y_val: Optional[np.ndarray] = None,
     ) -> "FlattenWrapper":
         X2d = X_train.reshape(X_train.shape[0], -1)
-        self.estimator.fit(X2d, Y_train)
+        # Валидация пробрасывается в оценщик: она нужна для подбора
+        # регуляризации так же, как ранняя остановка нужна остальным моделям.
+        if X_val is not None and Y_val is not None:
+            self.estimator.fit(X2d, Y_train,
+                               X_val=X_val.reshape(X_val.shape[0], -1), Y_val=Y_val)
+        else:
+            self.estimator.fit(X2d, Y_train)
         logger.info("%s обучен | X_flat: %d фич", self.name, X2d.shape[1])
         return self
 
@@ -216,13 +222,60 @@ class FlattenWrapper:
 # ПУБЛИЧНЫЙ API
 # ══════════════════════════════════════════════════════════════════════════════
 
-def build_linear_regression(alpha: float = 1.0) -> FlattenWrapper:
+class RidgeValidationAlpha:
     """
-    Ridge regression на полном сглаженном окне (N, 528).
-    Ridge нечувствителен к мультиколлинеарности — сырое окно ему подходит.
-    alpha=1.0 — умеренная регуляризация.
+    Ridge с выбором коэффициента регуляризации по ВАЛИДАЦИОННОЙ выборке.
+
+    Фиксированная alpha ставила линейную модель в неравные условия: у бустинга
+    есть ранняя остановка и собственная регуляризация, у сетей — dropout и
+    ранняя остановка, а Ridge обучался с произвольным значением. На развёрнутом
+    окне признаков в разы больше, чем нужно, и при слабой регуляризации модель
+    переобучается — это видно по немонотонной деградации ошибки с горизонтом.
+
+    Перебор идёт по логарифмической сетке, alpha выбирается по MAE на
+    валидации. Встроенный RidgeCV здесь не годится: он использует
+    перекрёстную проверку со случайным разбиением, что для временного ряда
+    означает подглядывание в будущее.
     """
-    return FlattenWrapper(Ridge(alpha=alpha), name="LinearRegression")
+
+    def __init__(self, alphas=None) -> None:
+        self.alphas = list(alphas) if alphas is not None else list(np.logspace(-1, 5, 13))
+        self.alpha_: Optional[float] = None
+        self.model_: Optional[Ridge] = None
+
+    def fit(self, X2d, Y, X_val=None, Y_val=None) -> "RidgeValidationAlpha":
+        if X_val is None or Y_val is None:
+            self.alpha_ = float(np.median(self.alphas))
+            self.model_ = Ridge(alpha=self.alpha_).fit(X2d, Y)
+            logger.warning(
+                "Ridge: валидация не передана, alpha взята медианной (%.3g)", self.alpha_)
+            return self
+
+        best = (np.inf, None, None)
+        for a in self.alphas:
+            m = Ridge(alpha=a).fit(X2d, Y)
+            mae = float(np.mean(np.abs(Y_val - m.predict(X_val))))
+            if mae < best[0]:
+                best = (mae, a, m)
+        _, self.alpha_, self.model_ = best
+        logger.info("Ridge: alpha=%.4g выбрана по валидации из %d значений (MAE_val=%.4f)",
+                    self.alpha_, len(self.alphas), best[0])
+        return self
+
+    def predict(self, X2d):
+        if self.model_ is None:
+            raise RuntimeError("Модель не обучена: вызовите fit() перед predict().")
+        return self.model_.predict(X2d)
+
+
+def build_linear_regression(alphas=None) -> FlattenWrapper:
+    """
+    Ridge на полном развёрнутом окне признаков с подбором alpha по валидации.
+
+    Ridge нечувствителен к мультиколлинеарности, поэтому сырое окно ему
+    подходит; критичен только уровень регуляризации.
+    """
+    return FlattenWrapper(RidgeValidationAlpha(alphas), name="LinearRegression")
 
 
 class MultiHorizonXGB:

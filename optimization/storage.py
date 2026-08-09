@@ -125,6 +125,28 @@ class StorageResult:
 # ЯДРО СИМУЛЯЦИИ
 # ══════════════════════════════════════════════════════════════════════════════
 
+def cycle_margin_rub_per_kwh(
+    discharge_price: float,
+    charge_price: float,
+    one_way_eff: float,
+    cycle_cost_per_kwh: float,
+) -> float:
+    """
+    Маржа одного цикла в расчёте на 1 кВт·ч, снятый с батареи.
+
+        выручка  = цена разряда × КПД разряда
+        затраты  = цена заряда / КПД заряда  +  удельная деградация
+
+    Величина знаковая: при современной стоимости накопителя деградация
+    сопоставима с тарифным спредом, поэтому цикл «ночь → полупик» уходит в
+    минус, а «ночь → пик» остаётся слабо прибыльным. Контроллер, который этого
+    не проверяет, изнашивает батарею быстрее, чем зарабатывает.
+    """
+    revenue = discharge_price * one_way_eff
+    cost = charge_price / one_way_eff + cycle_cost_per_kwh
+    return revenue - cost
+
+
 def _shaving_thresholds(
     forecast: np.ndarray,
     quantile: float = 0.85,
@@ -169,6 +191,7 @@ def simulate_storage(
     policy: str = "tariff",
     shave_quantile: float = 0.85,
     forecast_source: str = "",
+    require_positive_margin: bool = True,
 ) -> StorageResult:
     """
     Симулирует работу накопителя и считает экономический эффект.
@@ -191,6 +214,12 @@ def simulate_storage(
     start_hour, start_weekday : int
         Календарная привязка первой точки ряда. Без неё тарифные зоны
         сдвигаются относительно данных и весь расчёт теряет смысл.
+    require_positive_margin : bool
+        Запрещать разряд, если цикл убыточен: выручка от разряда не покрывает
+        стоимость ночного заряда и износа. Исключение — пиковая биллинговая
+        зона: там разряд снижает плату за мощность, а она на порядок превышает
+        потери одного цикла. Без этой проверки контроллер циклирует батарею в
+        полупиковой зоне себе в убыток.
     """
     if battery_cost_rub is None:
         raise TypeError(
@@ -234,6 +263,18 @@ def simulate_storage(
     grid_peak_hours_baseline: List[float] = []
     grid_peak_hours_optimized: List[float] = []
 
+    def _discharge_is_worthwhile(discharge_price: float, zone: str) -> bool:
+        """Оправдан ли разряд экономически в данный час."""
+        if not require_positive_margin:
+            return True
+        # Снижение платы за мощность взимается по максимуму в пиковой зоне и
+        # многократно перекрывает убыток от одного цикла, поэтому там разряд
+        # оправдан независимо от арбитражной маржи.
+        if zone == "peak" and demand_charge_rub_per_kw_month > 0:
+            return True
+        return cycle_margin_rub_per_kwh(
+            discharge_price, tariff_night, one_way_eff, cycle_cost_per_kwh) > 0
+
     for i in range(n):
         planned = float(forecast[i])       # что видит контроллер
         real = float(actual_arr[i])        # что произошло на самом деле
@@ -246,7 +287,8 @@ def simulate_storage(
         if policy == "tariff":
             if zone == "night" and soc < soc_max_kwh - 0.1:
                 charge_cmd = min(max_power, soc_max_kwh - soc)
-            elif zone == "peak" and soc > soc_min_kwh + 0.1:
+            elif (zone == "peak" and soc > soc_min_kwh + 0.1
+                  and _discharge_is_worthwhile(price, zone)):
                 discharge_cmd = min(max_power, soc - soc_min_kwh)
         else:
             # Прогноз-зависимая срезка пика: разряжаем ровно столько, сколько
@@ -255,7 +297,7 @@ def simulate_storage(
                 charge_cmd = min(max_power, soc_max_kwh - soc)
             elif zone in ("peak", "day") and soc > soc_min_kwh + 0.1:
                 excess = planned - float(thresholds[i])
-                if excess > 0:
+                if excess > 0 and _discharge_is_worthwhile(price, zone):
                     deliverable = min(max_power, soc - soc_min_kwh) * one_way_eff
                     delivered_target = min(excess, deliverable)
                     discharge_cmd = delivered_target / one_way_eff

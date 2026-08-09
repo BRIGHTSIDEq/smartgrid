@@ -300,3 +300,28 @@ def test_bundle_export_is_not_limited_to_keras():
         "экспорт бандла не должен зависеть от типа модели"
     )
     assert '"deployable_model"' in src
+
+def test_seed_aggregation_records_what_it_aggregated(tmp_path):
+    """
+    Сводная таблица по сидам называет режим и сиды.
+
+    Без этого она неинтерпретируема: MAE агрегатного ряда города и MAE
+    отдельного фидера различаются в разы, а по одним числам не понять, что
+    именно усреднено.
+    """
+    import pandas as pd
+    from utils import reporting
+
+    rows = []
+    for seed in (0, 1):
+        for model in ("XGBoost", "Naive24"):
+            rows.append({"model": model, "seed": seed, "split": "test", "mode": "panel-fast",
+                         "MAE": 10.0 + seed, "RMSE": 12.0, "MAPE": 4.0, "R2": 0.99, "MASE": 0.6})
+    pd.DataFrame(rows).to_csv(tmp_path / "metrics.csv", index=False, encoding="utf-8-sig")
+
+    out = reporting.aggregate_seeds(str(tmp_path))
+    assert out is not None
+
+    agg = pd.read_csv(out, encoding="utf-8-sig")
+    assert (agg["mode"] == "panel-fast").all()
+    assert (agg["seeds"] == "0,1").all()

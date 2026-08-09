@@ -402,6 +402,12 @@ def aggregate_seeds(output_dir: str) -> Optional[str]:
     agg.columns = ["_".join(c) for c in agg.columns]
     agg = agg.sort_values("MAE_mean")
 
+    # Режим и перечень сидов записываются в сам файл: без них таблица
+    # неинтерпретируема — MAE агрегатного ряда города и MAE отдельного фидера
+    # различаются в разы, и по одним числам не понять, что именно усреднено.
+    agg.insert(0, "mode", str(df["mode"].iloc[-1]) if "mode" in df.columns else "")
+    agg.insert(1, "seeds", ",".join(str(s) for s in sorted(df["seed"].unique())))
+
     path = os.path.join(output_dir, "metrics_by_seed.csv")
     agg.to_csv(path, encoding="utf-8-sig")
 

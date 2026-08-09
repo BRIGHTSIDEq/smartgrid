@@ -18,6 +18,7 @@ models/panel_models.py — модели для многорядного (panel) 
 именно так устроены современные системы прогнозирования нагрузки.
 """
 
+import inspect
 import logging
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -220,10 +221,22 @@ class PanelSklearnModel:
 
 
 def _fit_one(model, X, y, X_val, y_val) -> None:
-    """Обучает модель, передавая валидацию, если она поддерживается."""
-    try:
+    """
+    Обучает модель, передавая валидацию тем, кто её принимает.
+
+    Диспетчеризация идёт по сигнатуре, а не по перехвату TypeError. Перехват
+    неотличим от TypeError, возникшего ВНУТРИ уже начавшегося обучения, и тогда
+    модель молча переобучается без валидации. Именно так Ridge оставался с
+    первой alpha из сетки: его fit не принимает eval_set, вызов падал, запасной
+    путь обучал без валидации, и подбор регуляризации не происходил вовсе.
+    """
+    params = inspect.signature(model.fit).parameters
+
+    if "eval_set" in params:                       # xgboost, lightgbm
         model.fit(X, y, eval_set=[(X_val, y_val)], verbose=False)
-    except TypeError:
+    elif "X_val" in params:                        # собственные обёртки с отбором
+        model.fit(X, y, X_val=X_val, Y_val=y_val)
+    else:                                          # обычный sklearn-регрессор
         model.fit(X, y)
 
 
@@ -234,20 +247,44 @@ def build_panel_ridge(alphas=None):
     grid = list(alphas) if alphas is not None else list(np.logspace(-3, 5, 17))
 
     class _RidgeCV:
+        """
+        Перебор alpha по отложенной валидации.
+
+        Готовый RidgeCV из sklearn здесь не подходит: он отбирает по
+        перекрёстной проверке со случайным разбиением, а на временном ряде это
+        обучение на будущем. Нужен именно хронологический отложенный отрезок.
+        """
+
         def __init__(self):
             self.model = None
             self.alpha_ = None
+            self.val_mae_ = None
 
         def fit(self, X, Y, X_val=None, Y_val=None):
+            if X_val is None or Y_val is None:
+                raise ValueError(
+                    "_RidgeCV требует валидационную выборку: без неё отбор alpha "
+                    "не выполняется и модель молча остаётся с первым значением сетки."
+                )
+
             best = (np.inf, None, None)
             for a in grid:
                 m = Ridge(alpha=a).fit(X, Y)
-                score = float(np.mean(np.abs(Y_val - m.predict(X_val)))) \
-                    if X_val is not None else 0.0
+                score = float(np.mean(np.abs(Y_val - m.predict(X_val))))
                 if score < best[0]:
                     best = (score, a, m)
-            _, self.alpha_, self.model = best
-            logger.info("Panel Ridge: alpha=%.4g (MAE_val=%.5f)", self.alpha_, best[0])
+            self.val_mae_, self.alpha_, self.model = best
+
+            # Оптимум на краю сетки означает, что она не покрывает нужный
+            # диапазон, и выбранное значение упирается в границу перебора.
+            if self.alpha_ in (grid[0], grid[-1]) and len(grid) > 1:
+                logger.warning(
+                    "Panel Ridge: alpha=%.4g на границе сетки [%.4g, %.4g] — "
+                    "оптимум может лежать за её пределами",
+                    self.alpha_, grid[0], grid[-1])
+
+            logger.info("Panel Ridge: alpha=%.4g (MAE_val=%.5f, перебрано %d значений)",
+                        self.alpha_, self.val_mae_, len(grid))
             return self
 
         def predict(self, X):

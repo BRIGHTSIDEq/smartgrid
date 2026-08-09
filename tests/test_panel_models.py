@@ -119,6 +119,113 @@ def test_panel_ridge_trains_and_predicts(panel_data):
     assert np.isfinite(pred).all()
 
 
+def test_ridge_selection_responds_to_data():
+    """
+    Отбор alpha действительно опирается на валидацию.
+
+    Две задачи с известным ответом. На чистом шуме выигрывает максимальная
+    регуляризация: любой наклон только повторяет шум обучающей выборки. На
+    точной линейной зависимости без шума выигрывает минимальная: сжимать
+    коэффициенты здесь нечего. Если отбор не работает, обе задачи дадут одну и
+    ту же alpha.
+    """
+    from models.panel_models import build_panel_ridge
+
+    grid = [1e-3, 1.0, 1e3, 1e6]
+    rng = np.random.RandomState(0)
+
+    def _alpha_for(noise_only: bool) -> float:
+        X, X_val = rng.normal(size=(120, 15)), rng.normal(size=(60, 15))
+        w = rng.normal(size=(15, 3))
+        if noise_only:
+            Y, Y_val = rng.normal(size=(120, 3)), rng.normal(size=(60, 3))
+        else:
+            Y, Y_val = X @ w, X_val @ w
+        model = build_panel_ridge(alphas=grid).factory(0)
+        model.fit(X, Y, X_val=X_val, Y_val=Y_val)
+        assert model.val_mae_ is not None and np.isfinite(model.val_mae_)
+        return model.alpha_
+
+    assert _alpha_for(noise_only=True) == max(grid), "на шуме нужна сильная регуляризация"
+    assert _alpha_for(noise_only=False) == min(grid), "на точной зависимости — слабая"
+
+
+def test_ridge_refuses_to_fit_without_validation():
+    """
+    Без валидации отбор невозможен, и это отказ, а не тихий запасной путь.
+
+    В ранней версии score молча становился нулём для каждой alpha, побеждало
+    первое значение сетки, и в журнале стояло MAE_val=0.00000 — единственный
+    внешний признак того, что подбора не было.
+    """
+    from models.panel_models import build_panel_ridge
+
+    model = build_panel_ridge(alphas=[0.1, 10.0]).factory(0)
+    X, Y = np.random.RandomState(1).normal(size=(40, 5)), np.random.RandomState(2).normal(size=(40, 2))
+
+    with pytest.raises(ValueError, match="валидацион"):
+        model.fit(X, Y)
+
+
+def test_fit_one_delivers_validation_by_signature():
+    """Валидация доходит до модели независимо от того, как та её принимает."""
+    from models.panel_models import _fit_one
+
+    seen = {}
+
+    class _EvalSetStyle:                       # как xgboost
+        def fit(self, X, y, eval_set=None, verbose=True):
+            seen["eval_set"] = eval_set
+
+    class _KeywordStyle:                       # как собственная обёртка Ridge
+        def fit(self, X, Y, X_val=None, Y_val=None):
+            seen["X_val"] = X_val
+
+    class _PlainStyle:                         # обычный sklearn
+        def fit(self, X, y):
+            seen["plain"] = True
+
+    X, y, Xv, yv = np.zeros((4, 2)), np.zeros(4), np.ones((3, 2)), np.ones(3)
+    for model in (_EvalSetStyle(), _KeywordStyle(), _PlainStyle()):
+        _fit_one(model, X, y, Xv, yv)
+
+    assert seen["eval_set"] is not None and len(seen["eval_set"]) == 1
+    assert seen["X_val"] is not None and seen["X_val"].shape == (3, 2)
+    assert seen["plain"] is True
+
+
+def test_fit_one_does_not_swallow_internal_type_error():
+    """
+    Ошибка внутри обучения обязана всплыть, а не приводить к тихому повтору.
+
+    Перехват TypeError вокруг вызова неотличим от TypeError, брошенного самой
+    моделью: обучение молча повторялось бы уже без валидации.
+    """
+    from models.panel_models import _fit_one
+
+    calls = []
+
+    class _FailsInside:
+        def fit(self, X, y, eval_set=None, verbose=True):
+            calls.append(1)
+            raise TypeError("сбой внутри обучения")
+
+    with pytest.raises(TypeError, match="внутри обучения"):
+        _fit_one(_FailsInside(), np.zeros((4, 2)), np.zeros(4), np.ones((3, 2)), np.ones(3))
+    assert len(calls) == 1, "повторного обучения быть не должно"
+
+
+def test_panel_ridge_is_tuned_end_to_end(panel_data):
+    """Через штатный путь обучения Ridge получает валидацию и подбирает alpha."""
+    model = build_panel_ridge(alphas=[1e-2, 1.0, 1e2, 1e4])
+    PanelTrainer(model, "Ridge").train(panel_data)
+
+    inner = model.models[0]
+    assert inner.val_mae_ is not None and inner.val_mae_ > 0, (
+        "нулевая ошибка валидации означает, что отбор alpha не выполнялся"
+    )
+
+
 def test_hourly_profile_is_per_series(panel_data):
     """Профиль строится отдельно для каждого ряда, а не общий на панель."""
     model = PanelHourlyProfile().fit(panel_data)

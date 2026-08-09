@@ -70,6 +70,15 @@ def parse_args(argv=None) -> argparse.Namespace:
              "агрегатном ряде города (см. config.py)")
     parser.add_argument("--seed", type=int, default=Config.SEED,
                         help="Сид генератора случайных чисел")
+    parser.add_argument("--dataset", choices=["synthetic", "uci"], default="synthetic",
+                        help="Источник данных для panel-режимов: synthetic — "
+                             "собственный генератор, uci — реальные измерения "
+                             "ElectricityLoadDiagrams20112014 (370 клиентов "
+                             "Португалии). Внешний набор проверяет выводы на "
+                             "данных, которых проект не создавал")
+    parser.add_argument("--uci-path", type=str, default="data/raw/LD2011_2014.txt",
+                        metavar="ПУТЬ",
+                        help="Файл набора UCI. Не скачивается автоматически")
     parser.add_argument("--models", type=str, default="all",
                         help="Список моделей через запятую: "
                              + ",".join(MODEL_REGISTRY) + " либо all")

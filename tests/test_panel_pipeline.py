@@ -5,6 +5,8 @@
 """
 
 import inspect
+import json
+import logging
 
 import pytest
 
@@ -155,6 +157,88 @@ def test_selection_excludes_naive_from_best_model():
     idx_best = src.index("best_name = min(")
     idx_test = src.index('compare_panel_models(trainers, data, "test")')
     assert idx_val < idx_best < idx_test
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ИСТОЧНИК ДАННЫХ
+# ══════════════════════════════════════════════════════════════════════════════
+
+def test_dataset_switch_is_available_in_cli():
+    """Внешний набор выбирается тем же ключом запуска, что и синтетика."""
+    assert main_module.parse_args([]).dataset == "synthetic"
+    assert main_module.parse_args(["--dataset", "uci"]).dataset == "uci"
+    with pytest.raises(SystemExit):
+        main_module.parse_args(["--dataset", "kaggle"])
+
+
+def test_both_sources_enter_the_pipeline_at_one_point():
+    """
+    Ветвление по источнику происходит ровно один раз — до конвейера.
+
+    Если бы синтетика и реальные данные обрабатывались по-разному дальше по
+    коду, их результаты стали бы несравнимыми, а сравнение и есть единственная
+    причина подключать внешний набор.
+    """
+    src = inspect.getsource(panel_pipeline.run_panel_pipeline)
+    assert src.count("load_panel_dataset(") == 1
+    assert "generate_panel_data" not in src, (
+        "конвейер не должен обращаться к генератору напрямую"
+    )
+    assert 'dataset == "uci"' not in src, "ветвление по источнику осталось в конвейере"
+
+
+def test_uci_data_runs_through_the_whole_pipeline(tmp_path, monkeypatch, uci_file_factory):
+    """
+    Реальный формат проходит конвейер целиком, а не только адаптер.
+
+    Проверка отдельно взятого адаптера не поймала бы расхождение контракта:
+    отсутствие погодных колонок, другой набор статических признаков и иные
+    имена рядов проявляются только при сквозном прогоне.
+    """
+    # Файл обязан доходить до конца 2014 года: окно отсчитывается назад от
+    # конца наблюдений, и более короткий файл с ним просто не пересечётся.
+    path = uci_file_factory(tmp_path / "LD2011_2014.txt",
+                            start="2014-01-01 00:15:00", periods=96 * 365,
+                            connect_date="2014-01-01")
+
+    Config.set_panel_smoke_mode()
+    monkeypatch.setattr(Config, "OUTPUT_DIR", str(tmp_path / "results"))
+    monkeypatch.setattr(Config, "PANEL_DAYS", 120)
+
+    class _Args:
+        mode, scenario, seed = "panel-smoke", "current", 0
+        dataset, uci_path = "uci", str(path)
+
+    code = panel_pipeline.run_panel_pipeline(_Args(), logging.getLogger("test"))
+    assert code == 0, "конвейер не прошёл на реальном формате данных"
+
+    runs = list((tmp_path / "results" / "runs").iterdir())
+    assert len(runs) == 1
+    meta = json.loads((runs[0] / "run_metadata.json").read_text(encoding="utf-8"))
+    run = meta.get("run", meta)
+    assert run["dataset"] == "uci"
+    assert run["dataset_report"]["рядов отобрано"] == run["panel"]["n_series"]
+    assert run["failed_models"] == []
+
+
+def test_missing_uci_file_fails_before_creating_a_run(tmp_path, monkeypatch):
+    """
+    Отсутствие внешнего набора — понятный отказ, а не стек вызовов.
+
+    Проверка идёт до создания каталога прогона: иначе неудачный запуск оставлял
+    бы пустой каталог, неотличимый от прерванного вручную.
+    """
+    Config.set_panel_smoke_mode()
+    monkeypatch.setattr(Config, "OUTPUT_DIR", str(tmp_path / "results"))
+
+    class _Args:
+        mode, scenario, seed = "panel-smoke", "current", 0
+        dataset, uci_path = "uci", str(tmp_path / "нет.txt")
+
+    code = panel_pipeline.run_panel_pipeline(_Args(), logging.getLogger("test"))
+
+    assert code == 1
+    assert not (tmp_path / "results" / "runs").exists(), "создан каталог пустого прогона"
 
 
 def test_selection_uses_scale_free_criterion():

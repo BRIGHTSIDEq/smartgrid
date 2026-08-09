@@ -42,6 +42,63 @@ def estimate_windows(n_series: int, days: int, history: int, horizon: int,
     return n_series * per_series
 
 
+def load_panel_dataset(args, logger_obj) -> Tuple[Any, Any, Dict[str, Any]]:
+    """
+    Отдаёт панель либо от собственного генератора, либо из набора UCI.
+
+    Оба источника приводятся к одному формату ДО входа в конвейер, и дальше
+    обработка не ветвится. Любое расхождение в подготовке синтетики и реальных
+    данных сделало бы их результаты несравнимыми, а сравнение — единственная
+    причина подключать внешний набор.
+
+    Размер панели задаёт режим: число рядов и длительность окна берутся из тех
+    же PANEL_*, что и для генератора, поэтому объём вычислений сопоставим.
+    """
+    from data.panel import generate_panel_data
+
+    n_series = Config.PANEL_CITIES * Config.PANEL_FEEDERS_PER_CITY
+
+    if getattr(args, "dataset", "synthetic") == "uci":
+        import pandas as pd
+        from data.uci import uci_to_panel
+
+        # Окно отсчитывается назад от конца наблюдений: свежие годы полнее по
+        # составу клиентов, а привязка к фиксированной дате делает выборку
+        # одинаковой при любом запуске.
+        end = pd.Timestamp("2014-12-31 23:00")
+        start = end - pd.Timedelta(days=Config.PANEL_DAYS) + pd.Timedelta(hours=1)
+
+        df, specs, report = uci_to_panel(
+            args.uci_path, start=str(start.date()), end=str(end.date()),
+            max_series=n_series, train_ratio=Config.TRAIN_RATIO,
+        )
+        logger_obj.info("UCI: %d рядов × %d ч, разброс средних %.1f×, "
+                        "отсеяно по активности %d",
+                        report["рядов отобрано"], report["часов на ряд"],
+                        report["разброс средних, раз"], report["рядов отсеяно"])
+        return df, specs, report
+
+    df, specs = generate_panel_data(
+        days=Config.PANEL_DAYS,
+        n_cities=Config.PANEL_CITIES,
+        feeders_per_city=Config.PANEL_FEEDERS_PER_CITY,
+        start_date=Config.START_DATE,
+        seed=args.seed,
+        kwh_per_household_month=Config.GEN_KWH_PER_HOUSEHOLD_MONTH,
+        temp_annual_mean=Config.GEN_TEMP_ANNUAL_MEAN,
+        temp_annual_amplitude=Config.GEN_TEMP_ANNUAL_AMPLITUDE,
+        temp_min=Config.GEN_TEMP_MIN, temp_max=Config.GEN_TEMP_MAX,
+        temp_setpoint=Config.GEN_TEMP_SETPOINT,
+        cooling_setpoint=Config.GEN_COOLING_SETPOINT,
+        ev_share_of_households=Config.GEN_EV_PENETRATION,
+        solar_share_of_households=Config.GEN_SOLAR_PENETRATION,
+        annual_trend=Config.GEN_ANNUAL_TREND,
+        dsr_events_per_year=Config.GEN_DSR_EVENTS_PER_YEAR,
+        dsr_strength_range=Config.GEN_DSR_STRENGTH,
+    )
+    return df, specs, {"источник": "synthetic", "рядов отобрано": len(specs)}
+
+
 def build_panel_models(data: Dict[str, Any], seed: int) -> List[Tuple[Any, str]]:
     """
     Собирает состав моделей для панели.
@@ -90,7 +147,7 @@ def run_panel_pipeline(args, logger_obj) -> int:
     Молчаливое исключение упавшей модели с успешным кодом возврата скрывало бы
     отказ, поэтому такой запуск успешным не считается.
     """
-    from data.panel import generate_panel_data, validate_panel
+    from data.panel import validate_panel
     from data.panel_preprocessing import prepare_panel_data
     from models.panel_trainer import (
         PanelTrainer, compare_panel_models, bottom_up_city_forecast,
@@ -114,32 +171,29 @@ def run_panel_pipeline(args, logger_obj) -> int:
         )
         return 1
 
+    # ── Отказ до создания каталога, если источник данных недоступен ──────────
+    # Тот же принцип, что и у проверки памяти: неудача после создания каталога
+    # оставила бы пустой прогон, неотличимый от прерванного вручную.
+    if getattr(args, "dataset", "synthetic") == "uci":
+        from data.uci import UCI_FILENAME, UCI_URL
+        if not os.path.exists(args.uci_path):
+            logger_obj.error(
+                "Набор UCI не найден: %s. Файл не скачивается автоматически — "
+                "загрузите архив с %s и распакуйте %s по этому пути.",
+                args.uci_path, UCI_URL, UCI_FILENAME)
+            return 1
+
     run_dir = reporting.make_run_dir(Config.OUTPUT_DIR, args.mode, args.scenario, args.seed)
     Config.PLOTS_DIR = os.path.join(run_dir, "plots")
     Config.MODELS_DIR = os.path.join(run_dir, "models")
     os.makedirs(Config.PLOTS_DIR, exist_ok=True)
     os.makedirs(Config.MODELS_DIR, exist_ok=True)
 
-    # ── [1/6] Генерация панели ──────────────────────────────────────────────
-    logger_obj.info("\n[1/6] Генерация панели рядов...")
-    df, specs = generate_panel_data(
-        days=Config.PANEL_DAYS,
-        n_cities=Config.PANEL_CITIES,
-        feeders_per_city=Config.PANEL_FEEDERS_PER_CITY,
-        start_date=Config.START_DATE,
-        seed=args.seed,
-        kwh_per_household_month=Config.GEN_KWH_PER_HOUSEHOLD_MONTH,
-        temp_annual_mean=Config.GEN_TEMP_ANNUAL_MEAN,
-        temp_annual_amplitude=Config.GEN_TEMP_ANNUAL_AMPLITUDE,
-        temp_min=Config.GEN_TEMP_MIN, temp_max=Config.GEN_TEMP_MAX,
-        temp_setpoint=Config.GEN_TEMP_SETPOINT,
-        cooling_setpoint=Config.GEN_COOLING_SETPOINT,
-        ev_share_of_households=Config.GEN_EV_PENETRATION,
-        solar_share_of_households=Config.GEN_SOLAR_PENETRATION,
-        annual_trend=Config.GEN_ANNUAL_TREND,
-        dsr_events_per_year=Config.GEN_DSR_EVENTS_PER_YEAR,
-        dsr_strength_range=Config.GEN_DSR_STRENGTH,
-    )
+    # ── [1/6] Данные ────────────────────────────────────────────────────────
+    dataset = getattr(args, "dataset", "synthetic")
+    logger_obj.info("\n[1/6] Подготовка панели (источник: %s)...", dataset)
+    df, specs, source_report = load_panel_dataset(args, logger_obj)
+
     panel_ok, panel_rows = validate_panel(df, specs)
 
     # ── [2/6] Нарезка окон ──────────────────────────────────────────────────
@@ -213,6 +267,8 @@ def run_panel_pipeline(args, logger_obj) -> int:
     logger_obj.info("\n[6/6] Экспорт результатов...")
     run_meta = {
         "mode": args.mode, "scenario": args.scenario, "seed": args.seed,
+        "dataset": dataset,
+        "dataset_report": source_report,
         "panel": {
             "cities": Config.PANEL_CITIES,
             "feeders_per_city": Config.PANEL_FEEDERS_PER_CITY,

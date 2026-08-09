@@ -579,13 +579,28 @@ def validate_panel(df: pd.DataFrame, specs: List[FeederSpec]) -> Tuple[bool, Lis
     hourly = df.groupby("hour")["consumption"].mean()
     check("Час вечернего максимума", float(hourly.loc[16:23].idxmax()), 16, 23, "ч")
 
+    # Проверка удельного потребления возможна только там, где известно число
+    # домохозяйств, — то есть для собственного генератора. У внешних наборов
+    # такой величины нет, и подставлять оценку означало бы проверять данные
+    # против собственного же допущения. Пропуск фиксируется явно: молчаливое
+    # исчезновение проверки из отчёта неотличимо от её прохождения.
     hours_per_month = 8766.0 / 12.0
-    per_hh = []
-    for spec in specs:
-        m = df.loc[df["feeder_id"] == spec.feeder_id, "consumption"].mean()
-        per_hh.append(m / (1.0 + spec.nonresidential_share)
-                      / spec.households * hours_per_month)
-    check("Потребление на домохозяйство", float(np.mean(per_hh)), 120.0, 340.0, "кВт·ч/мес")
+    per_hh = [
+        df.loc[df["feeder_id"] == spec.feeder_id, "consumption"].mean()
+        / (1.0 + spec.nonresidential_share) / spec.households * hours_per_month
+        for spec in specs
+        if hasattr(spec, "households") and hasattr(spec, "nonresidential_share")
+    ]
+    if per_hh:
+        check("Потребление на домохозяйство", float(np.mean(per_hh)),
+              120.0, 340.0, "кВт·ч/мес")
+    else:
+        rows.append({"показатель": "Потребление на домохозяйство",
+                     "значение": float("nan"), "мин": 120.0, "макс": 340.0,
+                     "единица": "кВт·ч/мес", "ok": True,
+                     "пропущено": "число домохозяйств неизвестно"})
+        logger.info("Валидация: удельное потребление не проверяется — "
+                    "число домохозяйств в источнике отсутствует")
 
     logger.info("─" * 84)
     logger.info("ВАЛИДАЦИЯ PANEL-ДАТАСЕТА")

@@ -374,9 +374,17 @@ def generate_panel_data(
                 dsr_active[int(start):end] = 1.0
                 dsr_strength[int(start):end] = city_rng.uniform(*dsr_strength_range)
 
-        for spec in specs:
-            feeder_rng = np.random.default_rng(
-                abs(hash((seed, spec.feeder_id))) % (2 ** 32))
+        # Поток случайности каждого фидера ответвляется от целочисленной
+        # энтропии (сид, город, номер фидера). Прежде он выводился через
+        # hash() от строкового идентификатора, а хеш строк в Python
+        # рандомизируется при каждом запуске процесса (PEP 456) — один и тот же
+        # сид давал разные панели, и результаты не воспроизводились. Погода при
+        # этом совпадала побитово, потому что зависит только от city_rng, так
+        # что расхождение проявлялось лишь в потреблении.
+        feeder_seeds = np.random.SeedSequence([seed, c]).spawn(len(specs))
+
+        for spec, feeder_seq in zip(specs, feeder_seeds):
+            feeder_rng = np.random.default_rng(feeder_seq)
             frames.append(_generate_feeder_series(
                 spec, feeder_rng, dates, t, hour_of_day, weekday, is_weekend,
                 holiday, day_of_year, weather, dsr_active, dsr_strength,

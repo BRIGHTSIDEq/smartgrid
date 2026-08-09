@@ -157,6 +157,20 @@ def test_selection_excludes_naive_from_best_model():
     assert idx_val < idx_best < idx_test
 
 
+def test_selection_uses_scale_free_criterion():
+    """
+    Победитель выбирается по безразмерной метрике, а не по абсолютной ошибке.
+
+    micro-MAE на панели определяется крупнейшим фидером: он один решал бы, какая
+    модель лучше, независимо от качества на остальных рядах.
+    """
+    src = inspect.getsource(panel_pipeline.run_panel_pipeline)
+    crit = src[src.index("def _selection_criterion"):src.index("best_name = min(")]
+    assert '"MASE"' in crit, "критерий отбора обязан опираться на MASE"
+    assert '"MAE_macro"' in crit, "запасной критерий тоже должен уравнивать ряды"
+    assert '["MAE"]' not in crit, "micro-MAE не должен участвовать в отборе"
+
+
 def test_partial_failure_returns_nonzero_code():
     """Частичный отказ не выдаётся за успех."""
     src = inspect.getsource(panel_pipeline.run_panel_pipeline)

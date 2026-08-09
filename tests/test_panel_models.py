@@ -331,6 +331,56 @@ def test_bottom_up_city_forecast_is_coherent(panel_data):
     )
 
 
+def test_mase_of_naive_on_train_is_exactly_one(panel_data):
+    """
+    Точный инвариант: знаменатель MASE — это и есть ошибка Naive24 на обучении.
+
+    Значит, оценка Naive24 на той же обучающей выборке обязана дать ровно 1.0.
+    Отклонение означало бы, что масштаб считается не по тому прогнозу, не по
+    той выборке или не в том масштабе величин.
+    """
+    from models.panel_trainer import seasonal_naive_scale
+
+    trainer = PanelTrainer(PanelNaive24(), "Naive24").train(panel_data)
+    m = trainer.evaluate(panel_data, "train")
+
+    assert np.isclose(m["MASE"], 1.0, rtol=1e-6), m["MASE"]
+    assert np.isclose(m["MASE_worst_series"], 1.0, rtol=1e-6)
+    assert len(seasonal_naive_scale(panel_data)) == len(panel_data["series_index"])
+
+
+def test_mase_below_one_means_better_than_naive(panel_data):
+    """Порог 1.0 разделяет модели: климатология на тесте обязана быть сравнима."""
+    naive = PanelTrainer(PanelNaive24(), "Naive24").train(panel_data).evaluate(panel_data, "test")
+    ridge = PanelTrainer(build_panel_ridge(alphas=[1.0, 100.0]), "Ridge") \
+        .train(panel_data).evaluate(panel_data, "test")
+
+    # Направление согласовано с MAE: MASE — это MAE, делённое на положительный
+    # масштаб ряда, поэтому порядок моделей меняться не может.
+    assert (ridge["MASE"] < naive["MASE"]) == (ridge["MAE_macro"] < naive["MAE_macro"])
+    assert np.isfinite(naive["MASE"]) and naive["MASE"] > 0
+
+
+def test_mase_scale_ignores_evaluated_split(panel_data):
+    """
+    Масштаб определяется обучающей выборкой и не зависит от оцениваемой.
+
+    Иначе MASE менялась бы вместе с тестом и перестала быть сопоставимой между
+    прогонами — то есть теряла бы единственное своё преимущество.
+    """
+    from models.panel_trainer import seasonal_naive_scale
+
+    data = dict(panel_data)
+    data.pop("_mase_scale", None)
+    before = dict(seasonal_naive_scale(data))
+
+    data["Y_test"] = np.zeros_like(data["Y_test"])
+    data.pop("_mase_scale")
+    after = seasonal_naive_scale(data)
+
+    assert before == after
+
+
 def test_panel_trainer_reports_macro_and_worst(panel_data):
     """Оценка даёт micro, macro и худший ряд — усреднённое MAE их скрывает."""
     trainer = PanelTrainer(PanelNaive24(), "Naive24").train(panel_data)

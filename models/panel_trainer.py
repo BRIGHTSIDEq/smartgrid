@@ -37,6 +37,52 @@ from utils.metrics import (
 logger = logging.getLogger("smart_grid.models.panel_trainer")
 
 
+def seasonal_naive_scale(data: Dict[str, Any]) -> Dict[str, float]:
+    """
+    Знаменатель MASE по рядам: ошибка суточного наивного прогноза на ОБУЧЕНИИ.
+
+    Масштаб берётся с train, а не с оцениваемого отрезка. Иначе он менялся бы
+    вместе с тестовой выборкой, и MASE перестала бы быть сопоставимой между
+    прогонами и режимами — а сопоставимость и есть её единственный смысл.
+
+    Абсолютные метрики на панели несравнимы между фидерами: MAE крупного
+    промышленного ряда на порядок больше MAE мелкого жилого при одинаковом
+    качестве прогноза. MASE безразмерна, поэтому усреднение по разнородным
+    рядам осмысленно, а порог 1.0 отделяет модель от повтора прошлых суток.
+
+    Результат кэшируется в самом словаре данных: величина зависит только от
+    обучающей выборки и одинакова для всех моделей.
+    """
+    cached = data.get("_mase_scale")
+    if cached is not None:
+        return cached
+
+    from models.panel_models import consumption_index
+
+    series = data["series_train"]
+    horizon = int(data["Y_train"].shape[1])
+    channel = consumption_index(data["feature_names_hist"])
+
+    y_true = inverse_scale_series(data, data["Y_train"], series)
+    y_naive = inverse_scale_series(
+        data, data["X_hist_train"][:, -horizon:, channel], series)
+
+    scale: Dict[str, float] = {}
+    for sid in np.unique(series):
+        mask = series == sid
+        key = data["series_index"][int(sid)]
+        scale[key] = float(np.mean(np.abs(y_true[mask] - y_naive[mask])))
+
+    degenerate = [k for k, v in scale.items() if not np.isfinite(v) or v <= 0]
+    if degenerate:
+        logger.warning(
+            "MASE неопределена для %d рядов с нулевым суточным изменением: %s",
+            len(degenerate), ", ".join(degenerate[:5]))
+
+    data["_mase_scale"] = scale
+    return scale
+
+
 def make_batch(data: Dict[str, Any], split: str) -> Dict[str, np.ndarray]:
     """Собирает единообразный набор входов для любого типа модели."""
     return {
@@ -120,8 +166,11 @@ class PanelTrainer:
             "R2": r2_score(y_true, y_pred),
         }
 
+        scale = seasonal_naive_scale(data)
+
         per_series: Dict[str, float] = {}
-        maes, mapes = [], []
+        per_series_mase: Dict[str, float] = {}
+        maes, mapes, mases = [], [], []
         for sid in np.unique(series):
             mask = series == sid
             key = data["series_index"][int(sid)]
@@ -130,7 +179,18 @@ class PanelTrainer:
             maes.append(mae)
             mapes.append(mean_absolute_percentage_error(y_true[mask], y_pred[mask]))
 
+            denom = scale.get(key, 0.0)
+            if np.isfinite(denom) and denom > 0:
+                per_series_mase[key] = mae / denom
+                mases.append(mae / denom)
+
         worst_key = max(per_series, key=per_series.get)
+        # MASE усредняется по рядам, а не по окнам: она уже безразмерна, и
+        # взвешивание размером ряда вернуло бы доминирование крупных фидеров,
+        # ради устранения которого метрика и вводится.
+        mase_macro = float(np.mean(mases)) if mases else float("nan")
+        mase_worst = float(max(per_series_mase.values())) if per_series_mase else float("nan")
+
         result = {
             "model": self.name,
             "MAE": micro["MAE"], "RMSE": micro["RMSE"],
@@ -139,15 +199,17 @@ class PanelTrainer:
             "MAPE_macro": float(np.mean(mapes)),
             "MAE_worst_series": float(per_series[worst_key]),
             "worst_series": worst_key,
+            "MASE": mase_macro,
+            "MASE_worst_series": mase_worst,
             "n_params": self.n_params,
             "train_time_sec": round(self.train_time, 1),
             "per_series_MAE": per_series,
         }
         logger.info(
-            "%-14s micro MAE=%9.2f | macro MAE=%9.2f | MAPE=%6.2f%% | R²=%7.4f | "
-            "худший ряд %s (%0.1f)",
-            self.name, result["MAE"], result["MAE_macro"], result["MAPE"],
-            result["R2"], worst_key, result["MAE_worst_series"],
+            "%-14s micro MAE=%9.2f | macro MAE=%9.2f | MASE=%6.3f | MAPE=%6.2f%% | "
+            "R²=%7.4f | худший ряд %s (MAE=%0.1f)",
+            self.name, result["MAE"], result["MAE_macro"], result["MASE"],
+            result["MAPE"], result["R2"], worst_key, result["MAE_worst_series"],
         )
         return result
 

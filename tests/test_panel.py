@@ -8,6 +8,11 @@
 цифры и полностью неверные выводы.
 """
 
+import os
+import subprocess
+import sys
+import textwrap
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -19,10 +24,57 @@ from data.panel_preprocessing import (
 )
 
 
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
 @pytest.fixture(scope="module")
 def panel():
     df, specs = generate_panel_data(days=90, n_cities=2, feeders_per_city=3, seed=5)
     return df, specs
+
+
+def test_generation_reproduces_across_processes():
+    """
+    Один сид даёт побитово одну и ту же панель в разных процессах.
+
+    Проверка обязана запускать отдельные процессы. hash() от строки стабилен
+    ВНУТРИ процесса и рандомизируется между запусками (PEP 456), поэтому
+    обычный тест в одном процессе такой дефект не увидит: именно так поток
+    случайности фидера, выведенный через hash(feeder_id), давал разные панели
+    при одном сиде. Погода при этом совпадала, потому что зависит только от
+    city_rng, и расхождение проявлялось лишь в потреблении.
+
+    Первая строка вывода подтверждает, что рандомизация хеша вообще включена:
+    без этого тест проходил бы впустую.
+    """
+    script = textwrap.dedent("""
+        import hashlib
+        import numpy as np
+        from data.panel import generate_panel_data
+
+        print(hash("feeder-C00-F01"))
+        df, _ = generate_panel_data(days=10, n_cities=1, feeders_per_city=3, seed=7)
+        arr = np.ascontiguousarray(df["consumption"].to_numpy(np.float64))
+        print(hashlib.sha256(arr.tobytes()).hexdigest())
+    """)
+
+    results = []
+    for hash_seed in ("1", "999"):
+        env = dict(os.environ, PYTHONHASHSEED=hash_seed,
+                   PYTHONPATH=_REPO_ROOT, PYTHONIOENCODING="utf-8")
+        proc = subprocess.run([sys.executable, "-c", script], env=env,
+                              capture_output=True, text=True, timeout=300)
+        assert proc.returncode == 0, proc.stderr[-2000:]
+        lines = [ln for ln in proc.stdout.strip().splitlines() if ln.strip()]
+        results.append((lines[-2], lines[-1]))
+
+    assert results[0][0] != results[1][0], (
+        "рандомизация хеша не активна — тест не смог бы обнаружить дефект"
+    )
+    assert results[0][1] == results[1][1], (
+        "один сид дал разные данные в разных процессах: генерация опирается на "
+        "источник случайности, не выводимый из сида"
+    )
 
 
 @pytest.fixture(scope="module")

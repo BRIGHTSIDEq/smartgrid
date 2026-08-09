@@ -183,10 +183,24 @@ def run_panel_pipeline(args, logger_obj) -> int:
     learned = {n: m for n, m in val_metrics.items()
                if n not in ("Naive24", "HourlyProfile")}
     pool = learned or val_metrics
-    best_name = min(pool, key=lambda k: pool[k]["MAE"])
+
+    # Отбор по MASE, а не по micro-MAE. Абсолютная ошибка на панели
+    # определяется крупнейшим фидером: он один выбирал бы победителя, а
+    # качество на мелких рядах не влияло бы на решение. MASE безразмерна,
+    # поэтому каждый ряд весит одинаково. Запасной критерий — macro-MAE:
+    # он тоже уравнивает ряды, но остаётся в абсолютных величинах.
+    def _selection_criterion(name: str) -> float:
+        value = pool[name].get("MASE")
+        if value is not None and np.isfinite(value):
+            return float(value)
+        return float(pool[name]["MAE_macro"])
+
+    best_name = min(pool, key=_selection_criterion)
     best_trainer = next(t for t in trainers if t.name == best_name)
-    logger_obj.info("Лучшая модель по валидации: %s (MAE_val=%.2f)",
-                    best_name, pool[best_name]["MAE"])
+    logger_obj.info(
+        "Лучшая модель по валидации: %s (MASE_val=%.3f, macro MAE_val=%.2f)",
+        best_name, pool[best_name].get("MASE", float("nan")),
+        pool[best_name]["MAE_macro"])
 
     test_metrics = compare_panel_models(trainers, data, "test")
 

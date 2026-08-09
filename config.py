@@ -394,6 +394,62 @@ class Config:
         )
         return logging.getLogger("smart_grid")
 
+    # ── Многорядные (panel) режимы ──────────────────────────────────────────
+    # Отдельная группа параметров: panel меняет не объём одного ряда, а число
+    # рядов, поэтому переиспользовать DAYS/HOUSEHOLDS было бы неверно.
+    PANEL_CITIES: int = 1
+    PANEL_FEEDERS_PER_CITY: int = 4
+    PANEL_DAYS: int = 90
+    PANEL_EPOCHS: int = 30
+    PANEL_BATCH_SIZE: int = 128
+    PANEL_PATIENCE: int = 8
+    PANEL_HISTORY: int = 48
+    PANEL_XGB_ESTIMATORS: int = 120
+    PANEL_DLINEAR_UNITS: int = 64
+    PANEL_DLINEAR_LR: float = 2e-3
+
+    @classmethod
+    def set_panel_smoke_mode(cls):
+        """Минимальная панель для проверки работоспособности конвейера."""
+        cls.PANEL_CITIES = 1; cls.PANEL_FEEDERS_PER_CITY = 4; cls.PANEL_DAYS = 90
+        cls.PANEL_EPOCHS = 20; cls.PANEL_PATIENCE = 6
+        cls.PANEL_HISTORY = 48; cls.PANEL_XGB_ESTIMATORS = 60
+        cls.FORECAST_HORIZON = 24
+        logging.getLogger("smart_grid").info(
+            "Panel smoke: %d город × %d фидера × %d дней",
+            cls.PANEL_CITIES, cls.PANEL_FEEDERS_PER_CITY, cls.PANEL_DAYS)
+
+    @classmethod
+    def set_panel_fast_mode(cls):
+        """Рабочая панель: несколько городов, год истории."""
+        cls.PANEL_CITIES = 2; cls.PANEL_FEEDERS_PER_CITY = 8; cls.PANEL_DAYS = 365
+        cls.PANEL_EPOCHS = 60; cls.PANEL_PATIENCE = 10
+        cls.PANEL_HISTORY = 48; cls.PANEL_XGB_ESTIMATORS = 200
+        cls.FORECAST_HORIZON = 24
+        logging.getLogger("smart_grid").info(
+            "Panel fast: %d города × %d фидеров × %d дней",
+            cls.PANEL_CITIES, cls.PANEL_FEEDERS_PER_CITY, cls.PANEL_DAYS)
+
+    @classmethod
+    def set_panel_optimal_mode(cls):
+        """
+        Крупная панель. Требует потоковой подачи данных.
+
+        При материализации всех окон в памяти этот режим неисполним:
+        4 города × 24 фидера × 3 года дают порядка двух миллионов окон, то
+        есть десятки гигабайт. Конвейер проверяет объём и отказывается
+        запускаться, пока потоковая подача не реализована.
+        """
+        cls.PANEL_CITIES = 4; cls.PANEL_FEEDERS_PER_CITY = 24
+        cls.PANEL_DAYS = 365 * 3
+        cls.PANEL_EPOCHS = 120; cls.PANEL_PATIENCE = 15
+        cls.PANEL_HISTORY = 192; cls.PANEL_XGB_ESTIMATORS = 400
+        cls.FORECAST_HORIZON = 24
+        logging.getLogger("smart_grid").warning(
+            "Panel optimal: %d городов × %d фидеров × %d дней — "
+            "режим требует потоковой подачи данных",
+            cls.PANEL_CITIES, cls.PANEL_FEEDERS_PER_CITY, cls.PANEL_DAYS)
+
     @classmethod
     def set_smoke_mode(cls):
         """

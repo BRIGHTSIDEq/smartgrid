@@ -60,8 +60,14 @@ def parse_args(argv=None) -> argparse.Namespace:
         description="Прогнозирование энергопотребления Smart Grid",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("--mode", choices=["smoke", "fast", "optimal", "full"],
-                        default="optimal", help="Режим прогона (см. config.py)")
+    parser.add_argument(
+        "--mode",
+        choices=["smoke", "fast", "optimal", "full",
+                 "panel-smoke", "panel-fast", "panel-optimal"],
+        default="optimal",
+        help="Режим прогона. Режимы panel-* обучают одну глобальную модель "
+             "на множестве рядов (города и фидеры), остальные — на одном "
+             "агрегатном ряде города (см. config.py)")
     parser.add_argument("--seed", type=int, default=Config.SEED,
                         help="Сид генератора случайных чисел")
     parser.add_argument("--models", type=str, default="all",
@@ -96,6 +102,9 @@ def setup_environment(args: argparse.Namespace) -> Any:
         "fast": Config.set_fast_mode,
         "optimal": Config.set_optimal_mode,
         "full": Config.set_full_mode,
+        "panel-smoke": Config.set_panel_smoke_mode,
+        "panel-fast": Config.set_panel_fast_mode,
+        "panel-optimal": Config.set_panel_optimal_mode,
     }
     mode_setters[args.mode]()
     # Сценарий и производные экономические параметры применяются ПОСЛЕ режима:
@@ -265,6 +274,19 @@ def _select_patch_len(history_length: int) -> int:
 def main(argv=None) -> int:
     args = parse_args(argv)
     logger = setup_environment(args)
+
+    # Многорядный конвейер отличается структурой данных, составом моделей и
+    # набором метрик, поэтому вынесен отдельным модулем, а не ветвлением
+    # внутри агрегатного пути.
+    if args.mode.startswith("panel-"):
+        from panel_pipeline import run_panel_pipeline
+        logger.info("=" * 78)
+        logger.info("  МНОГОРЯДНОЕ ПРОГНОЗИРОВАНИЕ — SMART GRID PANEL")
+        logger.info("  режим=%s | сценарий=%s | сид=%d",
+                    args.mode, args.scenario, args.seed)
+        logger.info("=" * 78)
+        return run_panel_pipeline(args, logger)
+
     t_start = time.time()
 
     import tensorflow as tf

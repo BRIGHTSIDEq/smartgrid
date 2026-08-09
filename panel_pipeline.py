@@ -1,0 +1,267 @@
+# -*- coding: utf-8 -*-
+"""
+panel_pipeline.py — конвейер многорядного (panel) прогнозирования.
+
+Вынесен из main.py отдельным модулем: структура данных, состав моделей и набор
+метрик здесь другие. Смешивать два конвейера в одной функции означало бы
+ветвление на каждом шаге и потерю читаемости обоих.
+
+Что делает конвейер:
+    генерация панели → валидация → нарезка окон → обучение глобальных моделей
+    → оценка (micro, macro, худший ряд) → городской прогноз суммированием
+    → экспорт результатов в изолированный каталог прогона.
+
+Обучается ОДНА модель на всех рядах сразу. Именно ради этого panel-режим и
+создавался: при десятках фидеров объём обучающих данных на порядок больше, чем
+у одного агрегатного ряда, и модель учится общим закономерностям, а не
+особенностям одного объекта.
+"""
+
+import logging
+import os
+import time
+from typing import Any, Dict, List, Tuple
+
+import numpy as np
+import pandas as pd
+
+from config import Config
+
+logger = logging.getLogger("smart_grid.panel")
+
+# Оценка памяти на одно окно, байт: история + будущее + статика + цель.
+# Служит порогом отказа для режимов, требующих потоковой подачи.
+_MAX_WINDOWS_IN_MEMORY = 1_500_000
+
+
+def estimate_windows(n_series: int, days: int, history: int, horizon: int,
+                     train_ratio: float = 0.70) -> int:
+    """Оценивает число обучающих окон до генерации данных."""
+    hours = days * 24
+    per_series = max(int(hours * train_ratio) - history - horizon, 0)
+    return n_series * per_series
+
+
+def build_panel_models(data: Dict[str, Any], seed: int) -> List[Tuple[Any, str]]:
+    """
+    Собирает состав моделей для панели.
+
+    Наивные базлайны идут первыми: без них невозможно утверждать, что сложная
+    модель вообще имеет прогностическую ценность.
+    """
+    from models.panel_models import (
+        PanelNaive24, PanelHourlyProfile, build_panel_ridge, build_panel_xgboost,
+    )
+    from models.dlinear import build_dlinear
+
+    n_hist = len(data["feature_names_hist"])
+    n_future = len(data["feature_names_future"])
+    n_static = len(data["static_names"])
+
+    steps_per_epoch = max(len(data["Y_train"]) // Config.PANEL_BATCH_SIZE, 1)
+    total_steps = Config.PANEL_EPOCHS * steps_per_epoch
+
+    dlinear = build_dlinear(
+        history_length=data["history_length"],
+        forecast_horizon=data["forecast_horizon"],
+        n_hist_features=n_hist, n_future_features=n_future,
+        n_static_features=n_static,
+        covariate_units=Config.PANEL_DLINEAR_UNITS,
+        learning_rate=Config.PANEL_DLINEAR_LR,
+        lr_schedule_total_steps=total_steps if Config.TRANSFORMER_USE_WARMUP_COSINE else 0,
+        lr_warmup_fraction=Config.TRANSFORMER_WARMUP_FRACTION,
+    )
+
+    return [
+        (PanelNaive24(), "Naive24"),
+        (PanelHourlyProfile(), "HourlyProfile"),
+        (build_panel_ridge(), "Ridge"),
+        (build_panel_xgboost(n_estimators=Config.PANEL_XGB_ESTIMATORS, seed=seed),
+         "XGBoost"),
+        (dlinear, "DLinear"),
+    ]
+
+
+def run_panel_pipeline(args, logger_obj) -> int:
+    """
+    Полный цикл panel-прогнозирования. Возвращает код завершения процесса.
+
+    Код 2 означает частичный отказ: часть запрошенных моделей не обучилась.
+    Молчаливое исключение упавшей модели с успешным кодом возврата скрывало бы
+    отказ, поэтому такой запуск успешным не считается.
+    """
+    from data.panel import generate_panel_data, validate_panel
+    from data.panel_preprocessing import prepare_panel_data
+    from models.panel_trainer import (
+        PanelTrainer, compare_panel_models, bottom_up_city_forecast,
+    )
+    from utils import reporting
+
+    t_start = time.time()
+    n_series = Config.PANEL_CITIES * Config.PANEL_FEEDERS_PER_CITY
+
+    # ── Отказ до генерации, если режим не помещается в память ───────────────
+    expected = estimate_windows(n_series, Config.PANEL_DAYS, Config.PANEL_HISTORY,
+                                Config.FORECAST_HORIZON)
+    logger_obj.info("Ожидается около %d обучающих окон на %d рядах", expected, n_series)
+    if expected > _MAX_WINDOWS_IN_MEMORY:
+        logger_obj.error(
+            "Режим требует %d окон — при материализации в памяти это порядка %.0f ГБ. "
+            "Потоковая подача (tf.data) ещё не реализована, запуск прерван, чтобы не "
+            "исчерпать память посреди расчёта.",
+            expected,
+            expected * Config.PANEL_HISTORY * 20 * 4 / 1e9,
+        )
+        return 1
+
+    run_dir = reporting.make_run_dir(Config.OUTPUT_DIR, args.mode, args.scenario, args.seed)
+    Config.PLOTS_DIR = os.path.join(run_dir, "plots")
+    Config.MODELS_DIR = os.path.join(run_dir, "models")
+    os.makedirs(Config.PLOTS_DIR, exist_ok=True)
+    os.makedirs(Config.MODELS_DIR, exist_ok=True)
+
+    # ── [1/6] Генерация панели ──────────────────────────────────────────────
+    logger_obj.info("\n[1/6] Генерация панели рядов...")
+    df, specs = generate_panel_data(
+        days=Config.PANEL_DAYS,
+        n_cities=Config.PANEL_CITIES,
+        feeders_per_city=Config.PANEL_FEEDERS_PER_CITY,
+        start_date=Config.START_DATE,
+        seed=args.seed,
+        kwh_per_household_month=Config.GEN_KWH_PER_HOUSEHOLD_MONTH,
+        temp_annual_mean=Config.GEN_TEMP_ANNUAL_MEAN,
+        temp_annual_amplitude=Config.GEN_TEMP_ANNUAL_AMPLITUDE,
+        temp_min=Config.GEN_TEMP_MIN, temp_max=Config.GEN_TEMP_MAX,
+        temp_setpoint=Config.GEN_TEMP_SETPOINT,
+        cooling_setpoint=Config.GEN_COOLING_SETPOINT,
+        ev_share_of_households=Config.GEN_EV_PENETRATION,
+        solar_share_of_households=Config.GEN_SOLAR_PENETRATION,
+        annual_trend=Config.GEN_ANNUAL_TREND,
+        dsr_events_per_year=Config.GEN_DSR_EVENTS_PER_YEAR,
+        dsr_strength_range=Config.GEN_DSR_STRENGTH,
+    )
+    panel_ok, panel_rows = validate_panel(df, specs)
+
+    # ── [2/6] Нарезка окон ──────────────────────────────────────────────────
+    logger_obj.info("\n[2/6] Подготовка окон (скалеры только на train)...")
+    data = prepare_panel_data(
+        df, specs,
+        history_length=Config.PANEL_HISTORY,
+        forecast_horizon=Config.FORECAST_HORIZON,
+        train_ratio=Config.TRAIN_RATIO, val_ratio=Config.VAL_RATIO,
+        seed=args.seed,
+    )
+
+    # ── [3/6] Обучение ──────────────────────────────────────────────────────
+    logger_obj.info("\n[3/6] Обучение глобальных моделей...")
+    to_train = build_panel_models(data, args.seed)
+    requested = [name for _, name in to_train]
+    trained: List[str] = []
+    failed: List[Dict[str, str]] = []
+    trainers: List[Any] = []
+
+    for model, name in to_train:
+        trainer = PanelTrainer(model, name)
+        try:
+            trainer.train(data, epochs=Config.PANEL_EPOCHS,
+                          batch_size=Config.PANEL_BATCH_SIZE,
+                          patience=Config.PANEL_PATIENCE)
+        except Exception as exc:
+            logger_obj.error("Модель %s не обучена: %s", name, exc)
+            failed.append({"model": name, "error": f"{type(exc).__name__}: {exc}"})
+            continue
+        trainers.append(trainer)
+        trained.append(name)
+
+    if not trainers:
+        logger_obj.error("Ни одна модель не обучена — дальнейшие шаги невозможны.")
+        return 1
+
+    # ── [4/6] Отбор по валидации и оценка на тесте ──────────────────────────
+    logger_obj.info("\n[4/6] Отбор по ВАЛИДАЦИИ, затем оценка на тесте...")
+    val_metrics = compare_panel_models(trainers, data, "val")
+    learned = {n: m for n, m in val_metrics.items()
+               if n not in ("Naive24", "HourlyProfile")}
+    pool = learned or val_metrics
+    best_name = min(pool, key=lambda k: pool[k]["MAE"])
+    best_trainer = next(t for t in trainers if t.name == best_name)
+    logger_obj.info("Лучшая модель по валидации: %s (MAE_val=%.2f)",
+                    best_name, pool[best_name]["MAE"])
+
+    test_metrics = compare_panel_models(trainers, data, "test")
+
+    # ── [5/6] Иерархия ──────────────────────────────────────────────────────
+    logger_obj.info("\n[5/6] Городской прогноз суммированием фидеров...")
+    hierarchy = bottom_up_city_forecast(
+        data, best_trainer.predict(data, "test"), "test")
+
+    # ── [6/6] Экспорт ───────────────────────────────────────────────────────
+    logger_obj.info("\n[6/6] Экспорт результатов...")
+    run_meta = {
+        "mode": args.mode, "scenario": args.scenario, "seed": args.seed,
+        "panel": {
+            "cities": Config.PANEL_CITIES,
+            "feeders_per_city": Config.PANEL_FEEDERS_PER_CITY,
+            "n_series": len(data["series_index"]),
+            "days": Config.PANEL_DAYS,
+        },
+        "history_length": data["history_length"],
+        "forecast_horizon": data["forecast_horizon"],
+        "n_features": {
+            "hist": len(data["feature_names_hist"]),
+            "future": len(data["feature_names_future"]),
+            "static": len(data["static_names"]),
+        },
+        "split_sizes": {"train": int(len(data["Y_train"])),
+                        "val": int(len(data["Y_val"])),
+                        "test": int(len(data["Y_test"]))},
+        "requested_models": requested,
+        "trained_models": trained,
+        "failed_models": failed,
+        "partial_failure": bool(failed),
+        "best_model_by_val": best_name,
+        "panel_validation_passed": bool(panel_ok),
+        "hierarchy_city_MAE": hierarchy["MAE_mean"],
+        "hierarchy_city_MAPE": hierarchy["MAPE_mean"],
+        "runtime_sec": round(time.time() - t_start, 1),
+    }
+    reporting.write_run_metadata(run_dir, run_meta)
+
+    # Метрики без словаря по рядам: он выгружается отдельным файлом.
+    flat = {n: {k: v for k, v in m.items() if k != "per_series_MAE"}
+            for n, m in test_metrics.items()}
+    flat_val = {n: {k: v for k, v in m.items() if k != "per_series_MAE"}
+                for n, m in val_metrics.items()}
+    for target in (run_dir, Config.OUTPUT_DIR):
+        reporting.export_metrics(flat, target, seed=args.seed, split="test",
+                                 run_meta=run_meta, append=True)
+        reporting.export_metrics(flat_val, target, seed=args.seed, split="val",
+                                 run_meta=run_meta, append=True)
+
+    rows = [{"model": n, "series": s, "MAE": v}
+            for n, m in test_metrics.items()
+            for s, v in m["per_series_MAE"].items()]
+    pd.DataFrame(rows).to_csv(os.path.join(run_dir, "metrics_by_series.csv"),
+                              index=False, encoding="utf-8-sig")
+    pd.DataFrame(hierarchy["per_city"]).to_csv(
+        os.path.join(run_dir, "metrics_by_city.csv"), index=False, encoding="utf-8-sig")
+    reporting.export_markdown_tables(flat, run_dir)
+    reporting.aggregate_seeds(Config.OUTPUT_DIR)
+
+    elapsed = (time.time() - t_start) / 60
+    if failed:
+        logger_obj.error(
+            "Panel-конвейер завершён ЧАСТИЧНО за %.1f мин: не обучено %d из %d моделей.",
+            elapsed, len(failed), len(requested))
+        for item in failed:
+            logger_obj.error("  не обучена: %s — %s", item["model"], item["error"])
+        return 2
+
+    logger_obj.info("\n" + "=" * 78)
+    logger_obj.info("Panel-конвейер завершён за %.1f мин. Результаты: %s",
+                    elapsed, run_dir)
+    logger_obj.info("  Рядов: %d | окон: train=%d test=%d | лучшая по валидации: %s",
+                    len(data["series_index"]), len(data["Y_train"]),
+                    len(data["Y_test"]), best_name)
+    logger_obj.info("=" * 78)
+    return 0

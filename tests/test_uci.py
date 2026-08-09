@@ -123,9 +123,13 @@ def test_dst_artifacts_are_repaired_and_reported(uci_file):
     assert float(fixed.loc[march].sum()) > 0.0, "нулевой час не восстановлен"
     assert float(fixed.loc[october].sum()) < float(hourly.loc[october].sum())
 
-    actions = {item["тип"] for item in report if "разделён" in item["действие"]
-               or "заменён" in item["действие"]}
-    assert actions == {"март", "октябрь"}
+    repaired = {item["тип"] for item in report if "пропущена" not in item["действие"]}
+    assert repaired == {"март", "октябрь"}, "оба дефекта обязаны быть исправлены"
+
+    # Отношение к эталону фиксируется в отчёте: без него нельзя проверить, на
+    # каком основании принято решение о правке.
+    ratios = {item["тип"]: item["отношение"] for item in report}
+    assert ratios["март"] < 0.6 and ratios["октябрь"] > 1.35
 
 
 def test_dst_repair_skips_already_clean_data():
@@ -173,16 +177,30 @@ def test_same_client_is_kept_when_window_starts_after_connection(uci_file):
     assert "MT_003" in window.columns
 
 
-def test_series_limit_keeps_largest_not_first(uci_file):
+def test_series_limit_spans_the_size_range(uci_file):
     """
-    Ограничение числа рядов оставляет крупнейшие, а не первые по алфавиту.
+    Ограничение числа рядов сохраняет разнородность панели.
 
-    Номер клиента в наборе произволен, поэтому срез «первых N» дал бы панель
-    случайного состава.
+    Отбор крупнейших сделал бы её однородной: на реальном наборе четыре самых
+    крупных клиента различаются в 3.6 раза, тогда как весь набор покрывает
+    диапазон в 24 000 раз. Разнородность — единственная причина брать внешний
+    набор вместо синтетики, и отбор не имеет права её терять.
     """
     hourly = quarter_hours_to_hourly(read_uci_raw(uci_file))
-    window, _ = select_active_series(hourly, "2013-08-01", "2013-12-31", max_series=1)
-    assert list(window.columns) == ["MT_001"], "оставлен не крупнейший ряд"
+    full, _ = select_active_series(hourly, "2013-08-01", "2013-12-31")
+    limited, _ = select_active_series(hourly, "2013-08-01", "2013-12-31", max_series=2)
+
+    assert len(limited.columns) == 2
+    spread_full = full.mean().max() / full.mean().min()
+    spread_limited = limited.mean().max() / limited.mean().min()
+    assert spread_limited >= 0.9 * spread_full, (
+        "отбор сузил диапазон размеров — панель стала однороднее исходной"
+    )
+
+    # Крупнейший и мельчайший обязаны попасть в выборку: именно они задают
+    # границы диапазона.
+    assert full.mean().idxmax() in limited.columns
+    assert full.mean().idxmin() in limited.columns
 
 
 def test_empty_selection_is_an_error(uci_file):

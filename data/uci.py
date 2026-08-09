@@ -165,67 +165,79 @@ def _dst_transition_days(years: Sequence[int]) -> Tuple[List[pd.Timestamp], List
     return march, october
 
 
-def repair_dst_artifacts(hourly: pd.DataFrame,
-                         october_factor: float = 2.0) -> Tuple[pd.DataFrame, List[Dict[str, Any]]]:
+def _same_hour_reference(frame: pd.DataFrame, stamp: pd.Timestamp,
+                         weeks: Sequence[int] = (-3, -2, -1, 1, 2, 3)) -> Optional[np.ndarray]:
+    """
+    Эталон для часа: тот же час суток в те же дни недели соседних недель.
+
+    Сравнивать с соседними ЧАСАМИ той же ночи нельзя: час ночи сам по себе
+    ниже полуночи, и нормальное значение выглядело бы заниженным. Именно из-за
+    такого эталона первая версия проверки не увидела октябрьский дефект —
+    отношение к соседним часам выходило 1.4 при пороге 1.5, хотя относительно
+    того же часа других недель оно равно 1.7.
+    """
+    rows = [frame.loc[stamp + pd.Timedelta(weeks=w)].to_numpy()
+            for w in weeks if (stamp + pd.Timedelta(weeks=w)) in frame.index]
+    if not rows:
+        return None
+    return np.nanmedian(np.vstack(rows), axis=0)
+
+
+def repair_dst_artifacts(hourly: pd.DataFrame, low_ratio: float = 0.60,
+                         high_ratio: float = 1.35) -> Tuple[pd.DataFrame, List[Dict[str, Any]]]:
     """
     Устраняет дефекты дней перевода часов.
 
-    В марте час 01:00 заполнен нулями у всех клиентов, в октябре он содержит
-    потребление за два часа. Правка применяется ТОЛЬКО если данные
-    подтверждают ожидаемую картину: слепая коррекция по календарю испортила бы
-    набор, если бы его когда-то уже привели в порядок.
+    Весной час 01:00–02:00 не существует: стрелки переводятся с 01:00 сразу на
+    02:00. В файле слот остаётся и содержит около четверти обычного значения.
+    Осенью этот час проживается дважды, и в один слот попадает потребление за
+    оба, отчего значение примерно в 1.7 раза выше обычного — не вдвое, потому
+    что второй проход приходится на физически более позднее и менее нагруженное
+    время.
 
-    Мартовский час восстанавливается средним соседних часов, октябрьский
-    делится пополам. Оба случая возвращаются отдельным списком: это правки
-    данных, и они обязаны попасть в отчёт, а не остаться внутри загрузчика.
+    Правка применяется ТОЛЬКО при подтверждении картины самими данными: слепая
+    коррекция по календарю испортила бы уже приведённый в порядок набор.
+    Каждое решение — и правка, и отказ от неё — попадает в отчёт: молчаливый
+    пропуск неотличим от отсутствия дефекта.
     """
     fixed = hourly.copy()
     report: List[Dict[str, Any]] = []
     years = sorted({int(t.year) for t in hourly.index})
     march, october = _dst_transition_days(years)
 
-    daily_mean = float(np.nanmean(hourly.to_numpy()))
+    for kind, days in (("март", march), ("октябрь", october)):
+        for day in days:
+            stamp = day + pd.Timedelta(hours=1)
+            if stamp not in fixed.index:
+                continue
 
-    for day in march:
-        stamp = day + pd.Timedelta(hours=1)
-        if stamp not in fixed.index:
-            continue
-        row = fixed.loc[stamp]
-        if float(np.nanmax(np.abs(row.to_numpy()))) > 1e-9:
-            report.append({"дата": str(stamp), "тип": "март",
-                           "действие": "пропущена — ожидаемых нулей нет"})
-            continue
-        before = fixed.index.get_loc(stamp) - 1
-        after = fixed.index.get_loc(stamp) + 1
-        if before < 0 or after >= len(fixed):
-            continue
-        fixed.loc[stamp] = (fixed.iloc[before].to_numpy()
-                            + fixed.iloc[after].to_numpy()) / 2.0
-        report.append({"дата": str(stamp), "тип": "март",
-                       "действие": "нулевой час заменён средним соседних"})
+            reference = _same_hour_reference(fixed, stamp)
+            observed = fixed.loc[stamp].to_numpy(np.float64)
+            ref_sum = float(np.nansum(reference)) if reference is not None else 0.0
+            obs_sum = float(np.nansum(observed))
+            if reference is None or ref_sum <= 0:
+                report.append({"дата": str(stamp), "тип": kind, "отношение": None,
+                               "действие": "пропущена — нет эталона по соседним неделям"})
+                continue
 
-    for day in october:
-        stamp = day + pd.Timedelta(hours=1)
-        if stamp not in fixed.index:
-            continue
-        row_sum = float(np.nansum(fixed.loc[stamp].to_numpy()))
-        neighbours = []
-        idx = fixed.index.get_loc(stamp)
-        for shift in (-1, 1):
-            j = idx + shift
-            if 0 <= j < len(fixed):
-                neighbours.append(float(np.nansum(fixed.iloc[j].to_numpy())))
-        reference = float(np.mean(neighbours)) if neighbours else daily_mean
-        if reference <= 0 or row_sum < 1.5 * reference:
-            report.append({"дата": str(stamp), "тип": "октябрь",
-                           "действие": "пропущена — удвоения не обнаружено"})
-            continue
-        fixed.loc[stamp] = fixed.loc[stamp].to_numpy() / october_factor
-        report.append({"дата": str(stamp), "тип": "октябрь",
-                       "действие": "сдвоенный час разделён пополам"})
+            ratio = obs_sum / ref_sum
+            if kind == "март" and ratio < low_ratio:
+                fixed.loc[stamp] = reference
+                action = "несуществующий час заменён эталоном соседних недель"
+            elif kind == "октябрь" and ratio > high_ratio:
+                # Слот содержит два реальных часа; половина — их среднее, что
+                # и соответствует смыслу часового отсчёта.
+                fixed.loc[stamp] = observed / 2.0
+                action = "сдвоенный час приведён к среднему из двух"
+            else:
+                action = "пропущена — отклонения от эталона нет"
+
+            report.append({"дата": str(stamp), "тип": kind,
+                           "отношение": round(ratio, 3), "действие": action})
 
     for item in report:
-        logger.info("UCI DST %s: %s — %s", item["тип"], item["дата"], item["действие"])
+        logger.info("UCI DST %s: %s — отношение %s — %s", item["тип"], item["дата"],
+                    item["отношение"], item["действие"])
     return fixed, report
 
 
@@ -266,11 +278,16 @@ def select_active_series(hourly: pd.DataFrame, start: str, end: str,
             f"Ни один ряд не активен на всём окне {start} … {end}: "
             f"порог доли ненулевых часов {min_nonzero_share}")
 
-    # Отбор крупнейших, а не первых по алфавиту: номер клиента в наборе
-    # произволен, и срез «первых N» дал бы случайную по составу панель.
+    # Ряды берутся равномерно по всему диапазону размеров, а не крупнейшие.
+    # Отбор крупнейших сделал бы панель однородной: на реальных данных четыре
+    # самых крупных клиента различаются в 3.6 раза, тогда как весь набор
+    # покрывает диапазон в 24 000 раз. Разнородность — единственная причина
+    # брать этот набор вместо синтетики, и терять её отбором нельзя.
+    # Срез «первых N» по имени тоже не годится: номер клиента произволен.
     if max_series is not None and len(kept) > max_series:
         order = window[kept].mean().sort_values(ascending=False)
-        kept = list(order.index[:max_series])
+        positions = np.unique(np.linspace(0, len(order) - 1, max_series).astype(int))
+        kept = list(order.index[positions])
 
     logger.info("UCI: отобрано %d рядов из %d (отсеяно %d по активности)",
                 len(kept), window.shape[1], len(rejected))

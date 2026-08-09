@@ -31,7 +31,7 @@ import numpy as np
 from data.panel_preprocessing import inverse_scale_series
 from utils.metrics import (
     mean_absolute_error, root_mean_squared_error,
-    mean_absolute_percentage_error, r2_score,
+    mean_absolute_percentage_error, symmetric_mape, r2_score,
 )
 
 logger = logging.getLogger("smart_grid.models.panel_trainer")
@@ -159,10 +159,26 @@ class PanelTrainer:
         y_true = inverse_scale_series(data, data[f"Y_{split}"], series)
         y_pred = inverse_scale_series(data, pred_scaled, series)
 
+        # MAPE считается только по ненулевым фактам, и доля учтённых точек
+        # выводится рядом. На реальных данных встречаются часы с нулевым
+        # показанием (простой счётчика, отключение объекта), и деление на них
+        # даёт значения порядка 10^8 процентов — метрика перестаёт что-либо
+        # означать, но выглядит как обычное число. sMAPE ограничена сверху по
+        # построению и потому пригодна без оговорок.
+        positive = y_true > 0
+        coverage = float(np.mean(positive))
+        if coverage < 1.0:
+            logger.warning(
+                "%s: MAPE считается по %.2f%% точек — остальные имеют нулевой факт",
+                self.name, coverage * 100)
+
         micro = {
             "MAE": mean_absolute_error(y_true, y_pred),
             "RMSE": root_mean_squared_error(y_true, y_pred),
-            "MAPE": mean_absolute_percentage_error(y_true, y_pred),
+            "MAPE": (mean_absolute_percentage_error(y_true[positive], y_pred[positive])
+                     if positive.any() else float("nan")),
+            "MAPE_coverage": coverage,
+            "sMAPE": symmetric_mape(y_true, y_pred),
             "R2": r2_score(y_true, y_pred),
         }
 
@@ -194,7 +210,8 @@ class PanelTrainer:
         result = {
             "model": self.name,
             "MAE": micro["MAE"], "RMSE": micro["RMSE"],
-            "MAPE": micro["MAPE"], "R2": micro["R2"],
+            "MAPE": micro["MAPE"], "MAPE_coverage": micro["MAPE_coverage"],
+            "sMAPE": micro["sMAPE"], "R2": micro["R2"],
             "MAE_macro": float(np.mean(maes)),
             "MAPE_macro": float(np.mean(mapes)),
             "MAE_worst_series": float(per_series[worst_key]),
@@ -206,10 +223,10 @@ class PanelTrainer:
             "per_series_MAE": per_series,
         }
         logger.info(
-            "%-14s micro MAE=%9.2f | macro MAE=%9.2f | MASE=%6.3f | MAPE=%6.2f%% | "
+            "%-14s micro MAE=%9.2f | macro MAE=%9.2f | MASE=%6.3f | sMAPE=%6.2f%% | "
             "R²=%7.4f | худший ряд %s (MAE=%0.1f)",
             self.name, result["MAE"], result["MAE_macro"], result["MASE"],
-            result["MAPE"], result["R2"], worst_key, result["MAE_worst_series"],
+            result["sMAPE"], result["R2"], worst_key, result["MAE_worst_series"],
         )
         return result
 

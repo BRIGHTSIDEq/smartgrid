@@ -20,6 +20,40 @@ logger = logging.getLogger("smart_grid.utils.visualization")
 plt.style.use("seaborn-v0_8-darkgrid")
 
 
+def save_figure(fig, path: str, dpi: int = 150, attempts: int = 3) -> bool:
+    """
+    Сохраняет график, переживая кратковременную блокировку файла.
+
+    На Windows только что созданный PNG может быть на доли секунды захвачен
+    антивирусом или службой индексации, и запись падает с OSError. Для
+    двухчасового прогона это означало бы потерю результатов на шаге построения
+    графиков, поэтому запись повторяется, а окончательная неудача не прерывает
+    пайплайн: график вторичен по отношению к метрикам.
+
+    Returns
+    -------
+    bool — удалось ли сохранить файл.
+    """
+    import time
+
+    for attempt in range(1, attempts + 1):
+        try:
+            fig.savefig(path, dpi=dpi, bbox_inches="tight")
+            return True
+        except OSError as exc:
+            if attempt == attempts:
+                logger.error(
+                    "График не сохранён после %d попыток: %s (%s). "
+                    "Расчёт продолжается — метрики не затронуты.",
+                    attempts, path, exc,
+                )
+                return False
+            logger.warning("Не удалось сохранить %s (попытка %d/%d): %s",
+                           path, attempt, attempts, exc)
+            time.sleep(0.5 * attempt)
+    return False
+
+
 # ── Кривые обучения Keras ─────────────────────────────────────────────────────
 
 def plot_training_history(
@@ -48,10 +82,7 @@ def plot_training_history(
 
     plt.tight_layout()
     if save:
-        fig.savefig(
-            os.path.join(plots_dir, f"training_{model_name.replace(' ', '_')}.png"),
-            dpi=150, bbox_inches="tight",
-        )
+        save_figure(fig, os.path.join(plots_dir, f"training_{model_name.replace(' ', '_')}.png"), dpi=150)
     plt.close(fig)
 
 
@@ -80,8 +111,7 @@ def plot_predictions_comparison(
     ax.grid(True, alpha=0.3)
     plt.tight_layout()
     if save:
-        fig.savefig(os.path.join(plots_dir, "predictions_comparison.png"),
-                    dpi=150, bbox_inches="tight")
+        save_figure(fig, os.path.join(plots_dir, "predictions_comparison.png"), dpi=150)
     plt.close(fig)
 
 
@@ -126,8 +156,7 @@ def plot_metrics_comparison(
 
     plt.tight_layout()
     if save:
-        fig.savefig(os.path.join(plots_dir, "metrics_comparison.png"),
-                    dpi=150, bbox_inches="tight")
+        save_figure(fig, os.path.join(plots_dir, "metrics_comparison.png"), dpi=150)
     plt.close(fig)
 
 
@@ -173,8 +202,7 @@ def plot_metrics_by_horizon(
 
     plt.tight_layout()
     if save:
-        fig.savefig(os.path.join(plots_dir, "metrics_by_horizon.png"),
-                    dpi=150, bbox_inches="tight")
+        save_figure(fig, os.path.join(plots_dir, "metrics_by_horizon.png"), dpi=150)
     plt.close(fig)
 
 
@@ -217,8 +245,7 @@ def plot_accuracy_vs_cost(
 
     plt.tight_layout()
     if save:
-        fig.savefig(os.path.join(plots_dir, "accuracy_vs_cost.png"),
-                    dpi=150, bbox_inches="tight")
+        save_figure(fig, os.path.join(plots_dir, "accuracy_vs_cost.png"), dpi=150)
     plt.close(fig)
 
 
@@ -265,8 +292,7 @@ def plot_forecast_value(
 
     plt.tight_layout()
     if save:
-        fig.savefig(os.path.join(plots_dir, "forecast_value.png"),
-                    dpi=150, bbox_inches="tight")
+        save_figure(fig, os.path.join(plots_dir, "forecast_value.png"), dpi=150)
     plt.close(fig)
 
 
@@ -344,6 +370,5 @@ def plot_storage_result(
 
     plt.tight_layout()
     if save:
-        fig.savefig(os.path.join(plots_dir, "storage_optimization.png"),
-                    dpi=150, bbox_inches="tight")
+        save_figure(fig, os.path.join(plots_dir, "storage_optimization.png"), dpi=150)
     plt.close(fig)

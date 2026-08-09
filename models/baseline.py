@@ -225,6 +225,86 @@ def build_linear_regression(alpha: float = 1.0) -> FlattenWrapper:
     return FlattenWrapper(Ridge(alpha=alpha), name="LinearRegression")
 
 
+class MultiHorizonXGB:
+    """
+    Отдельный XGBRegressor на каждый шаг горизонта прогноза.
+
+    Класс объявлен на уровне модуля, а не внутри фабрики: локальные классы не
+    поддаются сериализации через pickle, из-за чего обученную модель было
+    невозможно сохранить в инференс-бандл. Гиперпараметры хранятся в атрибутах
+    экземпляра, поэтому объект восстанавливается вместе с ними.
+
+    Ранняя остановка по валидационной выборке ограничивает переобучение
+    каждой из моделей горизонта независимо.
+    """
+
+    def __init__(
+        self,
+        n_estimators: int = 400,
+        learning_rate: float = 0.05,
+        max_depth: int = 4,
+        subsample: float = 0.75,
+        colsample_bytree: float = 0.80,
+        min_child_weight: int = 10,
+        seed: int = 42,
+    ) -> None:
+        self.n_estimators = n_estimators
+        self.learning_rate = learning_rate
+        self.max_depth = max_depth
+        self.subsample = subsample
+        self.colsample_bytree = colsample_bytree
+        self.min_child_weight = min_child_weight
+        self.seed = seed
+        self.models: List[xgb.XGBRegressor] = []
+        self.horizon: Optional[int] = None
+
+    def _make_estimator(self, random_state_offset: int = 0) -> xgb.XGBRegressor:
+        return xgb.XGBRegressor(
+            n_estimators=self.n_estimators,
+            learning_rate=self.learning_rate,
+            max_depth=self.max_depth,
+            subsample=self.subsample,
+            colsample_bytree=self.colsample_bytree,
+            min_child_weight=self.min_child_weight,
+            reg_alpha=0.1,
+            reg_lambda=2.0,
+            random_state=self.seed + random_state_offset,
+            n_jobs=1,
+            verbosity=0,
+            tree_method="hist",
+            early_stopping_rounds=50,
+        )
+
+    def fit(
+        self,
+        X_train: np.ndarray,
+        Y_train: np.ndarray,
+        X_val: Optional[np.ndarray] = None,
+        Y_val: Optional[np.ndarray] = None,
+    ) -> "MultiHorizonXGB":
+        self.horizon = Y_train.shape[1]
+        self.models = []
+        use_val = X_val is not None and Y_val is not None
+        for h in range(self.horizon):
+            model = self._make_estimator(random_state_offset=h)
+            if use_val:
+                model.fit(
+                    X_train, Y_train[:, h],
+                    eval_set=[(X_val, Y_val[:, h])],
+                    verbose=False,
+                )
+            else:
+                model.fit(X_train, Y_train[:, h], verbose=False)
+            self.models.append(model)
+        return self
+
+    def predict(self, X: np.ndarray) -> np.ndarray:
+        if not self.models:
+            raise RuntimeError("Модель не обучена: вызовите fit() перед predict().")
+        preds = [m.predict(X) for m in self.models]
+        return np.stack(preds, axis=1).astype(np.float32)
+
+
 def build_xgboost(
     n_estimators: int = 400,
     learning_rate: float = 0.05,
@@ -235,83 +315,29 @@ def build_xgboost(
     seed: int = 42,
 ) -> LagFeaturesWrapper:
     """
-    XGBoost на расширенных лаг-признаках (~165 фич) + MultiOutputRegressor.
+    XGBoost на расширенных лаг-признаках (~165 фич), отдельная модель на каждый
+    шаг горизонта.
 
-    ИЗМЕНЕНИЯ v5 vs v4:
-      v4: 71 признак — только потребление имело историю 48 шагов,
-          остальные 14 каналов — одна точка на последнем шаге.
-      v5: 165 признаков — rolling_mean(6,12,24,48) и rolling_std(6,24)
-          добавлены ПО ВСЕМ 15 КАНАЛАМ. XGBoost теперь видит историю
-          температуры, влажности, ветра — те же данные что LinearRegression,
-          но в агрегированном виде.
-
-      colsample_bytree=0.80: 165×0.8≈132 признака/дерево — сохраняем разнообразие.
-      min_child_weight=10: с 165 признаками пространство разбивается точнее,
-                           листья могут быть чуть меньше чем при 71 признаке.
-      Соотношение 165:6100 = 1:37 — безопасно при reg_alpha+reg_lambda.
+    Состав признаков включает rolling mean/std по всем каналам, а не только по
+    потреблению: иначе сравнение с Ridge, который видит сырое окно целиком,
+    подменялось бы сравнением объёма входных данных.
     """
-    class MultiHorizonXGB:
-        """
-        Обучает отдельный XGBRegressor на каждый шаг горизонта.
-        Поддерживает early stopping по валидации для снижения переобучения.
-        """
-        def __init__(self) -> None:
-            self.models: List[xgb.XGBRegressor] = []
-            self.horizon: Optional[int] = None
-
-        def _make_estimator(self, random_state_offset: int = 0) -> xgb.XGBRegressor:
-            return xgb.XGBRegressor(
-                n_estimators=n_estimators,
-                learning_rate=learning_rate,
-                max_depth=max_depth,
-                subsample=subsample,
-                colsample_bytree=colsample_bytree,
-                min_child_weight=min_child_weight,
-                reg_alpha=0.1,
-                reg_lambda=2.0,
-                random_state=seed + random_state_offset,
-                n_jobs=1,
-                verbosity=0,
-                tree_method="hist",
-                early_stopping_rounds=50,
-            )
-
-        def fit(
-            self,
-            X_train: np.ndarray,
-            Y_train: np.ndarray,
-            X_val: Optional[np.ndarray] = None,
-            Y_val: Optional[np.ndarray] = None,
-        ) -> "MultiHorizonXGB":
-            self.horizon = Y_train.shape[1]
-            self.models = []
-            use_val = X_val is not None and Y_val is not None
-            for h in range(self.horizon):
-                model = self._make_estimator(random_state_offset=h)
-                if use_val:
-                    model.fit(
-                        X_train, Y_train[:, h],
-                        eval_set=[(X_val, Y_val[:, h])],
-                        verbose=False,
-                    )
-                else:
-                    model.fit(X_train, Y_train[:, h], verbose=False)
-                self.models.append(model)
-            return self
-
-        def predict(self, X: np.ndarray) -> np.ndarray:
-            if not self.models:
-                raise RuntimeError("Модель не обучена: вызовите fit() перед predict().")
-            preds = [m.predict(X) for m in self.models]
-            return np.stack(preds, axis=1).astype(np.float32)
-
+    estimator = MultiHorizonXGB(
+        n_estimators=n_estimators,
+        learning_rate=learning_rate,
+        max_depth=max_depth,
+        subsample=subsample,
+        colsample_bytree=colsample_bytree,
+        min_child_weight=min_child_weight,
+        seed=seed,
+    )
     logger.info(
         "XGBoost (FullLags + RollingAllChannels + MultiHorizon) | "
-        "~165 признаков | %d независимых моделей + val-early-stopping | "
+        "~165 признаков | отдельная модель на шаг горизонта + val-early-stopping | "
         "n_est=%d depth=%d min_cw=%d",
-        24, n_estimators, max_depth, min_child_weight,
+        n_estimators, max_depth, min_child_weight,
     )
-    return LagFeaturesWrapper(MultiHorizonXGB(), name="XGBoost")
+    return LagFeaturesWrapper(estimator, name="XGBoost")
 
 
 # ══════════════════════════════════════════════════════════════════════════════

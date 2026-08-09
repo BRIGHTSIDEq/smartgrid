@@ -352,6 +352,13 @@ def main(argv=None) -> int:
 
     # ── [5/10] Обучение ──────────────────────────────────────────────────────
     logger.info("\n[5/10] Обучение моделей...")
+    # Состав моделей фиксируется явно: пайплайн обязан отчитаться, какие из
+    # запрошенных моделей действительно обучились. Молчаливое исключение
+    # упавшей модели с последующим успешным завершением скрывает отказ.
+    requested_models = [name for _, name in models_to_train]
+    trained_models: List[str] = []
+    failed_models: List[Dict[str, str]] = []
+
     trainers: List[ModelTrainer] = []
     for model, name in models_to_train:
         trainer = ModelTrainer(model, name, Config.MODELS_DIR, Config.PLOTS_DIR)
@@ -362,9 +369,11 @@ def main(argv=None) -> int:
                 lr_factor=Config.LR_FACTOR, min_delta=Config.MIN_DELTA,
             )
         except Exception as exc:
-            logger.error("Модель %s не обучена и исключена из сравнения: %s", name, exc)
+            logger.error("Модель %s не обучена: %s", name, exc)
+            failed_models.append({"model": name, "error": f"{type(exc).__name__}: {exc}"})
             continue
         trainers.append(trainer)
+        trained_models.append(name)
         if trainer.history is not None:
             plot_training_history(trainer.history, model_name=name,
                                   plots_dir=Config.PLOTS_DIR)
@@ -475,6 +484,10 @@ def main(argv=None) -> int:
         "forecast_horizon": Config.FORECAST_HORIZON,
         "epochs": Config.EPOCHS, "batch_size": Config.BATCH_SIZE,
         "best_model_by_val": best_name,
+        "requested_models": requested_models,
+        "trained_models": trained_models,
+        "failed_models": failed_models,
+        "partial_failure": bool(failed_models),
         "mase_scale": data.get("mase_scale"),
         "n_features": int(data["n_features"]),
         "split_sizes": {"train": int(len(data["X_train"])),
@@ -489,11 +502,14 @@ def main(argv=None) -> int:
 
     # Каталог прогона — основной носитель результатов; сводка в корне results
     # накапливает строки по сидам для агрегации mean ± std.
-    for target, append in ((run_dir, False), (Config.OUTPUT_DIR, True)):
+    # append=True обязателен для обоих каталогов: две записи подряд (test и val)
+    # с перезаписью стирали бы строки первого сплита. Каталог прогона создаётся
+    # пустым, поэтому дозапись там равносильна созданию файла.
+    for target in (run_dir, Config.OUTPUT_DIR):
         reporting.export_metrics(test_metrics, target, seed=args.seed,
-                                 split="test", run_meta=run_meta, append=append)
+                                 split="test", run_meta=run_meta, append=True)
         reporting.export_metrics(val_metrics, target, seed=args.seed,
-                                 split="val", run_meta=run_meta, append=append)
+                                 split="val", run_meta=run_meta, append=True)
     reporting.export_horizon_metrics(per_horizon, run_dir, seed=args.seed)
     reporting.export_dm_tests(dm_rows, run_dir)
     if storage_results:
@@ -508,19 +524,42 @@ def main(argv=None) -> int:
 
     # Экспорт бандла лучшей модели (только для Keras — sklearn-обёртки
     # сериализуются иначе и в инференс-контур не входят).
-    if isinstance(best_trainer.model, tf.keras.Model):
-        export_model_bundle(
-            best_trainer.model, data,
-            {"HISTORY_LENGTH": Config.HISTORY_LENGTH,
-             "FORECAST_HORIZON": Config.FORECAST_HORIZON,
-             "N_FEATURES": Config.N_FEATURES,
-             "model_name": best_name, "mode": args.mode, "seed": args.seed},
-            export_dir=Config.MODELS_DIR, model_name=best_name,
-        )
+    # Бандл собирается для победителя независимо от его типа. Лучшей по
+    # валидации регулярно оказывается не нейросеть, а градиентный бустинг:
+    # прежнее ограничение на tf.keras.Model означало, что заявленная лучшая
+    # модель оставалась без работающего инференса.
+    bundle_dir = export_model_bundle(
+        best_trainer.model, data,
+        {"HISTORY_LENGTH": Config.HISTORY_LENGTH,
+         "FORECAST_HORIZON": Config.FORECAST_HORIZON,
+         "N_FEATURES": Config.N_FEATURES,
+         "model_name": best_name, "mode": args.mode, "seed": args.seed},
+        export_dir=Config.MODELS_DIR, model_name=best_name,
+    )
+    run_meta["deployable_model"] = best_name
+    run_meta["bundle_dir"] = bundle_dir
+    reporting.write_run_metadata(run_dir, run_meta)
 
     logger.info("\n" + "=" * 78)
+    elapsed_min = (time.time() - t_start) / 60
+    if failed_models:
+        # Частичный отказ не выдаётся за успех: и в логе, и в коде возврата.
+        # Иначе упавшие нейросети остаются незамеченными, а отчёт выглядит
+        # полным, хотя построен по неполному составу моделей.
+        logger.error(
+            "Пайплайн завершён ЧАСТИЧНО за %.1f мин: не обучено моделей %d из %d.",
+            elapsed_min, len(failed_models), len(requested_models),
+        )
+        for item in failed_models:
+            logger.error("  не обучена: %s — %s", item["model"], item["error"])
+        logger.error("  Результаты построены только по обученным моделям: %s",
+                     ", ".join(trained_models))
+        logger.info("  Результаты: %s", run_dir)
+        logger.info("=" * 78)
+        return 2
+
     logger.info("Пайплайн завершён за %.1f мин. Результаты: %s",
-                (time.time() - t_start) / 60, Config.OUTPUT_DIR)
+                elapsed_min, Config.OUTPUT_DIR)
     logger.info("  Таблицы для записки: %s",
                 os.path.join(run_dir, "markdown_tables.md"))
     logger.info("=" * 78)

@@ -33,6 +33,8 @@ from data.preprocessing import inverse_scale, prepare_data
 
 logger = logging.getLogger("smart_grid.analysis.backtesting")
 
+from utils.visualization import save_figure
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # 1. УСТОЙЧИВОСТЬ ПО ОКНАМ ТЕСТА (без переобучения)
@@ -278,7 +280,7 @@ def _plot_window_metrics(
     plt.tight_layout()
     if save:
         path = os.path.join(plots_dir, fname)
-        fig.savefig(path, dpi=150, bbox_inches="tight")
+        save_figure(fig, path, dpi=150)
         logger.info("График сохранён: %s", path)
     plt.close(fig)
 

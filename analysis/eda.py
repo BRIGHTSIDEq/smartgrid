@@ -18,6 +18,8 @@ from statsmodels.tsa.seasonal import seasonal_decompose
 
 logger = logging.getLogger("smart_grid.analysis.eda")
 
+from utils.visualization import save_figure
+
 plt.style.use("seaborn-v0_8-darkgrid")
 sns.set_palette("husl")
 
@@ -147,6 +149,6 @@ def run_eda(
 def _save(fig: plt.Figure, plots_dir: str, name: str, save: bool) -> None:
     if save:
         path = os.path.join(plots_dir, name)
-        fig.savefig(path, dpi=150, bbox_inches="tight")
+        save_figure(fig, path, dpi=150)
         logger.debug("График сохранён: %s", path)
     plt.close(fig)

@@ -293,7 +293,13 @@ class ModelTrainer:
                     epochs=epochs,
                     batch_size=current_batch,
                     callbacks=callbacks,
-                    verbose=1,
+                    # verbose=2 — одна строка на эпоху вместо анимированного
+                    # прогресс-бара. Бар Keras рисуется символами Unicode и на
+                    # консоли с однобайтовой кодировкой (cp1251 в русской
+                    # Windows) вызывает UnicodeEncodeError, обрывая обучение.
+                    # Режим 2 использует только ASCII и работает везде, не
+                    # требуя от пользователя выставлять PYTHONIOENCODING.
+                    verbose=2,
                 )
                 actual_epochs = len(self.history.history["loss"])
                 logger.info("%s: обучение завершено за %d эпох",

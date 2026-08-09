@@ -24,6 +24,8 @@ import tensorflow as tf
 
 logger = logging.getLogger("smart_grid.utils.attention_viz")
 
+from utils.visualization import save_figure
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
@@ -181,7 +183,7 @@ def visualize_attention_weights(
                 plots_dir,
                 f"attention_{model_name.replace(' ', '_')}_{block_name}.png",
             )
-            fig.savefig(fn, dpi=150, bbox_inches="tight")
+            save_figure(fig, fn, dpi=150)
             logger.info("Attention heatmap: %s", fn)
         plt.close(fig)
 
@@ -271,7 +273,7 @@ def visualize_attention_summary(
     plt.tight_layout()
     if save:
         fn = os.path.join(plots_dir, f"attention_summary_{model_name.replace(' ', '_')}.png")
-        fig.savefig(fn, dpi=150, bbox_inches="tight")
+        save_figure(fig, fn, dpi=150)
         logger.info("Summary attention: %s", fn)
     plt.close(fig)
 
@@ -343,6 +345,6 @@ def compare_head_specialization(
     plt.tight_layout()
     if save:
         fn = os.path.join(plots_dir, f"head_specialization_{model_name.replace(' ', '_')}.png")
-        fig.savefig(fn, dpi=150, bbox_inches="tight")
+        save_figure(fig, fn, dpi=150)
         logger.info("Head specialization: %s", fn)
     plt.close(fig)

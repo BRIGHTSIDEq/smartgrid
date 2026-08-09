@@ -348,9 +348,38 @@ class Config:
         cls._derive_battery_economics()
         return cls
 
+    @staticmethod
+    def _make_console_encoding_safe():
+        """
+        Гарантирует, что вывод в консоль не уронит программу на кодировке.
+
+        Логи содержат кириллицу и псевдографику (─ ═ →), которых нет в
+        однобайтовых кодовых страницах. На русской Windows консоль по умолчанию
+        работает в cp1251, и первая же такая строка вызывает
+        UnicodeEncodeError: 'charmap' codec can't encode character.
+
+        Поток переводится в UTF-8; если терминал этого не поддерживает,
+        включается замена непредставимых символов, чтобы вывод деградировал
+        до «?» вместо аварийного завершения. Пользователю не нужно
+        самостоятельно выставлять PYTHONIOENCODING.
+        """
+        import sys
+        for stream in (sys.stdout, sys.stderr):
+            reconfigure = getattr(stream, "reconfigure", None)
+            if reconfigure is None:
+                continue
+            try:
+                reconfigure(encoding="utf-8", errors="replace")
+            except Exception:
+                try:
+                    reconfigure(errors="replace")
+                except Exception:
+                    pass
+
     @classmethod
     def setup_logging(cls):
         cls.create_dirs()
+        cls._make_console_encoding_safe()
         logging.basicConfig(
             level=cls.LOG_LEVEL, format=cls.LOG_FORMAT, datefmt=cls.LOG_DATE_FMT,
             handlers=[

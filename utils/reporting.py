@@ -32,6 +32,65 @@ _METRIC_ORDER = ["model", "seed", "split", "MAE", "RMSE", "MAPE", "sMAPE", "R2",
                  "n_params", "train_time_sec"]
 
 
+def json_safe(value: Any) -> Any:
+    """
+    Приводит значение к типам, допустимым в строгом JSON.
+
+    Стандартный json.dump по умолчанию пишет NaN, Infinity и -Infinity —
+    это расширение Python, а не JSON: такой файл отвергается строгими
+    парсерами (в том числе `json.loads(..., parse_constant=...)`, JavaScript,
+    jq). Нечисловые значения заменяются на null.
+
+    Отдельно обрабатываются типы numpy: np.bool_ обязан стать настоящим
+    boolean, иначе при сериализации через default=str он превращается в
+    строку "True", и потребитель файла получает истинное значение там, где
+    ожидал флаг.
+    """
+    import math
+
+    if isinstance(value, dict):
+        return {str(k): json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [json_safe(v) for v in value]
+
+    # bool проверяется до int: np.bool_ и bool — подтипы целых.
+    if isinstance(value, (bool, np.bool_)):
+        return bool(value)
+    if isinstance(value, np.integer):
+        return int(value)
+    if isinstance(value, np.floating):
+        value = float(value)
+    if isinstance(value, float):
+        return None if (math.isnan(value) or math.isinf(value)) else value
+    if isinstance(value, np.ndarray):
+        return json_safe(value.tolist())
+    if value is None or isinstance(value, (int, str)):
+        return value
+    return str(value)
+
+
+def _reject_non_finite(_const: str):
+    """Обработчик для json.loads: делает NaN/Infinity ошибкой разбора."""
+    raise ValueError(f"JSON содержит недопустимое значение {_const}")
+
+
+def dump_strict_json(payload: Any, path: str) -> str:
+    """
+    Записывает JSON без NaN/Infinity и сразу проверяет результат разбором.
+
+    Проверка обязательна: без неё недопустимое значение обнаружится только у
+    потребителя файла — например, при построении таблиц для пояснительной
+    записки.
+    """
+    safe = json_safe(payload)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(safe, f, indent=2, ensure_ascii=False, allow_nan=False)
+
+    with open(path, encoding="utf-8") as f:
+        json.load(f, parse_constant=_reject_non_finite)
+    return path
+
+
 def collect_environment() -> Dict[str, Any]:
     """
     Фиксирует окружение прогона: версии библиотек и состояние репозитория.
@@ -98,8 +157,7 @@ def write_run_metadata(run_dir: str, meta: Dict[str, Any]) -> str:
     payload = dict(meta)
     payload["environment"] = collect_environment()
     path = os.path.join(run_dir, "run_metadata.json")
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(payload, f, indent=2, ensure_ascii=False, default=str)
+    dump_strict_json(payload, path)
     logger.info("Метаданные прогона: %s", path)
     return path
 
@@ -152,9 +210,7 @@ def export_metrics(
     df_new.to_csv(csv_path, index=False, encoding="utf-8-sig")
 
     json_path = os.path.join(output_dir, "metrics.json")
-    payload = {"run": run_meta or {}, "metrics": rows}
-    with open(json_path, "w", encoding="utf-8") as f:
-        json.dump(payload, f, indent=2, ensure_ascii=False, default=float)
+    dump_strict_json({"run": run_meta or {}, "metrics": rows}, json_path)
 
     logger.info("Метрики сохранены: %s и %s", csv_path, json_path)
     return csv_path

@@ -28,6 +28,8 @@ from statsmodels.tsa.stattools import adfuller, kpss
 
 logger = logging.getLogger("smart_grid.analysis.residuals")
 
+from utils.visualization import save_figure
+
 
 def extract_residual_series(
     y_true: np.ndarray,
@@ -155,7 +157,7 @@ def analyze_residuals(
     plt.tight_layout()
     if save:
         path = os.path.join(plots_dir, f"residuals_{model_name.replace(' ', '_')}.png")
-        fig.savefig(path, dpi=150, bbox_inches="tight")
+        save_figure(fig, path, dpi=150)
         logger.info("График остатков: %s", path)
     plt.close(fig)
 

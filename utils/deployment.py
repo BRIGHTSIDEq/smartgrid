@@ -34,7 +34,7 @@ _SCALER_KEYS = (
 
 
 def export_model_bundle(
-    model: tf.keras.Model,
+    model: Any,
     data: Dict[str, Any],
     config_dict: Dict[str, Any],
     export_dir: str = "results/models",
@@ -43,9 +43,21 @@ def export_model_bundle(
     """
     Сохраняет модель, все скалеры и конфиг в одну директорию.
 
+    Поддерживаются два вида моделей, поскольку лучшей по валидации регулярно
+    оказывается не нейросеть, а градиентный бустинг: экспортировать только
+    Keras означало бы отдавать в эксплуатацию не ту модель, которая победила.
+
+      keras   — сохраняется штатным model.save() в model.keras;
+      sklearn — обёртки Ridge и XGBoost сериализуются pickle в model.pkl.
+                Обёртка хранит внутри всю логику построения лаг-признаков,
+                поэтому интерфейс predict(X) с трёхмерным входом сохраняется.
+
+    Вид модели записывается в config.json полем model_kind: без него загрузчик
+    не знал бы, какой файл читать.
+
     Parameters
     ----------
-    model : tf.keras.Model
+    model : tf.keras.Model либо обёртка с методами fit/predict
     data : dict
         Словарь из prepare_data() — из него берутся скалеры.
     config_dict : dict
@@ -54,9 +66,16 @@ def export_model_bundle(
     bundle_dir = os.path.join(export_dir, model_name)
     os.makedirs(bundle_dir, exist_ok=True)
 
+    is_keras = isinstance(model, tf.keras.Model)
+    config = dict(config_dict)
+    config["model_kind"] = "keras" if is_keras else "sklearn"
+
     try:
-        model_path = os.path.join(bundle_dir, "model.keras")
-        model.save(model_path)
+        if is_keras:
+            model.save(os.path.join(bundle_dir, "model.keras"))
+        else:
+            with open(os.path.join(bundle_dir, "model.pkl"), "wb") as f:
+                pickle.dump(model, f)
 
         scalers = {k: data.get(k) for k in _SCALER_KEYS}
         scalers["temp_sq_max"] = data.get("temp_sq_max")
@@ -64,10 +83,11 @@ def export_model_bundle(
             pickle.dump(scalers, f)
 
         with open(os.path.join(bundle_dir, "config.json"), "w", encoding="utf-8") as f:
-            json.dump(config_dict, f, indent=2, ensure_ascii=False)
+            json.dump(config, f, indent=2, ensure_ascii=False)
 
-        logger.info("Бандл модели сохранён: %s (модель + %d скалеров + конфиг)",
-                    bundle_dir, sum(1 for v in scalers.values() if v is not None))
+        logger.info("Бандл модели сохранён: %s (%s + %d скалеров + конфиг)",
+                    bundle_dir, config["model_kind"],
+                    sum(1 for v in scalers.values() if v is not None))
     except Exception as exc:
         logger.error("Ошибка экспорта модели: %s", exc)
         raise
@@ -109,9 +129,36 @@ def load_model_bundle(bundle_dir: str) -> Dict[str, Any]:
     }
 
     try:
-        model = tf.keras.models.load_model(
-            os.path.join(bundle_dir, "model.keras"), custom_objects=custom_objects,
-        )
+        config_path = os.path.join(bundle_dir, "config.json")
+        with open(config_path, encoding="utf-8") as f:
+            config = json.load(f)
+
+        # Вид модели берётся из конфига; для старых бандлов определяется по
+        # тому, какой файл фактически лежит в каталоге.
+        kind = config.get("model_kind")
+        if kind is None:
+            kind = "keras" if os.path.exists(
+                os.path.join(bundle_dir, "model.keras")) else "sklearn"
+
+        if kind == "keras":
+            model = tf.keras.models.load_model(
+                os.path.join(bundle_dir, "model.keras"),
+                custom_objects=custom_objects,
+                # Оптимизатор для инференса не нужен, а его восстановление даёт
+                # предупреждение о несовпадении состояния: у свежесобранной
+                # модели переменных больше, чем было сохранено. Отключаем
+                # компиляцию — дообучение из бандла не предполагается.
+                compile=False,
+            )
+        elif kind == "sklearn":
+            model_path = os.path.join(bundle_dir, "model.pkl")
+            if not os.path.exists(model_path):
+                raise FileNotFoundError(f"В бандле нет model.pkl: {bundle_dir}")
+            with open(model_path, "rb") as f:
+                model = pickle.load(f)
+        else:
+            raise ValueError(f"Неизвестный тип модели в бандле: {kind!r}")
+
         scalers_path = os.path.join(bundle_dir, "scalers.pkl")
         if not os.path.exists(scalers_path):
             raise FileNotFoundError(
@@ -121,9 +168,7 @@ def load_model_bundle(bundle_dir: str) -> Dict[str, Any]:
             )
         with open(scalers_path, "rb") as f:
             scalers = pickle.load(f)
-        with open(os.path.join(bundle_dir, "config.json"), encoding="utf-8") as f:
-            config = json.load(f)
-        logger.info("Бандл загружен из: %s", bundle_dir)
+        logger.info("Бандл загружен из: %s (тип модели: %s)", bundle_dir, kind)
         return {"model": model, "scalers": scalers, "config": config}
     except Exception as exc:
         logger.error("Ошибка загрузки бандла: %s", exc)
@@ -155,7 +200,10 @@ def assert_input_matches_model(
             f"Ожидается трёхмерный вход (batch, history, features), получено {X.shape}"
         )
 
-    input_shape = getattr(model, "input_shape", None)
+    # У обёрток sklearn/XGBoost нет input_shape: для них проверка опирается
+    # только на ожидаемое число признаков из конфига бандла.
+    input_shape = getattr(model, "input_shape", None) if isinstance(
+        model, tf.keras.Model) else None
     if isinstance(input_shape, list):          # модели с несколькими входами
         input_shape = input_shape[0]
 
@@ -240,5 +288,10 @@ def predict_from_bundle(
 
     X = features[np.newaxis, :, :].astype(np.float32)   # (1, T, F)
     assert_input_matches_model(model, X, expected_features=n_features)
-    pred_scaled = model.predict(X, verbose=0)
-    return inverse_scale(scalers["scaler"], pred_scaled)[0]
+
+    # Keras принимает verbose, обёртки sklearn/XGBoost — нет.
+    if isinstance(model, tf.keras.Model):
+        pred_scaled = model.predict(X, verbose=0)
+    else:
+        pred_scaled = model.predict(X)
+    return inverse_scale(scalers["scaler"], np.asarray(pred_scaled))[0]

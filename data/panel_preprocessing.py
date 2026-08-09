@@ -200,6 +200,7 @@ def prepare_panel_data(
     val_ratio: float = 0.15,
     seed: int = 42,
     weather_forecast_sigma: Optional[Dict[str, Tuple[float, float]]] = None,
+    window_stride: int = 1,
     max_windows_warn: int = 2_000_000,
 ) -> Dict[str, Any]:
     """
@@ -233,6 +234,17 @@ def prepare_panel_data(
         timestamps[0], timestamps[train_end - 1],
         timestamps[val_end - 1], timestamps[-1],
     )
+
+    if window_stride > 1:
+        from math import gcd
+        clashes = [p for p in (24, 168) if gcd(window_stride, p) != 1]
+        if clashes:
+            raise ValueError(
+                f"Шаг прореживания {window_stride} имеет общий делитель с "
+                f"{clashes}: начала окон попадали бы только на часть часов суток "
+                f"или дней недели, и выборка стала бы систематически неполной. "
+                f"Подходят шаги, взаимно простые с 24 и 168: 5, 11, 13."
+            )
 
     static_cols = sorted([c for c in df.columns if c.startswith("static_")])
     hist_numeric = ["temperature", "humidity", "wind_speed", "cloud_cover",
@@ -322,6 +334,17 @@ def prepare_panel_data(
                                        history_length, forecast_horizon, lo, hi)
             if win is None:
                 continue
+
+            # Соседние окна перекрываются на history-1 часов и почти
+            # дублируют друг друга, поэтому шаг по окнам снижает расход памяти
+            # почти без потери сведений. Шаг применяется одинаково ко всем
+            # сплитам: при взаимно простом с 24 и 168 значении начала окон
+            # равномерно обходят все часы суток и дни недели, поэтому оценка
+            # остаётся несмещённой, а не привязанной к части моментов.
+            if window_stride > 1:
+                sel = slice(None, None, window_stride)
+                win = {k: v[sel] for k, v in win.items()}
+
             n_win = len(win["Y"])
             parts[split]["X_hist"].append(win["X_hist"])
             parts[split]["X_future"].append(win["X_future"])
@@ -353,7 +376,13 @@ def prepare_panel_data(
         "нарушен контракт схемы: канал 0 должен быть потреблением"
     )
 
+    if window_stride > 1:
+        logger.info("Окна прорежены шагом %d: train=%d, val=%d, test=%d",
+                    window_stride, len(data["Y_train"]), len(data["Y_val"]),
+                    len(data["Y_test"]))
+
     data.update({
+        "window_stride": int(window_stride),
         "consumption_channel": 0,
         "series_index": series_index,
         "series_scalers": series_scalers,

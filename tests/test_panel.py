@@ -394,3 +394,85 @@ def test_tariff_zone_encoding_matches_russian_order():
 
     weekend = _tariff_zone_code(hours, np.full(24, 5.0), holiday)
     assert not np.any(weekend == 1.0), "в выходные пиковой зоны нет"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ПРОРЕЖИВАНИЕ ОКОН
+# ══════════════════════════════════════════════════════════════════════════════
+
+def test_stride_reduces_windows_proportionally(panel):
+    """Шаг прореживает все сплиты одинаково, не трогая состав признаков."""
+    df, specs = panel
+    full = prepare_panel_data(df, specs, history_length=48, forecast_horizon=24, seed=1)
+    thin = prepare_panel_data(df, specs, history_length=48, forecast_horizon=24, seed=1,
+                              window_stride=5)
+
+    for split in ("train", "val", "test"):
+        n_full, n_thin = len(full[f"Y_{split}"]), len(thin[f"Y_{split}"])
+        assert n_thin == pytest.approx(n_full / 5, rel=0.05), split
+
+    assert thin["feature_names_hist"] == full["feature_names_hist"]
+    assert thin["window_stride"] == 5
+
+
+def test_stride_keeps_forecast_origins_uniform_over_hours(panel):
+    """
+    Начала окон обходят все часы суток и дни недели.
+
+    Шаг, кратный 24, оставил бы только часть часов: при шаге 4 обучение видело
+    бы прогнозы, начинающиеся лишь в часы 0, 4, 8, 12, 16 и 20, и на остальных
+    моделью управлял бы перенос с соседних часов. В метриках это не видно.
+    """
+    df, specs = panel
+    thin = prepare_panel_data(df, specs, history_length=48, forecast_horizon=24,
+                              seed=1, window_stride=5)
+
+    origins = thin["anchor_train"] + thin["history_length"] - 1
+    hours = np.unique(origins % 24)
+    weekdays = np.unique((origins // 24) % 7)
+
+    assert len(hours) == 24, f"охвачено только {len(hours)} часов суток"
+    assert len(weekdays) == 7, f"охвачено только {len(weekdays)} дней недели"
+
+
+@pytest.mark.parametrize("bad_stride", [2, 3, 4, 6, 7, 8, 12, 24])
+def test_stride_sharing_a_divisor_with_the_cycle_is_rejected(panel, bad_stride):
+    """
+    Шаг с общим делителем с 24 или 168 отвергается до нарезки.
+
+    Проверка стоит до формирования окон: обнаружить систематически неполную
+    выборку по метрикам невозможно — они выглядят обычно.
+    """
+    df, specs = panel
+    with pytest.raises(ValueError, match="общий делитель"):
+        prepare_panel_data(df, specs, history_length=48, forecast_horizon=24,
+                           seed=1, window_stride=bad_stride)
+
+
+@pytest.mark.parametrize("good_stride", [5, 11, 13])
+def test_coprime_strides_are_accepted(panel, good_stride):
+    df, specs = panel
+    data = prepare_panel_data(df, specs, history_length=48, forecast_horizon=24,
+                              seed=1, window_stride=good_stride)
+    assert data["window_stride"] == good_stride
+
+
+def test_stride_does_not_break_split_boundaries(panel):
+    """
+    Прореживание не переносит окна между сплитами.
+
+    Хронологическая граница обязана сохраниться: обучающее окно, заглянувшее в
+    валидацию, дало бы утечку, а прореживание меняет именно набор окон.
+    """
+    df, specs = panel
+    thin = prepare_panel_data(df, specs, history_length=48, forecast_horizon=24,
+                              seed=1, window_stride=5)
+
+    horizon, history = thin["forecast_horizon"], thin["history_length"]
+    last_train = int(thin["anchor_train"].max()) + history + horizon
+    first_val = int(thin["anchor_val"].min())
+    last_val = int(thin["anchor_val"].max()) + history + horizon
+    first_test = int(thin["anchor_test"].min())
+
+    assert last_train <= first_val, "обучающее окно заходит в валидацию"
+    assert last_val <= first_test, "валидационное окно заходит в тест"

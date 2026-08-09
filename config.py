@@ -407,6 +407,7 @@ class Config:
     PANEL_XGB_ESTIMATORS: int = 120
     PANEL_DLINEAR_UNITS: int = 64
     PANEL_DLINEAR_LR: float = 2e-3
+    PANEL_WINDOW_STRIDE: int = 1
 
     @classmethod
     def set_panel_smoke_mode(cls):
@@ -414,6 +415,7 @@ class Config:
         cls.PANEL_CITIES = 1; cls.PANEL_FEEDERS_PER_CITY = 4; cls.PANEL_DAYS = 90
         cls.PANEL_EPOCHS = 20; cls.PANEL_PATIENCE = 6
         cls.PANEL_HISTORY = 48; cls.PANEL_XGB_ESTIMATORS = 60
+        cls.PANEL_WINDOW_STRIDE = 1
         cls.FORECAST_HORIZON = 24
         logging.getLogger("smart_grid").info(
             "Panel smoke: %d город × %d фидера × %d дней",
@@ -425,6 +427,7 @@ class Config:
         cls.PANEL_CITIES = 2; cls.PANEL_FEEDERS_PER_CITY = 8; cls.PANEL_DAYS = 365
         cls.PANEL_EPOCHS = 60; cls.PANEL_PATIENCE = 10
         cls.PANEL_HISTORY = 48; cls.PANEL_XGB_ESTIMATORS = 200
+        cls.PANEL_WINDOW_STRIDE = 1
         cls.FORECAST_HORIZON = 24
         logging.getLogger("smart_grid").info(
             "Panel fast: %d города × %d фидеров × %d дней",
@@ -435,20 +438,36 @@ class Config:
         """
         Крупная панель. Требует потоковой подачи данных.
 
-        При материализации всех окон в памяти этот режим неисполним:
-        4 города × 24 фидера × 3 года дают порядка двух миллионов окон, то
-        есть десятки гигабайт. Конвейер проверяет объём и отказывается
-        запускаться, пока потоковая подача не реализована.
+        Смысл режима — не длина окна, а состав панели: 96 рядов вместо 16 и три
+        года вместо одного. Второе снимает ограничение panel-fast, где при
+        единственном годе на тест приходился сезон, отсутствовавший в обучении.
+
+        Все окна со сдвигом 1 час дали бы 2.5 млн штук и порядка 40 ГБ. Окна
+        прореживаются шагом 11: соседние перекрываются на 47 часов из 48 и
+        почти дублируют друг друга, поэтому потеря сведений мала, а расход
+        памяти падает на порядок. Шаг взаимно прост с 24 и 168, поэтому начала
+        окон равномерно обходят все часы суток и дни недели — при шаге 4
+        обучение видело бы прогнозы, начинающиеся только в часы 0, 4, 8, 12,
+        16 и 20.
+
+        Длина истории оставлена как в panel-fast: тогда между режимами
+        различаются только состав панели и длительность, и разницу в
+        результатах можно отнести к ним, а не к изменённому окну. Недельная
+        зависимость и так доступна моделям через канал lag_168h.
+
+        Это осознанное упрощение, а не полноценная потоковая подача: она нужна,
+        чтобы обучаться на всех окнах без прореживания.
         """
         cls.PANEL_CITIES = 4; cls.PANEL_FEEDERS_PER_CITY = 24
         cls.PANEL_DAYS = 365 * 3
         cls.PANEL_EPOCHS = 120; cls.PANEL_PATIENCE = 15
-        cls.PANEL_HISTORY = 192; cls.PANEL_XGB_ESTIMATORS = 400
+        cls.PANEL_HISTORY = 48; cls.PANEL_XGB_ESTIMATORS = 400
+        cls.PANEL_WINDOW_STRIDE = 11
         cls.FORECAST_HORIZON = 24
-        logging.getLogger("smart_grid").warning(
-            "Panel optimal: %d городов × %d фидеров × %d дней — "
-            "режим требует потоковой подачи данных",
-            cls.PANEL_CITIES, cls.PANEL_FEEDERS_PER_CITY, cls.PANEL_DAYS)
+        logging.getLogger("smart_grid").info(
+            "Panel optimal: %d городов × %d фидеров × %d дней, шаг окон %d",
+            cls.PANEL_CITIES, cls.PANEL_FEEDERS_PER_CITY, cls.PANEL_DAYS,
+            cls.PANEL_WINDOW_STRIDE)
 
     @classmethod
     def set_smoke_mode(cls):

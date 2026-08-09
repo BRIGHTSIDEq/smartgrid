@@ -78,21 +78,25 @@ def test_window_estimate_matches_manual_calculation():
     assert n == 4 * per_series
 
 
-def test_panel_optimal_exceeds_memory_budget():
+def test_stride_is_what_makes_the_large_mode_feasible():
     """
-    Крупный режим действительно не помещается в память при материализации.
+    Именно прореживание переводит panel-optimal из неисполнимых в исполнимые.
 
-    Тест фиксирует основание для отказа: без потоковой подачи запуск
-    panel-optimal исчерпал бы память посреди расчёта, потеряв часы работы.
+    Без него 96 рядов за три года дают около 1.8 млн обучающих окон — десятки
+    гигабайт при материализации. Тест фиксирует обе стороны: и то, что режим
+    без прореживания действительно неисполним, и то, что с ним он проходит.
     """
     Config.set_panel_optimal_mode()
     n_series = Config.PANEL_CITIES * Config.PANEL_FEEDERS_PER_CITY
-    expected = panel_pipeline.estimate_windows(
-        n_series, Config.PANEL_DAYS, Config.PANEL_HISTORY, Config.FORECAST_HORIZON)
+    args = (n_series, Config.PANEL_DAYS, Config.PANEL_HISTORY, Config.FORECAST_HORIZON)
 
-    assert expected > panel_pipeline._MAX_WINDOWS_IN_MEMORY, (
-        "порог отказа должен срабатывать для panel-optimal"
-    )
+    without = panel_pipeline.estimate_windows(*args, stride=1)
+    with_stride = panel_pipeline.estimate_windows(
+        *args, stride=Config.PANEL_WINDOW_STRIDE)
+
+    assert Config.PANEL_WINDOW_STRIDE > 1, "крупный режим обязан прореживать окна"
+    assert without > panel_pipeline._MAX_WINDOWS_IN_MEMORY
+    assert with_stride < panel_pipeline._MAX_WINDOWS_IN_MEMORY
 
 
 def test_panel_smoke_fits_in_memory():
@@ -119,7 +123,11 @@ def test_pipeline_refuses_oversized_run_before_generating(monkeypatch):
 
     monkeypatch.setattr("data.panel.generate_panel_data", _fail_if_called)
 
+    # Прореживание отключается намеренно: с ним крупный режим помещается в
+    # память, и проверять было бы нечего. Тест касается самого механизма
+    # отказа, а не конкретной настройки режима.
     Config.set_panel_optimal_mode()
+    monkeypatch.setattr(Config, "PANEL_WINDOW_STRIDE", 1)
 
     class _Args:
         mode, scenario, seed = "panel-optimal", "current", 0

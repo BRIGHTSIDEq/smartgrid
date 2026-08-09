@@ -35,11 +35,17 @@ _MAX_WINDOWS_IN_MEMORY = 1_500_000
 
 
 def estimate_windows(n_series: int, days: int, history: int, horizon: int,
-                     train_ratio: float = 0.70) -> int:
-    """Оценивает число обучающих окон до генерации данных."""
+                     train_ratio: float = 0.70, stride: int = 1) -> int:
+    """
+    Оценивает число обучающих окон до генерации данных.
+
+    Шаг прореживания учитывается здесь же: иначе защита по памяти сравнивала бы
+    с порогом объём, который никогда не будет материализован, и отвергала бы
+    исполнимые режимы.
+    """
     hours = days * 24
     per_series = max(int(hours * train_ratio) - history - horizon, 0)
-    return n_series * per_series
+    return n_series * (per_series // max(stride, 1))
 
 
 def load_panel_dataset(args, logger_obj) -> Tuple[Any, Any, Dict[str, Any]]:
@@ -159,8 +165,10 @@ def run_panel_pipeline(args, logger_obj) -> int:
 
     # ── Отказ до генерации, если режим не помещается в память ───────────────
     expected = estimate_windows(n_series, Config.PANEL_DAYS, Config.PANEL_HISTORY,
-                                Config.FORECAST_HORIZON)
-    logger_obj.info("Ожидается около %d обучающих окон на %d рядах", expected, n_series)
+                                Config.FORECAST_HORIZON,
+                                stride=Config.PANEL_WINDOW_STRIDE)
+    logger_obj.info("Ожидается около %d обучающих окон на %d рядах (шаг окон %d)",
+                    expected, n_series, Config.PANEL_WINDOW_STRIDE)
     if expected > _MAX_WINDOWS_IN_MEMORY:
         logger_obj.error(
             "Режим требует %d окон — при материализации в памяти это порядка %.0f ГБ. "
@@ -203,7 +211,7 @@ def run_panel_pipeline(args, logger_obj) -> int:
         history_length=Config.PANEL_HISTORY,
         forecast_horizon=Config.FORECAST_HORIZON,
         train_ratio=Config.TRAIN_RATIO, val_ratio=Config.VAL_RATIO,
-        seed=args.seed,
+        seed=args.seed, window_stride=Config.PANEL_WINDOW_STRIDE,
     )
 
     # ── [3/6] Обучение ──────────────────────────────────────────────────────
@@ -275,6 +283,7 @@ def run_panel_pipeline(args, logger_obj) -> int:
             "n_series": len(data["series_index"]),
             "days": Config.PANEL_DAYS,
         },
+        "window_stride": data.get("window_stride", 1),
         "history_length": data["history_length"],
         "forecast_horizon": data["forecast_horizon"],
         "n_features": {

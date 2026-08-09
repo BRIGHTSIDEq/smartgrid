@@ -32,6 +32,78 @@ _METRIC_ORDER = ["model", "seed", "split", "MAE", "RMSE", "MAPE", "sMAPE", "R2",
                  "n_params", "train_time_sec"]
 
 
+def collect_environment() -> Dict[str, Any]:
+    """
+    Фиксирует окружение прогона: версии библиотек и состояние репозитория.
+
+    Без этого воспроизвести результат через полгода невозможно: расхождение
+    в версии TensorFlow или незакоммиченная правка меняют числа, а понять
+    причину постфактум уже нельзя.
+    """
+    import platform
+    import subprocess
+
+    def _pkg_version(name: str) -> str:
+        try:
+            module = __import__(name)
+            return str(getattr(module, "__version__", "неизвестно"))
+        except Exception:
+            return "не установлен"
+
+    def _git(*args: str) -> str:
+        try:
+            out = subprocess.run(["git", *args], capture_output=True, text=True,
+                                 timeout=10, encoding="utf-8", errors="replace")
+            return out.stdout.strip() if out.returncode == 0 else "недоступно"
+        except Exception:
+            return "недоступно"
+
+    commit = _git("rev-parse", "HEAD")
+    dirty = _git("status", "--porcelain")
+
+    return {
+        "python": platform.python_version(),
+        "platform": platform.platform(),
+        "packages": {name: _pkg_version(name) for name in
+                     ("numpy", "pandas", "sklearn", "tensorflow", "xgboost",
+                      "statsmodels", "scipy")},
+        "git_commit": commit,
+        "git_branch": _git("rev-parse", "--abbrev-ref", "HEAD"),
+        # Незакоммиченные правки означают, что коммит не описывает прогон
+        # полностью — это важно знать при разборе расхождений.
+        "git_dirty": bool(dirty) and dirty != "недоступно",
+    }
+
+
+def make_run_dir(output_dir: str, mode: str, scenario: str, seed: int) -> str:
+    """
+    Создаёт отдельный каталог для результатов прогона.
+
+    Каждый запуск пишет в собственную директорию, поэтому результаты разных
+    режимов и сценариев не перезаписывают друг друга и не смешиваются:
+    сравнивать smoke-прогон с optimal по одному и тому же файлу нельзя.
+    """
+    from datetime import datetime
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    name = f"{stamp}_{mode}_{scenario}_seed{seed}"
+    path = os.path.join(output_dir, "runs", name)
+    os.makedirs(path, exist_ok=True)
+    logger.info("Каталог прогона: %s", path)
+    return path
+
+
+def write_run_metadata(run_dir: str, meta: Dict[str, Any]) -> str:
+    """Сохраняет метаданные прогона рядом с его результатами."""
+    os.makedirs(run_dir, exist_ok=True)
+    payload = dict(meta)
+    payload["environment"] = collect_environment()
+    path = os.path.join(run_dir, "run_metadata.json")
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, ensure_ascii=False, default=str)
+    logger.info("Метаданные прогона: %s", path)
+    return path
+
+
 def _ordered_frame(rows: List[Dict[str, Any]]) -> pd.DataFrame:
     df = pd.DataFrame(rows)
     cols = [c for c in _METRIC_ORDER if c in df.columns]

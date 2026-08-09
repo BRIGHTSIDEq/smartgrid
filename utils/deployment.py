@@ -130,6 +130,55 @@ def load_model_bundle(bundle_dir: str) -> Dict[str, Any]:
         raise
 
 
+def assert_input_matches_model(
+    model: tf.keras.Model,
+    X: np.ndarray,
+    expected_features: Optional[int] = None,
+) -> None:
+    """
+    Проверяет, что тензор входа соответствует модели по длине окна и числу
+    признаков.
+
+    Keras не защищает от подачи входа неверной ширины: тензор (1, 48, 1)
+    успешно проходит через модель, обученную на (None, 48, 26), — последняя
+    размерность просто транслируется. Прогноз при этом получается численно
+    правдоподобным, но бессмысленным, и заметить это по метрикам невозможно.
+    Поэтому ширина входа проверяется явно.
+
+    Raises
+    ------
+    ValueError — если длина окна или число признаков не совпадают.
+    """
+    X = np.asarray(X)
+    if X.ndim != 3:
+        raise ValueError(
+            f"Ожидается трёхмерный вход (batch, history, features), получено {X.shape}"
+        )
+
+    input_shape = getattr(model, "input_shape", None)
+    if isinstance(input_shape, list):          # модели с несколькими входами
+        input_shape = input_shape[0]
+
+    if input_shape is not None and len(input_shape) == 3:
+        exp_history, exp_features = input_shape[1], input_shape[2]
+        if exp_history is not None and X.shape[1] != exp_history:
+            raise ValueError(
+                f"Длина окна {X.shape[1]} не совпадает с ожидаемой моделью {exp_history}"
+            )
+        if exp_features is not None and X.shape[2] != exp_features:
+            raise ValueError(
+                f"Число признаков {X.shape[2]} не совпадает с ожидаемым моделью "
+                f"{exp_features}. Вход должен содержать полную матрицу ковариат, "
+                "построенную тем же препроцессингом, что и при обучении."
+            )
+
+    if expected_features is not None and X.shape[2] != expected_features:
+        raise ValueError(
+            f"Число признаков {X.shape[2]} не совпадает с конфигурацией бандла "
+            f"({expected_features})"
+        )
+
+
 def predict_from_bundle(
     bundle: Dict[str, Any],
     recent_df: pd.DataFrame,
@@ -190,5 +239,6 @@ def predict_from_bundle(
         )
 
     X = features[np.newaxis, :, :].astype(np.float32)   # (1, T, F)
+    assert_input_matches_model(model, X, expected_features=n_features)
     pred_scaled = model.predict(X, verbose=0)
     return inverse_scale(scalers["scaler"], pred_scaled)[0]

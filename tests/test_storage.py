@@ -19,7 +19,7 @@ BATTERY_COST = 45_000_000.0
 COMMON = dict(
     capacity=4500.0, max_power=2250.0, round_trip_efficiency=0.95,
     cycle_cost_per_kwh=0.06, battery_cost_rub=BATTERY_COST,
-    tariff_night=1.80, tariff_half_peak=4.20, tariff_peak=6.50,
+    tariff_night=4.08, tariff_half_peak=7.87, tariff_peak=11.24,
     demand_charge_rub_per_kw_month=950.0, annual_om_share=0.015,
 )
 

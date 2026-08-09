@@ -294,10 +294,17 @@ class SinusoidalPE(tf.keras.layers.Layer):
     """
 
     def __init__(self, d_model: int, max_len: int = 512, **kwargs) -> None:
-        super().__init__(trainable=False, **kwargs)
-        positions = np.arange(max_len)[:, np.newaxis]
-        dims = np.arange(d_model)[np.newaxis, :]
-        angles = positions / np.power(10000.0, (2 * (dims // 2)) / d_model)
+        # trainable передаётся через kwargs, а не жёстко: при загрузке модели
+        # Keras восстанавливает слой из сохранённого конфига, где trainable уже
+        # присутствует, и жёстко заданное значение вызывало конфликт аргументов.
+        # Из-за этого VanillaTransformer и PatchTST вообще не загружались.
+        kwargs.setdefault("trainable", False)
+        super().__init__(**kwargs)
+        self.d_model = int(d_model)
+        self.max_len = int(max_len)
+        positions = np.arange(self.max_len)[:, np.newaxis]
+        dims = np.arange(self.d_model)[np.newaxis, :]
+        angles = positions / np.power(10000.0, (2 * (dims // 2)) / self.d_model)
         angles[:, 0::2] = np.sin(angles[:, 0::2])
         angles[:, 1::2] = np.cos(angles[:, 1::2])
         self._pe = tf.constant(angles[np.newaxis], dtype=tf.float32)  # (1, T, d)
@@ -307,7 +314,10 @@ class SinusoidalPE(tf.keras.layers.Layer):
         return x + self._pe[:, :seq_len, :]
 
     def get_config(self) -> dict:
-        return {**super().get_config(), "d_model": int(self._pe.shape[-1])}
+        # max_len обязателен в конфиге: без него буфер пересоздаётся с длиной
+        # по умолчанию и при более длинной истории срез вышел бы за границы.
+        return {**super().get_config(),
+                "d_model": self.d_model, "max_len": self.max_len}
 
 
 class LearnableRelativePE(tf.keras.layers.Layer):

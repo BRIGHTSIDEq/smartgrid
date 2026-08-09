@@ -99,6 +99,14 @@ class RealWorldReference:
     BATTERY_REF_DOD: float = 0.80                # глубина разряда для ресурса
     BATTERY_ROUND_TRIP_EFF: float = 0.88         # с учётом инвертора
 
+    # Типоразмер накопителя задаётся не абсолютной величиной, а долей от пика
+    # нагрузки: батарея мощностью почти в размер сети физически бессмысленна и
+    # делает экономику заведомо убыточной за счёт капитальных затрат.
+    # Практика сетевых BESS: мощность 15–25% пика, длительность 2–4 часа.
+    BATTERY_POWER_SHARE_OF_PEAK: float = 0.20
+    BATTERY_DURATION_HOURS: float = 4.0
+    TYPICAL_LOAD_FACTOR: float = 0.48            # среднее / пик, см. LOAD_FACTOR_RANGE
+
     # ── Проникновение технологий Smart Grid ──────────────────────────────────
     # «current» — состояние на 2025 год, «forward» — перспективный сценарий.
     # Разница между сценариями показывает, при каком уровне проникновения
@@ -290,11 +298,30 @@ class Config:
         return cls
 
     @classmethod
+    def expected_peak_load_kw(cls) -> float:
+        """
+        Оценка пиковой нагрузки сети по числу домохозяйств.
+
+        Служит для типоразмера накопителя: сначала считается средняя нагрузка
+        (бытовая плюс непромышленная), затем пик через коэффициент заполнения.
+        """
+        hours_per_month = 8766.0 / 12.0
+        residential = cls.HOUSEHOLDS * cls.GEN_KWH_PER_HOUSEHOLD_MONTH / hours_per_month
+        mean_total = residential * (1.0 + cls.GEN_NONRESIDENTIAL_SHARE)
+        return mean_total / RealWorldReference.TYPICAL_LOAD_FACTOR
+
+    @classmethod
     def _derive_battery_economics(cls):
         """
-        Пересчитывает стоимость накопителя и удельную стоимость деградации.
+        Подбирает типоразмер накопителя под нагрузку и пересчитывает экономику.
 
-        Стоимость деградации — это не произвольная константа, а следствие
+        РАЗМЕР. Мощность и ёмкость масштабируются от пика сети, а не задаются
+        константой. Иначе при изменении числа домохозяйств батарея оказывается
+        либо ничтожной, либо сопоставимой по мощности со всей сетью — во втором
+        случае капитальные затраты гарантированно перекрывают любую экономию,
+        и расчёт окупаемости теряет смысл.
+
+        СТОИМОСТЬ ДЕГРАДАЦИИ — не произвольная константа, а следствие
         капитальных затрат и ресурса: каждый кВт·ч, прошедший через батарею,
         расходует часть её жизненного цикла.
 
@@ -305,6 +332,10 @@ class Config:
         этого параметра делает арбитраж искусственно выгодным.
         """
         ref = RealWorldReference
+        peak = cls.expected_peak_load_kw()
+        cls.BATTERY_MAX_POWER = round(peak * ref.BATTERY_POWER_SHARE_OF_PEAK, 1)
+        cls.BATTERY_CAPACITY = round(cls.BATTERY_MAX_POWER * ref.BATTERY_DURATION_HOURS, 1)
+
         cls.BATTERY_COST_RUB = ref.BATTERY_CAPEX_RUB_PER_KWH * cls.BATTERY_CAPACITY
         throughput = cls.BATTERY_CAPACITY * ref.BATTERY_REF_DOD * ref.BATTERY_CYCLE_LIFE
         cls.BATTERY_CYCLE_COST = cls.BATTERY_COST_RUB / throughput

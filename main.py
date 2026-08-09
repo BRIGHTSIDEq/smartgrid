@@ -455,6 +455,9 @@ def main(argv=None) -> int:
 
     # ── Экспорт результатов ──────────────────────────────────────────────────
     logger.info("\nЭкспорт результатов...")
+    # Каждый прогон пишет в собственный каталог: иначе результаты smoke
+    # затирают optimal, а сравнить сценарии постфактум невозможно.
+    run_dir = reporting.make_run_dir(Config.OUTPUT_DIR, args.mode, args.scenario, args.seed)
     run_meta = {
         "mode": args.mode, "scenario": args.scenario, "seed": args.seed,
         "reference_check_passed": bool(reference_ok),
@@ -473,22 +476,32 @@ def main(argv=None) -> int:
         "epochs": Config.EPOCHS, "batch_size": Config.BATCH_SIZE,
         "best_model_by_val": best_name,
         "mase_scale": data.get("mase_scale"),
+        "n_features": int(data["n_features"]),
+        "split_sizes": {"train": int(len(data["X_train"])),
+                        "val": int(len(data["X_val"])),
+                        "test": int(len(data["X_test"]))},
         "n_train_windows": int(len(data["X_train"])),
         "runtime_sec": round(time.time() - t_start, 1),
     }
-    reporting.export_metrics(test_metrics, Config.OUTPUT_DIR, seed=args.seed,
-                             split="test", run_meta=run_meta)
-    reporting.export_metrics(val_metrics, Config.OUTPUT_DIR, seed=args.seed,
-                             split="val", run_meta=run_meta)
-    reporting.export_horizon_metrics(per_horizon, Config.OUTPUT_DIR, seed=args.seed)
-    reporting.export_dm_tests(dm_rows, Config.OUTPUT_DIR)
+    reporting.write_run_metadata(run_dir, run_meta)
+    actual_for_export = (storage_forecasts.pop("__actual__", None)
+                         if storage_results else None)
+
+    # Каталог прогона — основной носитель результатов; сводка в корне results
+    # накапливает строки по сидам для агрегации mean ± std.
+    for target, append in ((run_dir, False), (Config.OUTPUT_DIR, True)):
+        reporting.export_metrics(test_metrics, target, seed=args.seed,
+                                 split="test", run_meta=run_meta, append=append)
+        reporting.export_metrics(val_metrics, target, seed=args.seed,
+                                 split="val", run_meta=run_meta, append=append)
+    reporting.export_horizon_metrics(per_horizon, run_dir, seed=args.seed)
+    reporting.export_dm_tests(dm_rows, run_dir)
     if storage_results:
-        actual_for_export = storage_forecasts.pop("__actual__", None)
         reporting.export_storage_results(
-            storage_results, Config.OUTPUT_DIR,
+            storage_results, run_dir,
             actual=actual_for_export, forecasts=storage_forecasts,
         )
-    reporting.export_markdown_tables(test_metrics, Config.OUTPUT_DIR,
+    reporting.export_markdown_tables(test_metrics, run_dir,
                                      dm_rows=dm_rows,
                                      storage_results=storage_results or None)
     reporting.aggregate_seeds(Config.OUTPUT_DIR)
@@ -509,7 +522,7 @@ def main(argv=None) -> int:
     logger.info("Пайплайн завершён за %.1f мин. Результаты: %s",
                 (time.time() - t_start) / 60, Config.OUTPUT_DIR)
     logger.info("  Таблицы для записки: %s",
-                os.path.join(Config.OUTPUT_DIR, "markdown_tables.md"))
+                os.path.join(run_dir, "markdown_tables.md"))
     logger.info("=" * 78)
     return 0
 

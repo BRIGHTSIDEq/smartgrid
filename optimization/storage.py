@@ -271,13 +271,17 @@ def simulate_storage(
             total_cycled += charge_cmd
         elif discharge_cmd > 0:
             can_draw = min(discharge_cmd, soc - soc_min_kwh)
-            delivered = can_draw * one_way_eff
-            soc -= can_draw
-            # Отдать в сеть больше, чем реально потребляется, невозможно —
-            # излишек разряда просто теряется. Так завышенный прогноз
-            # превращается в потраченный впустую заряд.
-            grid_energy = max(0.0, real - delivered)
-            action = "discharge"
+            # Инвертор питает только собственную нагрузку: выдача в сеть не
+            # предусмотрена, поэтому отдать больше фактического потребления
+            # физически невозможно. Разряд ограничивается спросом, а не
+            # списывается «в никуда»: неиспользованная энергия остаётся в
+            # батарее. Без этого ограничения энергобаланс не сходится —
+            # при завышенном прогнозе часть заряда просто исчезала.
+            delivered = min(can_draw * one_way_eff, real)
+            drawn_from_batt = delivered / one_way_eff
+            soc -= drawn_from_batt
+            grid_energy = real - delivered
+            action = "discharge" if drawn_from_batt > 1e-9 else "idle"
         else:
             grid_energy = real
             action = "idle"

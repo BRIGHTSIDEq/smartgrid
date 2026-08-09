@@ -182,17 +182,15 @@ def test_metrics_csv_separates_modes(tmp_path):
     assert df2[(df2["mode"] == "optimal") & (df2["model"] == "XGBoost")]["MAE"].iloc[0] == 4.0
 
 
-def test_plots_are_copied_into_run_dir(tmp_path):
-    """Графики прогона сохраняются рядом с его метриками."""
-    plots = tmp_path / "plots"
-    plots.mkdir()
-    for name in ("a.png", "b.png", "notes.txt"):
-        (plots / name).write_bytes(b"x")
+def test_plots_are_written_directly_into_run_dir():
+    """
+    Графики пишутся в каталог прогона сразу, а не копируются туда после.
 
-    run_dir = tmp_path / "run"
-    run_dir.mkdir()
-    copied = reporting.copy_plots_to_run(str(plots), str(run_dir))
+    Копирование общего каталога затягивало в отчёт изображения посторонних
+    запусков, поэтому механизм заменён на перенаправление путей вывода.
+    """
+    from utils import reporting
 
-    assert copied == 2, "копироваться должны только изображения"
-    assert (run_dir / "plots" / "a.png").exists()
-    assert not (run_dir / "plots" / "notes.txt").exists()
+    assert not hasattr(reporting, "copy_plots_to_run"), (
+        "копирование общего каталога графиков должно быть удалено"
+    )

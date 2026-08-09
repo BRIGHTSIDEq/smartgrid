@@ -181,6 +181,11 @@ class Config:
     VANILLA_TRANSFORMER_LR: float = 7e-5
     TRANSFORMER_STOCHASTIC_DEPTH: float = 0.06
     PATCHTST_USE_REVIN: bool = True
+    # Линейный прогрев с последующим косинусным затуханием — стандартное
+    # расписание для трансформеров. Без прогрева обучение на первых шагах
+    # делает крупные шаги и уходит в плохой минимум.
+    TRANSFORMER_USE_WARMUP_COSINE: bool = True
+    TRANSFORMER_WARMUP_FRACTION: float = 0.05
     VANILLA_USE_SEASONAL_RESIDUAL: bool = True
     VANILLA_SEASONAL_BLEND_INIT: float = 0.40
     VANILLA_HUBER_DELTA: float = 0.05
@@ -446,14 +451,20 @@ class Config:
         cls.DAYS = 730; cls.HOUSEHOLDS = 2500; cls.EPOCHS = 240
         cls.PATIENCE = 25; cls.LR_PATIENCE = 10
         cls.HISTORY_LENGTH = 48; cls.STORAGE_HORIZON = 720; cls.N_FEATURES = 26
-        cls.LSTM_UNITS_1 = 96; cls.LSTM_UNITS_2 = 96; cls.LSTM_UNITS_3 = 96
-        cls.LSTM_ATTN_HEADS = 4; cls.LSTM_TCN_FILTERS = 48
+        # Ёмкость сокращена по результатам прогона: при 1.68 млн параметров
+        # PatchTST достигал минимума валидации на 5-й эпохе из 240 и далее
+        # только переобучался. Ёмкость — такой же гиперпараметр, как alpha у
+        # Ridge или число деревьев у бустинга, и она должна быть соразмерна
+        # объёму выборки.
+        cls.LSTM_UNITS_1 = 48; cls.LSTM_UNITS_2 = 48; cls.LSTM_UNITS_3 = 48
+        cls.LSTM_ATTN_HEADS = 4; cls.LSTM_TCN_FILTERS = 24
         cls.DROPOUT_RATE = 0.12; cls.LSTM_LEARNING_RATE = 2.0e-4; cls.LSTM_USE_COSINE_DECAY = False
         cls.LSTM_SEASONAL_BLEND_INIT = 0.35; cls.LSTM_HUBER_DELTA = 0.05
-        cls.TRANSFORMER_D_MODEL = 192; cls.TRANSFORMER_N_HEADS = 8
-        cls.TRANSFORMER_N_LAYERS = 5; cls.TRANSFORMER_DFF = 384
-        cls.TRANSFORMER_DROPOUT = 0.10; cls.TRANSFORMER_LEARNING_RATE = 2e-4
-        cls.VANILLA_TRANSFORMER_LR = 7e-5; cls.TRANSFORMER_STOCHASTIC_DEPTH = 0.05
+        cls.TRANSFORMER_D_MODEL = 64; cls.TRANSFORMER_N_HEADS = 4
+        cls.TRANSFORMER_N_LAYERS = 3; cls.TRANSFORMER_DFF = 128
+        cls.TRANSFORMER_DROPOUT = 0.15; cls.TRANSFORMER_LEARNING_RATE = 3e-4
+        cls.VANILLA_TRANSFORMER_LR = 1e-4; cls.TRANSFORMER_STOCHASTIC_DEPTH = 0.05
+        cls.TRANSFORMER_USE_WARMUP_COSINE = True
         cls.PATCHTST_USE_REVIN = True
         cls.VANILLA_USE_SEASONAL_RESIDUAL = True; cls.VANILLA_SEASONAL_BLEND_INIT = 0.40
         cls.VANILLA_HUBER_DELTA = 0.05
@@ -479,14 +490,15 @@ class Config:
         cls.HISTORY_LENGTH = 192; cls.STORAGE_HORIZON = 720; cls.N_FEATURES = 26
         cls.BATCH_SIZE = 8
         # На 730 днях и большом количестве окон можно использовать более ёмкий LSTM.
-        cls.LSTM_UNITS_1 = 128; cls.LSTM_UNITS_2 = 128; cls.LSTM_UNITS_3 = 128
-        cls.LSTM_ATTN_HEADS = 8; cls.LSTM_TCN_FILTERS = 64
+        cls.LSTM_UNITS_1 = 64; cls.LSTM_UNITS_2 = 64; cls.LSTM_UNITS_3 = 64
+        cls.LSTM_ATTN_HEADS = 4; cls.LSTM_TCN_FILTERS = 32
         cls.DROPOUT_RATE = 0.18; cls.LSTM_LEARNING_RATE = 1.2e-4; cls.LSTM_USE_COSINE_DECAY = False
         cls.LSTM_SEASONAL_BLEND_INIT = 0.35; cls.LSTM_HUBER_DELTA = 0.05
-        cls.TRANSFORMER_D_MODEL = 192; cls.TRANSFORMER_N_HEADS = 8
-        cls.TRANSFORMER_N_LAYERS = 5; cls.TRANSFORMER_DFF = 384
-        cls.TRANSFORMER_DROPOUT = 0.12; cls.TRANSFORMER_LEARNING_RATE = 2e-4
-        cls.VANILLA_TRANSFORMER_LR = 5e-5; cls.TRANSFORMER_STOCHASTIC_DEPTH = 0.08
+        cls.TRANSFORMER_D_MODEL = 96; cls.TRANSFORMER_N_HEADS = 4
+        cls.TRANSFORMER_N_LAYERS = 3; cls.TRANSFORMER_DFF = 192
+        cls.TRANSFORMER_DROPOUT = 0.15; cls.TRANSFORMER_LEARNING_RATE = 3e-4
+        cls.VANILLA_TRANSFORMER_LR = 1e-4; cls.TRANSFORMER_STOCHASTIC_DEPTH = 0.08
+        cls.TRANSFORMER_USE_WARMUP_COSINE = True
         cls.PATCHTST_USE_REVIN = True
         cls.VANILLA_USE_SEASONAL_RESIDUAL = True; cls.VANILLA_SEASONAL_BLEND_INIT = 0.40
         cls.VANILLA_HUBER_DELTA = 0.05

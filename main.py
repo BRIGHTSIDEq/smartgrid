@@ -135,8 +135,14 @@ def resolve_models(spec: str) -> List[str]:
     return keys
 
 
-def build_models(keys: List[str], logger) -> List[tuple]:
-    """Создаёт экземпляры выбранных моделей. Возвращает [(модель, имя), ...]."""
+def build_models(keys: List[str], logger, n_train_windows: int = 0) -> List[tuple]:
+    """
+    Создаёт экземпляры выбранных моделей. Возвращает [(модель, имя), ...].
+
+    n_train_windows нужен для расписания learning rate: число шагов
+    рассчитывается по фактическому размеру обучающей выборки, иначе косинусное
+    затухание не попадёт в конец обучения.
+    """
     from models.lstm import build_lstm_model
     from models.transformer import (
         build_vanilla_transformer, build_patchtst, count_parameters,
@@ -145,6 +151,11 @@ def build_models(keys: List[str], logger) -> List[tuple]:
         build_linear_regression, build_xgboost,
         build_persistence_24, build_seasonal_naive_168, build_hourly_profile,
     )
+
+    # Полное число шагов оптимизатора: эпохи × батчей в эпохе.
+    steps_per_epoch = max(int(np.ceil(n_train_windows / max(Config.BATCH_SIZE, 1))), 1)
+    total_steps = Config.EPOCHS * steps_per_epoch if n_train_windows else 0
+    lr_steps = total_steps if Config.TRANSFORMER_USE_WARMUP_COSINE else 0
 
     built: List[tuple] = []
 
@@ -207,6 +218,8 @@ def build_models(keys: List[str], logger) -> List[tuple]:
         learning_rate=Config.VANILLA_TRANSFORMER_LR,
         pe_type="sinusoidal",
         stochastic_depth_rate=Config.TRANSFORMER_STOCHASTIC_DEPTH,
+        lr_schedule_total_steps=lr_steps,
+        lr_warmup_fraction=Config.TRANSFORMER_WARMUP_FRACTION,
         use_seasonal_residual=Config.VANILLA_USE_SEASONAL_RESIDUAL,
         seasonal_blend_init=Config.VANILLA_SEASONAL_BLEND_INIT,
         huber_delta=Config.VANILLA_HUBER_DELTA,
@@ -226,6 +239,8 @@ def build_models(keys: List[str], logger) -> List[tuple]:
             dropout=Config.TRANSFORMER_DROPOUT,
             learning_rate=Config.TRANSFORMER_LEARNING_RATE,
             stochastic_depth_rate=Config.TRANSFORMER_STOCHASTIC_DEPTH,
+            lr_schedule_total_steps=lr_steps,
+            lr_warmup_fraction=Config.TRANSFORMER_WARMUP_FRACTION,
             use_revin=Config.PATCHTST_USE_REVIN,
         ), MODEL_REGISTRY["patchtst"]))
 
@@ -275,6 +290,16 @@ def main(argv=None) -> int:
     from utils import reporting
 
     model_keys = resolve_models(args.models)
+
+    # Каталог прогона создаётся ДО первого артефакта, и все выходные пути
+    # перенаправляются внутрь него. Копирование общего каталога графиков после
+    # прогона недопустимо: туда попадали изображения посторонних запусков —
+    # в частности, графики моделей, которые в этом прогоне не обучались.
+    run_dir = reporting.make_run_dir(Config.OUTPUT_DIR, args.mode, args.scenario, args.seed)
+    Config.PLOTS_DIR = os.path.join(run_dir, "plots")
+    Config.MODELS_DIR = os.path.join(run_dir, "models")
+    os.makedirs(Config.PLOTS_DIR, exist_ok=True)
+    os.makedirs(Config.MODELS_DIR, exist_ok=True)
 
     logger.info("=" * 78)
     logger.info("  СИСТЕМА ПРОГНОЗИРОВАНИЯ ЭНЕРГОПОТРЕБЛЕНИЯ — SMART GRID")
@@ -348,7 +373,8 @@ def main(argv=None) -> int:
 
     # ── [4/10] Инициализация моделей ─────────────────────────────────────────
     logger.info("\n[4/10] Инициализация моделей...")
-    models_to_train = build_models(model_keys, logger)
+    models_to_train = build_models(model_keys, logger,
+                                   n_train_windows=len(data["X_train"]))
 
     # ── [5/10] Обучение ──────────────────────────────────────────────────────
     logger.info("\n[5/10] Обучение моделей...")
@@ -440,7 +466,8 @@ def main(argv=None) -> int:
             logger.info("Запуск walk-forward бэктестинга (%d origin-ов)...",
                         args.rolling_origin)
             run_rolling_origin_backtest(
-                build_fn=lambda: build_models([best_key], logger)[0][0],
+                build_fn=lambda: build_models([best_key], logger,
+                                              n_train_windows=len(data["X_train"]))[0][0],
                 df=df, model_name=best_name, n_origins=args.rolling_origin,
                 history_length=Config.HISTORY_LENGTH,
                 forecast_horizon=Config.FORECAST_HORIZON,
@@ -464,9 +491,6 @@ def main(argv=None) -> int:
 
     # ── Экспорт результатов ──────────────────────────────────────────────────
     logger.info("\nЭкспорт результатов...")
-    # Каждый прогон пишет в собственный каталог: иначе результаты smoke
-    # затирают optimal, а сравнить сценарии постфактум невозможно.
-    run_dir = reporting.make_run_dir(Config.OUTPUT_DIR, args.mode, args.scenario, args.seed)
     run_meta = {
         "mode": args.mode, "scenario": args.scenario, "seed": args.seed,
         "reference_check_passed": bool(reference_ok),
@@ -520,7 +544,6 @@ def main(argv=None) -> int:
     reporting.export_markdown_tables(test_metrics, run_dir,
                                      dm_rows=dm_rows,
                                      storage_results=storage_results or None)
-    reporting.copy_plots_to_run(Config.PLOTS_DIR, run_dir)
     reporting.aggregate_seeds(Config.OUTPUT_DIR)
 
     # Экспорт бандла лучшей модели (только для Keras — sklearn-обёртки
@@ -560,7 +583,7 @@ def main(argv=None) -> int:
         return 2
 
     logger.info("Пайплайн завершён за %.1f мин. Результаты: %s",
-                elapsed_min, Config.OUTPUT_DIR)
+                elapsed_min, run_dir)
     logger.info("  Таблицы для записки: %s",
                 os.path.join(run_dir, "markdown_tables.md"))
     logger.info("=" * 78)

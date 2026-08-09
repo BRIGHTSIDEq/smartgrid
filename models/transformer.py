@@ -282,6 +282,70 @@ class LearnedQueryPooling(tf.keras.layers.Layer):
 # ПОЗИЦИОННЫЕ КОДИРОВКИ
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _resolve_lr(learning_rate, total_steps, warmup_fraction):
+    """
+    Возвращает расписание learning rate, если задано число шагов обучения,
+    иначе постоянное значение.
+
+    Тренер отключает ReduceLROnPlateau, когда у оптимизатора уже есть
+    собственное расписание, поэтому два механизма не конфликтуют.
+    """
+    if total_steps and total_steps > 0:
+        return WarmupCosineSchedule(peak_lr=learning_rate, total_steps=total_steps,
+                                    warmup_fraction=warmup_fraction)
+    return learning_rate
+
+
+@tf.keras.utils.register_keras_serializable(package="smartgrid")
+class WarmupCosineSchedule(tf.keras.optimizers.schedules.LearningRateSchedule):
+    """
+    Линейный прогрев с последующим косинусным затуханием.
+
+    Стандартное расписание для трансформеров. Без прогрева первые шаги
+    оптимизатора делаются при неинициализированной статистике моментов Adam и
+    крупном градиенте, из-за чего модель уходит в плохой минимум за несколько
+    эпох — ровно тот эффект, который наблюдался в прогоне: лучшая валидация
+    достигалась на пятой эпохе, после чего сеть только переобучалась.
+
+        шаг < warmup:  lr = peak · шаг / warmup
+        шаг ≥ warmup:  lr = min_lr + (peak − min_lr) · ½(1 + cos(π·прогресс))
+
+    Расписание сериализуемо: get_config возвращает все параметры, поэтому
+    модель с ним сохраняется и загружается штатным образом.
+    """
+
+    def __init__(self, peak_lr: float, total_steps: int,
+                 warmup_fraction: float = 0.05, min_lr: float = 1e-6, **kwargs):
+        super().__init__()
+        self.peak_lr = float(peak_lr)
+        self.total_steps = int(max(total_steps, 1))
+        self.warmup_fraction = float(warmup_fraction)
+        self.min_lr = float(min_lr)
+        self.warmup_steps = max(int(self.total_steps * self.warmup_fraction), 1)
+
+    def __call__(self, step):
+        step = tf.cast(step, tf.float32)
+        warmup = tf.cast(self.warmup_steps, tf.float32)
+        total = tf.cast(self.total_steps, tf.float32)
+
+        warmup_lr = self.peak_lr * (step / warmup)
+
+        progress = tf.clip_by_value((step - warmup) / tf.maximum(total - warmup, 1.0),
+                                    0.0, 1.0)
+        cosine_lr = self.min_lr + 0.5 * (self.peak_lr - self.min_lr) * (
+            1.0 + tf.cos(np.pi * progress))
+
+        return tf.where(step < warmup, warmup_lr, cosine_lr)
+
+    def get_config(self) -> dict:
+        return {
+            "peak_lr": self.peak_lr,
+            "total_steps": self.total_steps,
+            "warmup_fraction": self.warmup_fraction,
+            "min_lr": self.min_lr,
+        }
+
+
 class SinusoidalPE(tf.keras.layers.Layer):
     """
     Синусоидальное позиционное кодирование [Vaswani et al., 2017].
@@ -580,6 +644,8 @@ def build_vanilla_transformer(
     pe_type: str = "sinusoidal",
     use_prob_sparse: bool = False,
     stochastic_depth_rate: float = 0.10,
+    lr_schedule_total_steps: Optional[int] = None,
+    lr_warmup_fraction: float = 0.05,
     use_seasonal_residual: bool = True,
     seasonal_blend_init: float = 0.40,
     huber_delta: float = 0.05,
@@ -672,7 +738,10 @@ def build_vanilla_transformer(
     model._enc_blocks = enc_blocks
 
     model.compile(
-        optimizer=tf.keras.optimizers.Adam(learning_rate=learning_rate, clipnorm=1.0),
+        optimizer=tf.keras.optimizers.Adam(
+            learning_rate=_resolve_lr(learning_rate, lr_schedule_total_steps,
+                                      lr_warmup_fraction),
+            clipnorm=1.0),
         loss=tf.keras.losses.Huber(delta=huber_delta),
         metrics=["mae"],
     )
@@ -703,6 +772,8 @@ def build_patchtst(
     dropout: float = 0.10,
     learning_rate: float = 3e-4,
     stochastic_depth_rate: float = 0.10,
+    lr_schedule_total_steps: Optional[int] = None,
+    lr_warmup_fraction: float = 0.05,
     use_revin: bool = True,
     huber_delta: float = 0.10,
 ) -> tf.keras.Model:
@@ -801,7 +872,10 @@ def build_patchtst(
     model._enc_blocks = enc_blocks
 
     model.compile(
-        optimizer=tf.keras.optimizers.Adam(learning_rate=learning_rate, clipnorm=1.0),
+        optimizer=tf.keras.optimizers.Adam(
+            learning_rate=_resolve_lr(learning_rate, lr_schedule_total_steps,
+                                      lr_warmup_fraction),
+            clipnorm=1.0),
         loss=tf.keras.losses.Huber(delta=huber_delta),
         metrics=["mae", "mape"],
     )

@@ -26,6 +26,10 @@ import pandas as pd
 
 logger = logging.getLogger("smart_grid.utils.reporting")
 
+# Версия формата выходных файлов. Увеличивается при изменении состава колонок
+# или структуры метаданных, чтобы старые прогоны нельзя было принять за новые.
+SCHEMA_VERSION = 2
+
 # Порядок колонок в сводной таблице: сначала то, что идёт в записку.
 _METRIC_ORDER = ["model", "mode", "scenario", "seed", "split", "MAE", "RMSE", "MAPE", "sMAPE", "R2",
                  "MASE", "DW", "ACF_24", "ACF_168", "kurtosis",
@@ -155,6 +159,7 @@ def write_run_metadata(run_dir: str, meta: Dict[str, Any]) -> str:
     """Сохраняет метаданные прогона рядом с его результатами."""
     os.makedirs(run_dir, exist_ok=True)
     payload = dict(meta)
+    payload["schema_version"] = SCHEMA_VERSION
     payload["environment"] = collect_environment()
     path = os.path.join(run_dir, "run_metadata.json")
     dump_strict_json(payload, path)
@@ -362,31 +367,6 @@ def export_markdown_tables(
         f.write("\n".join(lines))
     logger.info("Markdown-таблицы для записки: %s", path)
     return path
-
-
-def copy_plots_to_run(plots_dir: str, run_dir: str) -> int:
-    """
-    Копирует графики прогона в его собственный каталог.
-
-    Графики строятся в общий results/plots, поэтому каждый следующий запуск
-    затирает предыдущий: после optimal картинки от fast исчезают. Копия рядом
-    с метриками сохраняет полный комплект результатов каждого прогона.
-    """
-    import shutil
-
-    target = os.path.join(run_dir, "plots")
-    os.makedirs(target, exist_ok=True)
-    copied = 0
-    for name in sorted(os.listdir(plots_dir)) if os.path.isdir(plots_dir) else []:
-        if not name.lower().endswith(".png"):
-            continue
-        try:
-            shutil.copy2(os.path.join(plots_dir, name), os.path.join(target, name))
-            copied += 1
-        except OSError as exc:
-            logger.warning("Не удалось скопировать график %s: %s", name, exc)
-    logger.info("Графики прогона сохранены: %s (%d шт.)", target, copied)
-    return copied
 
 
 def aggregate_seeds(output_dir: str) -> Optional[str]:

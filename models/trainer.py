@@ -169,28 +169,71 @@ def diagnose_residuals(
 # ══════════════════════════════════════════════════════════════════════════════
 # TRAINER
 
-def diagnose_training_regime(history: Dict[str, List[float]], overfit_gap: float = 0.02, underfit_floor: float = 0.08) -> Dict[str, Any]:
-    """Simple heuristic detector of overfitting/underfitting by train/val MAE."""
+def diagnose_training_regime(
+    history: Dict[str, List[float]],
+    overfit_gap: float = 0.02,
+    underfit_floor: float = 0.08,
+) -> Dict[str, Any]:
+    """
+    Определяет режим обучения по ЛУЧШЕЙ эпохе, а не по последней.
+
+    EarlyStopping с restore_best_weights возвращает веса лучшей эпохи, поэтому
+    оценивается именно эта модель. Диагностика по последней эпохе описывала
+    другую, уже переобученную сеть: например, PatchTST достигал минимума
+    валидации на пятой эпохе, затем 25 эпох ухудшался, и в отчёт попадали
+    метрики финального состояния — с выводом «сбалансировано» для модели,
+    которая переобучилась почти сразу.
+
+    Отдельно фиксируется, сколько эпох прошло после лучшей и ухудшалась ли
+    валидация: это прямой признак избыточной ёмкости.
+
+    Returns
+    -------
+    dict с ключами best_epoch, final_epoch, train_metric_at_best,
+    val_metric_at_best, final_train_metric, final_val_metric,
+    epochs_after_best, overfit_after_best, status.
+    """
     train_mae = history.get("mae") or history.get("mean_absolute_error") or []
     val_mae = history.get("val_mae") or history.get("val_mean_absolute_error") or []
+    val_loss = history.get("val_loss") or []
+
     if not train_mae or not val_mae:
         return {"status": "unknown", "reason": "mae_history_missing"}
 
-    train_last = float(train_mae[-1])
-    val_last = float(val_mae[-1])
-    gap = val_last - train_last
+    # Лучшая эпоха выбирается по тому же критерию, что и EarlyStopping —
+    # по val_loss, а при его отсутствии по val_mae.
+    criterion = val_loss if val_loss else val_mae
+    best_idx = int(np.argmin(criterion))
+    final_idx = len(val_mae) - 1
 
-    if gap >= overfit_gap and train_last < underfit_floor:
+    train_at_best = float(train_mae[best_idx])
+    val_at_best = float(val_mae[min(best_idx, len(val_mae) - 1)])
+    gap = val_at_best - train_at_best
+
+    epochs_after_best = final_idx - best_idx
+    # Ухудшение валидации после лучшей эпохи при продолжающемся падении
+    # ошибки на обучении — определение переобучения.
+    val_worsened = float(val_mae[final_idx]) > val_at_best
+    train_improved = float(train_mae[final_idx]) < train_at_best
+    overfit_after_best = bool(epochs_after_best > 0 and val_worsened and train_improved)
+
+    if overfit_after_best or (gap >= overfit_gap and train_at_best < underfit_floor):
         status = "overfitting"
-    elif train_last >= underfit_floor and val_last >= underfit_floor:
+    elif train_at_best >= underfit_floor and val_at_best >= underfit_floor:
         status = "underfitting"
     else:
         status = "balanced"
 
     return {
         "status": status,
-        "train_mae_last": train_last,
-        "val_mae_last": val_last,
+        "best_epoch": best_idx + 1,
+        "final_epoch": final_idx + 1,
+        "train_metric_at_best": train_at_best,
+        "val_metric_at_best": val_at_best,
+        "final_train_metric": float(train_mae[final_idx]),
+        "final_val_metric": float(val_mae[final_idx]),
+        "epochs_after_best": epochs_after_best,
+        "overfit_after_best": overfit_after_best,
         "generalization_gap": float(gap),
     }
 
@@ -213,6 +256,8 @@ class ModelTrainer:
         self.plots_dir = plots_dir
         self.history: Optional[tf.keras.callbacks.History] = None
         self.train_time: float = 0.0
+        self.train_windows: int = 0
+        self.fit_diagnostics: Dict[str, Any] = {}
 
     def train(
         self,
@@ -229,6 +274,7 @@ class ModelTrainer:
         logger.info("=" * 60)
 
         t0 = time.time()
+        self.train_windows = int(len(data["X_train"]))
         if isinstance(self.model, tf.keras.Model):
             self._train_keras(data, epochs, batch_size, patience,
                               lr_patience, lr_factor, min_delta)
@@ -305,14 +351,32 @@ class ModelTrainer:
                 logger.info("%s: обучение завершено за %d эпох",
                             self.model_name, actual_epochs)
                 fit_diag = diagnose_training_regime(self.history.history)
+                self.fit_diagnostics = fit_diag
                 logger.info(
-                    "%s: training regime=%s | train_mae=%.4f val_mae=%.4f gap=%.4f",
-                    self.model_name,
-                    fit_diag.get("status", "unknown"),
-                    fit_diag.get("train_mae_last", float("nan")),
-                    fit_diag.get("val_mae_last", float("nan")),
+                    "%s: режим=%s | лучшая эпоха %s из %s | "
+                    "на лучшей: train_mae=%.4f val_mae=%.4f (разрыв %.4f)",
+                    self.model_name, fit_diag.get("status", "unknown"),
+                    fit_diag.get("best_epoch", "?"), fit_diag.get("final_epoch", "?"),
+                    fit_diag.get("train_metric_at_best", float("nan")),
+                    fit_diag.get("val_metric_at_best", float("nan")),
                     fit_diag.get("generalization_gap", float("nan")),
                 )
+                if fit_diag.get("overfit_after_best"):
+                    logger.warning(
+                        "%s: после лучшей эпохи ещё %d эпох ошибка на обучении падала, "
+                        "а на валидации росла (%.4f → %.4f) — признак избыточной ёмкости. "
+                        "Оценивается модель лучшей эпохи, восстановленная EarlyStopping.",
+                        self.model_name, fit_diag.get("epochs_after_best", 0),
+                        fit_diag.get("val_metric_at_best", float("nan")),
+                        fit_diag.get("final_val_metric", float("nan")),
+                    )
+                if self.train_windows:
+                    n_params = self.count_params()
+                    logger.info(
+                        "%s: параметров=%d | обучающих окон=%d | параметров на окно=%.1f",
+                        self.model_name, n_params, self.train_windows,
+                        n_params / max(self.train_windows, 1),
+                    )
                 return
             except tf.errors.ResourceExhaustedError as exc:
                 last_exc = exc
@@ -422,6 +486,14 @@ class ModelTrainer:
         )
         metrics["train_time_sec"] = round(self.train_time, 1)
         metrics["n_params"] = self.count_params()
+        metrics["train_windows"] = self.train_windows
+        if self.train_windows:
+            metrics["params_per_window"] = round(
+                self.count_params() / self.train_windows, 3)
+        if self.fit_diagnostics:
+            metrics["best_epoch"] = self.fit_diagnostics.get("best_epoch")
+            metrics["final_epoch"] = self.fit_diagnostics.get("final_epoch")
+            metrics["overfit_after_best"] = self.fit_diagnostics.get("overfit_after_best")
 
         if run_residual_diagnostics:
             diag = diagnose_residuals(Y_true, Y_pred, model_name=self.model_name)

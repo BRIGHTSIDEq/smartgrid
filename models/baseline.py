@@ -239,7 +239,11 @@ class RidgeValidationAlpha:
     """
 
     def __init__(self, alphas=None) -> None:
-        self.alphas = list(alphas) if alphas is not None else list(np.logspace(-1, 5, 13))
+        # Сетка охватывает семь порядков: на больших выборках оптимум уходит к
+        # слабой регуляризации, на малых — к сильной. Прежний нижний край 0.1
+        # достигался при 12 тыс. обучающих окон, то есть выбор упирался в
+        # границу и истинный оптимум мог лежать за ней.
+        self.alphas = list(alphas) if alphas is not None else list(np.logspace(-3, 5, 17))
         self.alpha_: Optional[float] = None
         self.model_: Optional[Ridge] = None
 

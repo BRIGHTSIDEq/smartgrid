@@ -298,7 +298,12 @@ def prepare_panel_data(
             hist_channels[f"lag_{lag}h"] = lagged
 
         if not feature_names_hist:
-            feature_names_hist = sorted(hist_channels)
+            # Потребление ОБЯЗАНО быть нулевым каналом: модели обращаются к
+            # целевому ряду по индексу, и алфавитная сортировка ставила бы на
+            # это место случайный признак (в прошлой версии — облачность),
+            # из-за чего наивный прогноз повторял погоду вместо нагрузки.
+            rest = sorted(k for k in hist_channels if k != "consumption")
+            feature_names_hist = ["consumption"] + rest
         hist_matrix = np.stack([hist_channels[k] for k in feature_names_hist], axis=-1)
 
         future_channels = build_future_known_frame(
@@ -344,7 +349,12 @@ def prepare_panel_data(
             total_windows,
         )
 
+    assert feature_names_hist[0] == "consumption", (
+        "нарушен контракт схемы: канал 0 должен быть потреблением"
+    )
+
     data.update({
+        "consumption_channel": 0,
         "series_index": series_index,
         "series_scalers": series_scalers,
         "weather_scalers": weather_scalers,

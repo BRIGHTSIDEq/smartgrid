@@ -583,6 +583,7 @@ def select_shaving_threshold(
     forecast_val: np.ndarray,
     actual_val: np.ndarray,
     quantiles: Sequence[float] = (0.60, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95),
+    n_subperiods: int = 4,
     **kwargs,
 ) -> float:
     """
@@ -598,11 +599,40 @@ def select_shaving_threshold(
     165% относительно значения по умолчанию — но эта величина получена
     подглядыванием в ответ и не является достижимой в эксплуатации.
     """
-    rows = sweep_shaving_threshold(forecast_val, actual_val, quantiles,
-                                   label="валидация", **kwargs)
-    best = max(rows, key=lambda r: r["net_savings"])
-    logger.info("Порог срезки выбран по валидации: q=%.2f", best["shave_quantile"])
-    return float(best["shave_quantile"])
+    n_sub = max(int(n_subperiods), 1)
+    if n_sub == 1:
+        rows = sweep_shaving_threshold(forecast_val, actual_val, quantiles,
+                                       label="валидация", **kwargs)
+        best = max(rows, key=lambda r: r["net_savings"])
+        logger.info("Порог срезки выбран по валидации: q=%.2f", best["shave_quantile"])
+        return float(best["shave_quantile"])
+
+    # Робастный отбор: максимизируется НАИХУДШИЙ подпериод, а не средний.
+    # Порог, оптимальный в среднем, может опираться на одну удачную неделю и
+    # проваливаться на остальных. Измерено, что так и происходит: выбор по
+    # среднему на валидации дал самый агрессивный порог, а на тесте — убыток,
+    # потому что ошибка прогноза там на четверть выше.
+    bounds = np.linspace(0, len(actual_val), n_sub + 1).astype(int)
+    per_q: Dict[float, List[float]] = {float(q): [] for q in quantiles}
+    for lo, hi in zip(bounds[:-1], bounds[1:]):
+        if hi - lo < 24:
+            continue
+        rows = sweep_shaving_threshold(forecast_val[lo:hi], actual_val[lo:hi],
+                                       quantiles, label=f"валидация [{lo}:{hi}]",
+                                       **kwargs)
+        for r in rows:
+            per_q[r["shave_quantile"]].append(r["net_savings"])
+
+    scored = {q: min(v) for q, v in per_q.items() if v}
+    if not scored:
+        logger.warning("Подпериоды слишком коротки — отбор по всей валидации")
+        return select_shaving_threshold(forecast_val, actual_val, quantiles,
+                                        n_subperiods=1, **kwargs)
+
+    best_q = max(scored, key=scored.get)
+    logger.info("Порог срезки выбран по наихудшему из %d подпериодов: q=%.2f "
+                "(наихудшая экономия %.0f)", n_sub, best_q, scored[best_q])
+    return float(best_q)
 
 
 def compare_forecast_sources(

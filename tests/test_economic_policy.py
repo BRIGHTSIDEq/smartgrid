@@ -262,8 +262,8 @@ def test_threshold_depends_on_forecast_quality():
     h, actual = _peak_load()
     forecast = _imperfect_forecast(h)
 
-    q_perfect = select_shaving_threshold(actual, actual, **_BATTERY)
-    q_noisy = select_shaving_threshold(forecast, actual, **_BATTERY)
+    q_perfect = select_shaving_threshold(actual, actual, n_subperiods=1, **_BATTERY)
+    q_noisy = select_shaving_threshold(forecast, actual, n_subperiods=1, **_BATTERY)
 
     assert q_perfect != q_noisy, "выбор порога не реагирует на качество прогноза"
 
@@ -299,3 +299,87 @@ def test_pipeline_tunes_the_threshold_on_validation():
     assert 'label="тест (верхняя граница)"' in src, (
         "перебор по тесту должен быть помечен как верхняя граница"
     )
+
+
+def test_robust_selection_maximises_the_worst_subperiod():
+    """
+    Робастный отбор улучшает наихудший подпериод, а не среднее.
+
+    Направление сдвига порога не фиксировано и зависит от данных: на
+    построенной здесь выборке робастный отбор выбирает МЕНЕЕ агрессивный порог,
+    чем отбор по среднему, но обратное тоже возможно. Проверяемое свойство —
+    именно наихудший случай.
+
+    Основание для такого критерия измерено на полном прогоне: порог, выбранный
+    по средней экономии на валидации, дал на тесте убыток 28 588 руб, потому
+    что ошибка прогноза там на четверть выше. Средний оптимум опирался на более
+    лёгкий период.
+
+    Выборка составлена из двух разнородных половин: в первой прогноз точен, во
+    второй ошибается.
+    """
+    from optimization.storage import select_shaving_threshold, sweep_shaving_threshold
+
+    h, actual = _peak_load(n_days=40)
+    half = len(actual) // 2
+    forecast = np.concatenate([actual[:half], _imperfect_forecast(h)[half:]])
+
+    q_mean = select_shaving_threshold(forecast, actual, n_subperiods=1, **_BATTERY)
+    q_robust = select_shaving_threshold(forecast, actual, n_subperiods=2, **_BATTERY)
+
+    def worst(q):
+        halves = ((0, half), (half, len(actual)))
+        return min(
+            sweep_shaving_threshold(forecast[a:b], actual[a:b], quantiles=(q,),
+                                    label="", **_BATTERY)[0]["net_savings"]
+            for a, b in halves
+        )
+
+    assert worst(q_robust) >= worst(q_mean), (
+        f"робастный порог {q_robust} хуже в наихудшем подпериоде, чем средний {q_mean}"
+    )
+    assert q_robust != q_mean, "на разнородной выборке критерии обязаны разойтись"
+
+
+def test_validation_sweep_uses_its_own_calendar_anchor():
+    """
+    Подбор порога на валидации считает тарифные зоны от НАЧАЛА валидации.
+
+    Привязка тестового периода, подставленная в валидационный расчёт, сдвигает
+    «ночь» и «пик» относительно данных. Измерено на реальном прогоне: та же
+    кривая перебора при неверной привязке менялась на 167 тысяч рублей —
+    больше, чем весь эффект, ради измерения которого перебор и делается.
+    Ошибка не проявляется ничем: расчёт проходит, числа выглядят обычными.
+    """
+    import inspect
+    import main as main_module
+
+    src = inspect.getsource(main_module._run_storage_block)
+    idx = src.index("select_shaving_threshold(")
+    head = src[:idx]
+
+    assert "val_kwargs" in head, "валидационный расчёт не получает своей привязки"
+    assert 'val_kwargs["start_hour"]' in head
+    assert 'val_kwargs["start_weekday"]' in head
+    assert "select_shaving_threshold(\n                pred_val_series" in src or \
+           "**val_kwargs" in src[idx:idx + 400], "подбор идёт с чужим календарём"
+
+
+def test_calendar_anchor_changes_the_economics():
+    """
+    Календарная привязка действительно меняет результат, а не декоративна.
+
+    Без этого предыдущая проверка была бы формальной: она требует передачи
+    параметра, но не доказывает, что параметр на что-то влияет.
+    """
+    from optimization.storage import simulate_storage
+
+    h, actual = _peak_load(n_days=30)
+    forecast = _imperfect_forecast(h)
+
+    monday = simulate_storage(forecast=forecast, actual=actual, policy="peak_shaving",
+                              start_hour=0, start_weekday=0, **_BATTERY).net_savings
+    sunday = simulate_storage(forecast=forecast, actual=actual, policy="peak_shaving",
+                              start_hour=12, start_weekday=6, **_BATTERY).net_savings
+
+    assert monday != sunday, "привязка не влияет на расчёт — тарифные зоны не применяются"

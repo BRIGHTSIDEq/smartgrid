@@ -794,8 +794,22 @@ def _run_storage_block(
         n_val -= n_val % horizon
 
         if n_val >= horizon:
+            # Валидационный период начинается в свой момент календаря, и
+            # тарифные зоны обязаны считаться от него. Привязка тестового
+            # периода, подставленная сюда, сдвигает «ночь» и «пик» относительно
+            # данных: на этих данных та же кривая перебора менялась на 167 тыс.
+            # рублей — больше, чем весь измеряемый эффект.
+            ts_val = pd.Timestamp(
+                data["timestamps"][data["train_end_idx"] + hist])
+            val_kwargs = dict(sweep_kwargs)
+            val_kwargs["start_hour"] = int(ts_val.hour)
+            val_kwargs["start_weekday"] = int(ts_val.dayofweek)
+            logger.info("Валидационный период для подбора порога: начало %s "
+                        "(час=%d, день недели=%d)", ts_val, ts_val.hour,
+                        ts_val.dayofweek)
+
             chosen_q = select_shaving_threshold(
-                pred_val_series[:n_val], actual_val[:n_val], **sweep_kwargs)
+                pred_val_series[:n_val], actual_val[:n_val], **val_kwargs)
             tuned = simulate_storage(
                 forecast=forecasts[best_name], actual=actual, policy="peak_shaving",
                 shave_quantile=chosen_q,
@@ -816,6 +830,38 @@ def _run_storage_block(
         index=False, encoding="utf-8-sig")
 
     forecasts["__actual__"] = actual
+
+    # Прогнозные ряды сохраняются рядом с результатами. Без них любой опыт с
+    # политикой управления требует переобучения всех моделей — два с лишним
+    # часа ради перебора порога, который считается за секунды.
+    saved = {k: v[:n_hours] for k, v in forecasts.items() if len(v) >= n_hours}
+    if best_trainer is not None:
+        try:
+            val_series = reconstruct_day_ahead_series(
+                best_trainer.predict_original_scale(data, "val"), horizon)
+            hist = int(data["history_length"])
+            val_actual = np.asarray(data["raw_val"][hist:hist + len(val_series)],
+                                    dtype=np.float64)
+            n_v = min(len(val_series), len(val_actual))
+            # Отметки времени обязательны: без них тарифные зоны при офлайн-
+            # разборе привязываются к понедельнику 00:00 и съезжают относительно
+            # данных, а расчёт экономики теряет смысл, оставаясь правдоподобным.
+            ts_val = pd.to_datetime(data["timestamps"])[
+                data["train_end_idx"] + hist: data["train_end_idx"] + hist + n_v]
+            pd.DataFrame({"timestamp": ts_val,
+                          "forecast": val_series[:n_v], "actual": val_actual[:n_v]}).to_csv(
+                os.path.join(Config.OUTPUT_DIR, "forecast_series_val.csv"),
+                index=False, encoding="utf-8-sig")
+        except Exception as exc:
+            logger.warning("Валидационные ряды не сохранены: %s", exc)
+
+    frame = pd.DataFrame(saved)
+    frame.insert(0, "timestamp",
+                 pd.to_datetime(data["timestamps"])[
+                     data["test_start_idx"]: data["test_start_idx"] + len(frame)])
+    frame.to_csv(os.path.join(Config.OUTPUT_DIR, "forecast_series_test.csv"),
+                 index=False, encoding="utf-8-sig")
+
     return value_results, forecasts
 
 

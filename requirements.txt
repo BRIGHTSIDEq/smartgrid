@@ -10,7 +10,10 @@ scikit-learn>=1.3
 tensorflow>=2.13   # или tensorflow-cpu для CPU-only
 
 # Gradient Boosting
-xgboost>=1.7
+# Не ниже 2.0: квантильная функция потерь reg:quantileerror с параметром
+# quantile_alpha появилась именно в этой версии, и вероятностный блок на
+# xgboost 1.7 падает при обучении, а не при импорте.
+xgboost>=2.0
 
 # Statistics & Time Series
 statsmodels>=0.14
@@ -19,9 +22,6 @@ scipy>=1.11
 # Visualization
 matplotlib>=3.7
 seaborn>=0.12
-
-# Progress
-tqdm>=4.65
 
 # Tests
 pytest>=7.4

@@ -350,3 +350,69 @@ def test_interrupted_run_is_distinguishable_from_a_finished_one(tmp_path):
     reporting.write_run_metadata(run_dir, {"mode": "panel-fast", "seed": 7})
     finished = json.load(open(marker, encoding="utf-8"))
     assert finished.get("run", finished)["status"] == "completed"
+
+
+def test_declared_dependencies_match_what_the_code_needs():
+    """
+    Объявленные версии соответствуют фактически используемым возможностям.
+
+    Квантильная функция потерь reg:quantileerror с параметром quantile_alpha
+    появилась в xgboost 2.0. При установке по прежнему требованию (>=1.7)
+    вероятностный блок падал бы во время обучения, а не при импорте, то есть
+    после нескольких минут подготовки данных.
+    """
+    import re
+    from pathlib import Path
+
+    text = Path("requirements.txt").read_text(encoding="utf-8")
+    match = re.search(r"^xgboost>=(\d+)\.(\d+)", text, re.M)
+    assert match, "в requirements.txt нет требования к xgboost"
+
+    major, minor = int(match.group(1)), int(match.group(2))
+    assert (major, minor) >= (2, 0), (
+        f"объявлен xgboost {major}.{minor}, но reg:quantileerror требует 2.0"
+    )
+
+    import xgboost
+    installed = tuple(int(x) for x in xgboost.__version__.split(".")[:2])
+    assert installed >= (2, 0), f"установлен xgboost {xgboost.__version__}"
+
+
+def test_requirements_list_no_unused_packages():
+    """
+    В требованиях нет пакетов, которые проект не импортирует.
+
+    Лишняя зависимость удлиняет установку и создаёт ложное впечатление, что
+    она чем-то нужна: удалить её потом никто не решается.
+    """
+    import ast
+    import re
+    import sys
+    from pathlib import Path
+
+    declared = set()
+    for line in Path("requirements.txt").read_text(encoding="utf-8").splitlines():
+        line = line.split("#")[0].strip()
+        if line:
+            declared.add(re.split(r"[><=\[]", line)[0].strip().lower())
+
+    imported = set()
+    stdlib = set(getattr(sys, "stdlib_module_names", ()))
+    for path in Path(".").rglob("*.py"):
+        if any(part in {".git", "__pycache__", ".venv"} for part in path.parts):
+            continue
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+        except SyntaxError:
+            continue
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imported.update(a.name.split(".")[0].lower() for a in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                imported.add(node.module.split(".")[0].lower())
+
+    aliases = {"scikit-learn": "sklearn", "tensorflow-cpu": "tensorflow"}
+    unused = {d for d in declared
+              if aliases.get(d, d) not in imported and aliases.get(d, d) not in stdlib}
+
+    assert not unused, f"объявлены, но не используются: {', '.join(sorted(unused))}"

@@ -151,14 +151,28 @@ def make_run_dir(output_dir: str, mode: str, scenario: str, seed: int) -> str:
     name = f"{stamp}_{mode}_{scenario}_seed{seed}"
     path = os.path.join(output_dir, "runs", name)
     os.makedirs(path, exist_ok=True)
+
+    # Отметка «выполняется» ставится сразу. Прогон, упавший до записи
+    # метаданных, оставлял каталог с одними подпапками, неотличимый от
+    # прерванного вручную или от успешного, у которого файлы просто не
+    # прочитались: единственным признаком было отсутствие run_metadata.json.
+    write_run_metadata(path, {"mode": mode, "scenario": scenario, "seed": seed,
+                              "status": "running", "started_at": stamp})
     logger.info("Каталог прогона: %s", path)
     return path
 
 
 def write_run_metadata(run_dir: str, meta: Dict[str, Any]) -> str:
-    """Сохраняет метаданные прогона рядом с его результатами."""
+    """
+    Сохраняет метаданные прогона рядом с его результатами.
+
+    Поле status по умолчанию «completed»: функция вызывается в конце успешного
+    прогона. Отметку «running» ставит make_run_dir, и она перезаписывается
+    здесь — так незавершённый прогон остаётся видимым по своему каталогу.
+    """
     os.makedirs(run_dir, exist_ok=True)
     payload = dict(meta)
+    payload.setdefault("status", "completed")
     payload["schema_version"] = SCHEMA_VERSION
     payload["environment"] = collect_environment()
     path = os.path.join(run_dir, "run_metadata.json")

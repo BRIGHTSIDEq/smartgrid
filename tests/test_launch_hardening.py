@@ -325,3 +325,28 @@ def test_seed_aggregation_records_what_it_aggregated(tmp_path):
     agg = pd.read_csv(out, encoding="utf-8-sig")
     assert (agg["mode"] == "panel-fast").all()
     assert (agg["seeds"] == "0,1").all()
+
+
+def test_interrupted_run_is_distinguishable_from_a_finished_one(tmp_path):
+    """
+    Каталог упавшего прогона отличим от завершённого.
+
+    Прогон, упавший до записи метаданных, оставлял каталог с одними подпапками.
+    Отличить его от успешного, чьи файлы просто не прочитались, было невозможно
+    иначе как по отсутствию файла — то есть по отсутствию признака, а не по его
+    наличию. В results/runs таких каталогов накопилось четыре.
+    """
+    import json
+    import os
+    from utils import reporting
+
+    run_dir = reporting.make_run_dir(str(tmp_path), "panel-fast", "current", 7)
+    marker = os.path.join(run_dir, "run_metadata.json")
+
+    assert os.path.exists(marker), "отметка не поставлена при создании каталога"
+    started = json.load(open(marker, encoding="utf-8"))
+    assert started.get("run", started)["status"] == "running"
+
+    reporting.write_run_metadata(run_dir, {"mode": "panel-fast", "seed": 7})
+    finished = json.load(open(marker, encoding="utf-8"))
+    assert finished.get("run", finished)["status"] == "completed"

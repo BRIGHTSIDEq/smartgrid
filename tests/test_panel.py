@@ -476,3 +476,42 @@ def test_stride_does_not_break_split_boundaries(panel):
 
     assert last_train <= first_val, "обучающее окно заходит в валидацию"
     assert last_val <= first_test, "валидационное окно заходит в тест"
+
+
+def test_stride_stores_copies_not_views(monkeypatch):
+    """
+    Прореженные окна хранятся копиями, а не видами на полные массивы.
+
+    Срез с шагом в numpy возвращает ВИД. Без явного копирования полное окно
+    каждого ряда оставалось бы живо, удерживаемое прореженным представлением:
+    на panel-optimal это давало пик 9.4 ГБ при 1.2 ГБ полезных данных, то есть
+    экономия существовала только на бумаге.
+
+    Признак проверяется по атрибуту base, а не по расходу памяти процесса: RSS
+    зависит от поведения распределителя и на небольшой панели показывал
+    одинаковый рост в обоих случаях. Формы, значения и число окон при этом
+    дефекте совершенно правильные — иначе он не различим.
+    """
+    df, specs = generate_panel_data(days=200, n_cities=1, feeders_per_city=3, seed=8)
+
+    collected = []
+    original = np.concatenate
+
+    def spy(arrays, *args, **kwargs):
+        collected.extend(a for a in arrays if hasattr(a, "base"))
+        return original(arrays, *args, **kwargs)
+
+    monkeypatch.setattr(np, "concatenate", spy)
+    prepare_panel_data(df, specs, history_length=48, forecast_horizon=24,
+                       seed=8, window_stride=11)
+
+    # Порог вдвое отсекает безобидные виды вроде среза для лага, у которого
+    # буфер почти равен самому массиву, и оставляет прореживание с
+    # одиннадцатикратным превышением.
+    holders = [a for a in collected
+               if a.base is not None and a.base.nbytes > 2 * max(a.nbytes, 1)]
+    assert not holders, (
+        f"{len(holders)} прореженных массивов удерживают полные буферы: "
+        f"наибольший {max(a.base.nbytes for a in holders)/1e6:.1f} МБ "
+        f"при {max(a.nbytes for a in holders)/1e6:.1f} МБ полезных данных"
+    )

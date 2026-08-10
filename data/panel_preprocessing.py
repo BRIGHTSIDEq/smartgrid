@@ -343,7 +343,12 @@ def prepare_panel_data(
             # остаётся несмещённой, а не привязанной к части моментов.
             if window_stride > 1:
                 sel = slice(None, None, window_stride)
-                win = {k: v[sel] for k, v in win.items()}
+                # Копия обязательна. Срез с шагом возвращает ВИД на исходный
+                # массив, и полное окно каждого ряда оставалось бы в памяти,
+                # удерживаемое прореженным представлением. На panel-optimal это
+                # давало пик 9.4 ГБ при 1.2 ГБ полезных данных — прореживание
+                # экономило память только на бумаге.
+                win = {k: np.ascontiguousarray(v[sel]) for k, v in win.items()}
 
             n_win = len(win["Y"])
             parts[split]["X_hist"].append(win["X_hist"])
@@ -363,6 +368,9 @@ def prepare_panel_data(
             )
         for key in ("X_hist", "X_future", "X_static", "Y", "series", "anchor"):
             data[f"{key}_{split}"] = np.concatenate(parts[split][key], axis=0)
+            # Части освобождаются сразу после склейки: иначе список кусков и
+            # готовый массив сосуществуют до конца цикла.
+            parts[split][key] = []
         total_windows += len(data[f"Y_{split}"])
 
     if total_windows > max_windows_warn:

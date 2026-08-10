@@ -34,7 +34,7 @@ optimization/storage.py — Оптимизация накопителя энер
 
 import logging
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Sequence
 
 import numpy as np
 
@@ -522,6 +522,61 @@ def compare_strategies(
 # ══════════════════════════════════════════════════════════════════════════════
 # ЦЕНА ОШИБКИ ПРОГНОЗА
 # ══════════════════════════════════════════════════════════════════════════════
+
+def sweep_shaving_threshold(
+    forecast: np.ndarray,
+    actual: np.ndarray,
+    quantiles: Sequence[float] = (0.60, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95),
+    **kwargs,
+) -> List[Dict[str, float]]:
+    """
+    Перебирает порог срезки и измеряет, где он оптимален экономически.
+
+    ЗАЧЕМ ИМЕННО ПОРОГ, А НЕ СДВИГ ПРОГНОЗА
+    ───────────────────────────────────────
+    Естественная мысль — подать на вход управления верхний квантиль прогноза
+    вместо среднего, раз недооценка пика стоит дороже переоценки. Здесь это не
+    работает, и причина в устройстве самого контроллера: порог считается как
+    квантиль ПРОГНОЗА, поэтому равномерный сдвиг поднимает и прогноз, и порог,
+    а разность «прогноз минус порог», определяющая разряд, не меняется.
+    Проверено измерением: P90 поверх лучшей модели даёт ту же экономию.
+
+    Несимметрична не оценка нагрузки, а СТОИМОСТЬ ошибки. Значит, и настраивать
+    надо решающее правило: чем ниже порог, тем агрессивнее разряд, тем надёжнее
+    срезается пик — но тем больше израсходованных циклов и износа. Оптимум
+    существует и не обязан совпадать с симметричным выбором.
+
+    Возвращает список строк с экономикой для каждого порога — из них видно и
+    сам оптимум, и цену отклонения от него.
+    """
+    rows: List[Dict[str, float]] = []
+    for q in quantiles:
+        result = simulate_storage(
+            forecast=forecast, actual=actual, policy="peak_shaving",
+            shave_quantile=float(q), forecast_source=f"порог q={q:.2f}", **kwargs,
+        )
+        rows.append({
+            "shave_quantile": float(q),
+            "net_savings": result.net_savings,
+            "gross_savings": result.gross_savings,
+            "degradation_cost": result.degradation_cost,
+            "peak_after_kw": result.peak_after_kw,
+            "energy_cycled_kwh": result.total_energy_cycled,
+            "n_discharge_hours": result.n_discharge_hours,
+            "payback_years": result.payback_years,
+        })
+
+    best = max(rows, key=lambda r: r["net_savings"])
+    logger.info("─" * 78)
+    logger.info("ПЕРЕБОР ПОРОГА СРЕЗКИ")
+    logger.info("%10s %16s %16s %14s", "порог", "чистая экономия", "износ", "пик после")
+    for r in rows:
+        mark = "  ← оптимум" if r is best else ""
+        logger.info("%10.2f %16.0f %16.0f %14.1f%s", r["shave_quantile"],
+                    r["net_savings"], r["degradation_cost"], r["peak_after_kw"], mark)
+    logger.info("─" * 78)
+    return rows
+
 
 def compare_forecast_sources(
     actual: np.ndarray,

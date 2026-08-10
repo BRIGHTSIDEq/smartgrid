@@ -518,6 +518,7 @@ def main(argv=None) -> int:
             compare_strategies, compare_forecast_sources,
             plot_storage_result, plot_forecast_value,
             reconstruct_day_ahead_series, actual_series_for_forecast,
+            best_trainer=best_trainer,
         )
 
     # ── Экспорт результатов ──────────────────────────────────────────────────
@@ -687,6 +688,7 @@ def _run_storage_block(
     compare_strategies, compare_forecast_sources,
     plot_storage_result, plot_forecast_value,
     reconstruct_day_ahead_series, actual_series_for_forecast,
+    best_trainer=None,
 ):
     """
     Оптимизация накопителя на РЕАЛЬНОМ прогнозе модели.
@@ -744,12 +746,42 @@ def _run_storage_block(
         forecasts[naive_name] = reconstruct_day_ahead_series(
             predictions[naive_name], horizon)[:n_hours]
 
+    # Верхний квантиль как вход управления. Недооценка пика оставляет накопитель
+    # незаряженным и обесценивает месяц работы, переоценка стоит лишь небольшого
+    # износа — значит, оптимален не средний прогноз, а сдвинутый вверх. Смещение
+    # берётся с ВАЛИДАЦИИ: построенное по тесту, оно знало бы ответ.
+    if best_trainer is not None:
+        from utils.conformal import conformal_offsets, apply_offset
+        from data.preprocessing import inverse_scale
+
+        pred_val = best_trainer.predict_original_scale(data, "val")
+        y_val = inverse_scale(data["scaler"], data["Y_val"])
+        offsets = conformal_offsets(y_val - pred_val, quantiles=(0.9,))
+
+        shifted = apply_offset(predictions[best_name], offsets[0.9])
+        forecasts[f"{best_name} P90"] = reconstruct_day_ahead_series(
+            shifted, horizon)[:n_hours]
+        logger.info("Добавлен верхний квантиль P90 поверх %s: средний сдвиг %.1f кВт·ч",
+                    best_name, float(np.mean(offsets[0.9])))
+
     value_results = compare_forecast_sources(
         actual=actual, forecasts=forecasts,
         min_soc=Config.BATTERY_MIN_SOC, max_soc=Config.BATTERY_MAX_SOC,
         **common,
     )
     plot_forecast_value(value_results, plots_dir=Config.PLOTS_DIR)
+
+    # Несимметрична не оценка нагрузки, а стоимость ошибки, поэтому настраивать
+    # надо решающее правило. Перебор порога показывает, где оптимум и во что
+    # обходится отклонение от него.
+    from optimization.storage import sweep_shaving_threshold
+    sweep = sweep_shaving_threshold(
+        forecast=forecasts[best_name], actual=actual,
+        min_soc=Config.BATTERY_MIN_SOC, max_soc=Config.BATTERY_MAX_SOC, **common,
+    )
+    pd.DataFrame(sweep).to_csv(
+        os.path.join(Config.OUTPUT_DIR, "storage_threshold_sweep.csv"),
+        index=False, encoding="utf-8-sig")
 
     forecasts["__actual__"] = actual
     return value_results, forecasts

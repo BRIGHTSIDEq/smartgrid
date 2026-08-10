@@ -527,6 +527,7 @@ def sweep_shaving_threshold(
     forecast: np.ndarray,
     actual: np.ndarray,
     quantiles: Sequence[float] = (0.60, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95),
+    label: str = "",
     **kwargs,
 ) -> List[Dict[str, float]]:
     """
@@ -568,7 +569,7 @@ def sweep_shaving_threshold(
 
     best = max(rows, key=lambda r: r["net_savings"])
     logger.info("─" * 78)
-    logger.info("ПЕРЕБОР ПОРОГА СРЕЗКИ")
+    logger.info("ПЕРЕБОР ПОРОГА СРЕЗКИ (%s)", label or "выборка не указана")
     logger.info("%10s %16s %16s %14s", "порог", "чистая экономия", "износ", "пик после")
     for r in rows:
         mark = "  ← оптимум" if r is best else ""
@@ -576,6 +577,32 @@ def sweep_shaving_threshold(
                     r["net_savings"], r["degradation_cost"], r["peak_after_kw"], mark)
     logger.info("─" * 78)
     return rows
+
+
+def select_shaving_threshold(
+    forecast_val: np.ndarray,
+    actual_val: np.ndarray,
+    quantiles: Sequence[float] = (0.60, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95),
+    **kwargs,
+) -> float:
+    """
+    Подбирает порог срезки на ВАЛИДАЦИОННОМ периоде.
+
+    Порог — такой же настраиваемый параметр, как глубина дерева, и подбирать
+    его по тесту означает то же самое, что выбирать по тесту модель: итоговая
+    оценка становится оптимистично смещённой. В этой работе такая ошибка уже
+    исправлялась для отбора моделей, и повторять её для решающего правила
+    нельзя.
+
+    Разница не косметическая. На тестовом периоде перебор давал прирост в
+    165% относительно значения по умолчанию — но эта величина получена
+    подглядыванием в ответ и не является достижимой в эксплуатации.
+    """
+    rows = sweep_shaving_threshold(forecast_val, actual_val, quantiles,
+                                   label="валидация", **kwargs)
+    best = max(rows, key=lambda r: r["net_savings"])
+    logger.info("Порог срезки выбран по валидации: q=%.2f", best["shave_quantile"])
+    return float(best["shave_quantile"])
 
 
 def compare_forecast_sources(

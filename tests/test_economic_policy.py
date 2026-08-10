@@ -194,3 +194,108 @@ def test_plots_are_written_directly_into_run_dir():
     assert not hasattr(reporting, "copy_plots_to_run"), (
         "копирование общего каталога графиков должно быть удалено"
     )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ПОДБОР ПОРОГА СРЕЗКИ
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _peak_load(n_days=30, seed=0):
+    """Ряд с выраженными вечерними пиками — на нём срезка имеет смысл."""
+    rng = np.random.RandomState(seed)
+    h = np.arange(n_days * 24)
+    base = 1000.0 + 300.0 * np.sin(2 * np.pi * (h % 24 - 6) / 24.0)
+    peaks = 400.0 * ((h % 24 >= 18) & (h % 24 < 21))
+    return h, base + peaks + rng.normal(0, 60.0, size=len(h))
+
+
+def _imperfect_forecast(h, seed=1):
+    """Прогноз, ошибающийся и во времени пика, и в его величине."""
+    rng = np.random.RandomState(seed)
+    base = 1000.0 + 300.0 * np.sin(2 * np.pi * (h % 24 - 6) / 24.0)
+    return base + 400.0 * ((h % 24 >= 17) & (h % 24 < 20)) + rng.normal(0, 120.0, len(h))
+
+
+_BATTERY = dict(capacity=800.0, max_power=300.0, battery_cost_rub=8_000_000.0)
+
+
+def test_optimum_is_interior_when_the_forecast_errs():
+    """
+    При ошибающемся прогнозе оптимальный порог лежит внутри сетки.
+
+    Механизмы на концах разные: низкий порог заставляет разряжаться по неверно
+    предсказанным пикам, расходуя ресурс впустую, высокий — почти не срезает
+    пик. Если бы оптимум оказался на краю, перебор ничего бы не выбирал.
+    """
+    from optimization.storage import sweep_shaving_threshold
+
+    h, actual = _peak_load()
+    rows = sweep_shaving_threshold(forecast=_imperfect_forecast(h), actual=actual,
+                                   label="тест", **_BATTERY)
+
+    savings = [r["net_savings"] for r in rows]
+    best = int(np.argmax(savings))
+    assert 0 < best < len(savings) - 1, f"оптимум на краю сетки: {savings}"
+
+    # Износ монотонно падает с ростом порога: разряжаемся реже.
+    degradation = [r["degradation_cost"] for r in rows]
+    assert degradation[0] > degradation[-1]
+
+
+def test_threshold_depends_on_forecast_quality():
+    """
+    Оптимальный порог определяется качеством прогноза, а не только формой ряда.
+
+    Направление сдвига не универсально и зависит от того, ограничена ли батарея
+    по ёмкости. При точном прогнозе и малом накопителе выгоднее тратить заряд
+    только на саму вершину — порог выше. При большом накопителе, наоборот,
+    выгоден агрессивный разряд. Измерено: на батарее 800 кВт·ч оптимум при
+    идеальном прогнозе 0.80, при ошибающемся 0.75; на батарее 2000 кВт·ч
+    идеальный прогноз уводит оптимум к самому краю сетки.
+
+    Поэтому проверяется не направление, а сам факт зависимости и цена
+    неверного выбора: порог, подобранный под другое качество прогноза, стоит
+    измеримых денег.
+    """
+    from optimization.storage import select_shaving_threshold, simulate_storage
+
+    h, actual = _peak_load()
+    forecast = _imperfect_forecast(h)
+
+    q_perfect = select_shaving_threshold(actual, actual, **_BATTERY)
+    q_noisy = select_shaving_threshold(forecast, actual, **_BATTERY)
+
+    assert q_perfect != q_noisy, "выбор порога не реагирует на качество прогноза"
+
+    matched = simulate_storage(forecast=forecast, actual=actual, policy="peak_shaving",
+                               shave_quantile=q_noisy, **_BATTERY).net_savings
+    mismatched = simulate_storage(forecast=forecast, actual=actual, policy="peak_shaving",
+                                  shave_quantile=q_perfect, **_BATTERY).net_savings
+
+    assert matched > mismatched, "порог под своё качество прогноза обязан быть не хуже"
+    assert (matched - mismatched) / abs(matched) > 0.01, (
+        f"разница {matched - mismatched:.0f} слишком мала, чтобы выбор порога имел смысл"
+    )
+
+
+def test_pipeline_tunes_the_threshold_on_validation():
+    """
+    Конвейер подбирает порог по валидации, а не по тесту.
+
+    Та же ошибка для выбора модели в этой работе уже исправлялась. Проверка
+    структурная: подбор обязан получать валидационный ряд, а перебор по тесту —
+    оставаться отдельной верхней границей, а не источником решения.
+    """
+    import inspect
+    import main as main_module
+
+    src = inspect.getsource(main_module._run_storage_block)
+
+    idx_select = src.index("select_shaving_threshold(")
+    assert 'predict_original_scale(data, "val")' in src[:idx_select], (
+        "порог выбирается раньше, чем построен валидационный прогноз"
+    )
+    assert 'raw_val' in src[:idx_select], "подбор не использует валидационный факт"
+    assert 'label="тест (верхняя граница)"' in src, (
+        "перебор по тесту должен быть помечен как верхняя граница"
+    )

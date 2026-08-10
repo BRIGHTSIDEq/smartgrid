@@ -772,13 +772,42 @@ def _run_storage_block(
     plot_forecast_value(value_results, plots_dir=Config.PLOTS_DIR)
 
     # Несимметрична не оценка нагрузки, а стоимость ошибки, поэтому настраивать
-    # надо решающее правило. Перебор порога показывает, где оптимум и во что
-    # обходится отклонение от него.
-    from optimization.storage import sweep_shaving_threshold
-    sweep = sweep_shaving_threshold(
-        forecast=forecasts[best_name], actual=actual,
-        min_soc=Config.BATTERY_MIN_SOC, max_soc=Config.BATTERY_MAX_SOC, **common,
+    # надо решающее правило. Порог подбирается на ВАЛИДАЦИИ и проверяется на
+    # тесте: подбор по тесту дал бы оптимистично смещённую оценку — ту же
+    # ошибку, что и выбор модели по тесту.
+    from optimization.storage import (
+        select_shaving_threshold, sweep_shaving_threshold, simulate_storage,
     )
+    sweep_kwargs = dict(min_soc=Config.BATTERY_MIN_SOC,
+                        max_soc=Config.BATTERY_MAX_SOC, **common)
+
+    if best_trainer is not None:
+        pred_val_series = reconstruct_day_ahead_series(
+            best_trainer.predict_original_scale(data, "val"), horizon)
+        hist = int(data["history_length"])
+        actual_val = np.asarray(data["raw_val"][hist:hist + len(pred_val_series)],
+                                dtype=np.float64)
+        n_val = min(len(pred_val_series), len(actual_val))
+        n_val -= n_val % horizon
+
+        if n_val >= horizon:
+            chosen_q = select_shaving_threshold(
+                pred_val_series[:n_val], actual_val[:n_val], **sweep_kwargs)
+            tuned = simulate_storage(
+                forecast=forecasts[best_name], actual=actual, policy="peak_shaving",
+                shave_quantile=chosen_q,
+                forecast_source=f"{best_name}, порог q={chosen_q:.2f} по валидации",
+                **sweep_kwargs)
+            value_results[f"{best_name} (порог по валидации)"] = tuned
+            logger.info("Порог q=%.2f, выбранный по валидации, на тесте даёт %.0f руб",
+                        chosen_q, tuned.net_savings)
+
+    # Полный перебор на тесте сохраняется отдельно как ВЕРХНЯЯ ГРАНИЦА: он
+    # показывает, сколько теряется на неоптимальном пороге, но сам по себе
+    # недостижим — значение выбрано по той же выборке, на которой измеряется.
+    sweep = sweep_shaving_threshold(
+        forecast=forecasts[best_name], actual=actual, label="тест (верхняя граница)",
+        **sweep_kwargs)
     pd.DataFrame(sweep).to_csv(
         os.path.join(Config.OUTPUT_DIR, "storage_threshold_sweep.csv"),
         index=False, encoding="utf-8-sig")

@@ -279,3 +279,58 @@ def build_quantile_dlinear(
     logger.info("QuantileDLinear | история=%d горизонт=%d уровней=%d | параметров=%d",
                 history_length, forecast_horizon, n_q, model.count_params())
     return model
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ОЦЕНКА НА ПАНЕЛИ
+# ══════════════════════════════════════════════════════════════════════════════
+
+def evaluate_panel_quantiles(model: Any, data: Dict[str, Any], split: str = "test",
+                             quantiles: Sequence[float] = DEFAULT_QUANTILES,
+                             ) -> Dict[str, float]:
+    """
+    Оценивает вероятностный прогноз на панели в ИСХОДНОМ масштабе каждого ряда.
+
+    Обратное преобразование применяется к каждому уровню отдельно: нормировка
+    своя у каждого ряда, и оценивать pinball в нормированном пространстве
+    бессмысленно — вклад мелкого фидера оказался бы равен вкладу крупного при
+    несопоставимых абсолютных ошибках.
+
+    Порядок уровней восстанавливается перед оценкой, а доля исходных пересечений
+    сохраняется в отчёте: сортировка не ухудшает pinball ни на одном уровне, но
+    частые пересечения означают, что уровни обучены несогласованно, и это надо
+    видеть.
+    """
+    import tensorflow as tf
+
+    from data.panel_preprocessing import inverse_scale_series
+    from models.panel_trainer import make_batch
+    from utils.quantile_metrics import enforce_monotone, evaluate_quantiles
+
+    batch = make_batch(data, split)
+    series = data[f"series_{split}"]
+
+    if isinstance(model, tf.keras.Model):
+        names = [inp.name.split(":")[0] for inp in model.inputs]
+        mapping = {"hist_input": batch["hist"], "future_input": batch["future"],
+                   "static_input": batch["static"]}
+        inputs = [mapping[n] for n in names if n in mapping] or [batch["hist"]]
+        raw = model.predict(inputs, verbose=0)
+    else:
+        raw = model.predict(batch)
+
+    levels = [float(q) for q in quantiles]
+    scaled = {q: raw[:, :, i] for i, q in enumerate(levels)}
+    crossing_before = None
+
+    from utils.quantile_metrics import crossing_rate
+    crossing_before = crossing_rate(scaled)
+    scaled = enforce_monotone(scaled)
+
+    original = {q: inverse_scale_series(data, v, series) for q, v in scaled.items()}
+    y_true = inverse_scale_series(data, data[f"Y_{split}"], series)
+
+    result = evaluate_quantiles(y_true, original, interval=(min(levels), max(levels)))
+    result["crossing_rate_before_sort"] = float(crossing_before)
+    result["model"] = getattr(model, "name", type(model).__name__)
+    return result

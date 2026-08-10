@@ -87,6 +87,9 @@ def parse_args(argv=None) -> argparse.Namespace:
                              "current — фактическое состояние на 2025 год, "
                              "forward — перспективный сценарий с заметной долей "
                              "электротранспорта и микрогенерации")
+    parser.add_argument("--probabilistic", action="store_true",
+                        help="Добавить вероятностные модели (квантили P10/P50/P90, "
+                             "pinball, покрытие, калибровка) в panel-режимах")
     parser.add_argument("--skip-eda", action="store_true",
                         help="Пропустить исследовательский анализ данных")
     parser.add_argument("--skip-storage", action="store_true",

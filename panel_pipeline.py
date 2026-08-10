@@ -145,6 +145,93 @@ def build_panel_models(data: Dict[str, Any], seed: int) -> List[Tuple[Any, str]]
     ]
 
 
+def run_probabilistic_block(data: Dict[str, Any], args, run_dir: str,
+                           logger_obj) -> List[Dict[str, Any]]:
+    """
+    Обучает и оценивает вероятностные модели на той же панели.
+
+    Блок отделён от точечного: у квантильных моделей другой выход (горизонт ×
+    уровни), другая функция потерь и другой набор метрик. Смешивание в одном
+    сравнении дало бы таблицу, где MAE точечной модели стоит рядом с pinball
+    вероятностной, и величины несопоставимы.
+
+    Тривиальный базлайн идёт первым: интервал по историческому разбросу ошибок
+    уже даёт разумное покрытие, и без него нельзя утверждать, что обучаемая
+    вероятностная модель что-то добавляет.
+    """
+    import pandas as pd
+
+    from models.quantile_models import (
+        DEFAULT_QUANTILES, PanelQuantileXGBoost, QuantileNaive,
+        build_quantile_dlinear, evaluate_panel_quantiles,
+    )
+
+    n_hist = len(data["feature_names_hist"])
+    n_future = len(data["feature_names_future"])
+    n_static = len(data["static_names"])
+    steps = max(len(data["Y_train"]) // Config.PANEL_BATCH_SIZE, 1)
+
+    dlinear = build_quantile_dlinear(
+        history_length=data["history_length"],
+        forecast_horizon=data["forecast_horizon"],
+        n_hist_features=n_hist, n_future_features=n_future,
+        n_static_features=n_static,
+        covariate_units=Config.PANEL_DLINEAR_UNITS,
+        learning_rate=Config.PANEL_DLINEAR_LR,
+        lr_schedule_total_steps=(Config.PANEL_EPOCHS * steps
+                                 if Config.TRANSFORMER_USE_WARMUP_COSINE else 0),
+        lr_warmup_fraction=Config.TRANSFORMER_WARMUP_FRACTION,
+    )
+
+    rows: List[Dict[str, Any]] = []
+    for model, name in ((QuantileNaive(), "QuantileNaive"),
+                        (PanelQuantileXGBoost(
+                            n_estimators=Config.PANEL_XGB_ESTIMATORS,
+                            seed=args.seed), "QuantileXGBoost"),
+                        (dlinear, "QuantileDLinear")):
+        t0 = time.time()
+        logger_obj.info("Вероятностная модель: %s", name)
+        try:
+            import tensorflow as tf
+            if isinstance(model, tf.keras.Model):
+                from models.panel_trainer import make_batch
+                batch_tr, batch_va = make_batch(data, "train"), make_batch(data, "val")
+                names = [i.name.split(":")[0] for i in model.inputs]
+                pick = lambda b: [{"hist_input": b["hist"], "future_input": b["future"],
+                                   "static_input": b["static"]}[n]
+                                  for n in names]
+                model.fit(pick(batch_tr), data["Y_train"],
+                          validation_data=(pick(batch_va), data["Y_val"]),
+                          epochs=Config.PANEL_EPOCHS,
+                          batch_size=Config.PANEL_BATCH_SIZE,
+                          callbacks=[tf.keras.callbacks.EarlyStopping(
+                              monitor="val_loss", patience=Config.PANEL_PATIENCE,
+                              restore_best_weights=True, verbose=1)],
+                          verbose=2)
+            else:
+                model.fit(data)
+        except Exception as exc:
+            logger_obj.error("Вероятностная модель %s не обучена: %s", name, exc)
+            continue
+
+        result = evaluate_panel_quantiles(model, data, "test", DEFAULT_QUANTILES)
+        result["model"] = name
+        result["train_time_sec"] = round(time.time() - t0, 1)
+        rows.append(result)
+
+        logger_obj.info(
+            "%-16s pinball=%9.3f | покрытие %.3f при номинале %.2f | "
+            "ширина %9.1f | пересечений %.4f",
+            name, result["pinball_mean"], result["coverage"],
+            result["coverage_nominal"], result["interval_width"],
+            result["crossing_rate_before_sort"])
+
+    if rows:
+        pd.DataFrame(rows).to_csv(os.path.join(run_dir, "quantile_metrics.csv"),
+                                  index=False, encoding="utf-8-sig")
+    return rows
+
+
 def run_panel_pipeline(args, logger_obj) -> int:
     """
     Полный цикл panel-прогнозирования. Возвращает код завершения процесса.
@@ -276,6 +363,12 @@ def run_panel_pipeline(args, logger_obj) -> int:
     hierarchy = bottom_up_city_forecast(
         data, best_trainer.predict(data, "test"), "test")
 
+    # ── Вероятностный прогноз (по запросу) ──────────────────────────────────
+    quantile_rows: List[Dict[str, Any]] = []
+    if getattr(args, "probabilistic", False):
+        logger_obj.info("Вероятностный прогноз: квантили 0.1, 0.5, 0.9")
+        quantile_rows = run_probabilistic_block(data, args, run_dir, logger_obj)
+
     # ── [6/6] Экспорт ───────────────────────────────────────────────────────
     logger_obj.info("\n[6/6] Экспорт результатов...")
     run_meta = {
@@ -304,6 +397,7 @@ def run_panel_pipeline(args, logger_obj) -> int:
         "failed_models": failed,
         "partial_failure": bool(failed),
         "best_model_by_val": best_name,
+        "quantile_models": [r["model"] for r in quantile_rows],
         "panel_validation_passed": bool(panel_ok),
         "hierarchy_city_MAE": hierarchy["MAE_mean"],
         "hierarchy_city_MAPE": hierarchy["MAPE_mean"],

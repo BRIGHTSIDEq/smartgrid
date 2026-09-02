@@ -47,12 +47,20 @@ def _encode_tariff_zone(df):
     if "tariff_zone" in df.columns:
         mapping = {"night": 0.0, "day": 0.5, "peak": 1.0}
         return df["tariff_zone"].map(mapping).fillna(0.5).values.astype(np.float32)
+    # Запасная ветка обязана давать ТУ ЖЕ кодировку, что и колонка tariff_zone.
+    # Прежняя версия присваивала пик часам 10-17 и 21-23, то есть ровно
+    # полупиковым, а настоящий пик 7-10 и 17-21 получал 0.5 — зоны были
+    # переставлены на 16 часах из 24. Ветка срабатывает при инференсе на
+    # DataFrame без колонки tariff_zone, поэтому прогноз ухудшался молча.
     hours   = df["hour"].values
     weekday = df["weekday"].values if "weekday" in df.columns else np.zeros(len(df))
-    enc = np.full(len(df), 0.5, dtype=np.float32)
-    enc[(hours < 7) | (hours >= 23)] = 0.0
-    enc[(((hours >= 10) & (hours < 17)) | ((hours >= 21) & (hours < 23))) & (weekday < 5)] = 1.0
-    return enc
+    holiday = (df["is_holiday"].values if "is_holiday" in df.columns
+               else np.zeros(len(df)))
+
+    from data.panel_preprocessing import _tariff_zone_code
+    return _tariff_zone_code(np.asarray(hours, np.float32),
+                             np.asarray(weekday, np.float32),
+                             np.asarray(holiday, np.float32))
 
 
 def _add_lag_columns(df):

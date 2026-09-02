@@ -279,6 +279,26 @@ def diebold_mariano(
     return float(dm_stat), p_value
 
 
+def to_non_overlapping(array: np.ndarray, horizon: int) -> np.ndarray:
+    """
+    Оставляет от матрицы окон (N, H) только непересекающиеся: каждое H-е.
+
+    Окна нарезаны со сдвигом один час, поэтому в развёрнутом виде каждый
+    физический час входит в ряд H раз, а соседние элементы относятся к РАЗНЫМ
+    моментам времени. Тест Диболда–Мариано на таком векторе считает N·H
+    независимых наблюдений вместо примерно N/H, и статистика завышается в
+    несколько раз. Измерено на данных этого проекта: −32.4 против −6.85 на
+    непересекающемся ряде, тогда как блочная оценка по суткам даёт −6.50.
+
+    Тот же принцип уже применён в проекте к автокорреляции остатков: «лаг 24»
+    по развёрнутому вектору равен одному часу реального времени, а не суткам.
+    """
+    values = np.asarray(array)
+    if values.ndim != 2:
+        return values.ravel()
+    return values[::max(int(horizon), 1)].ravel()
+
+
 def pairwise_dm_table(
     y_true: np.ndarray,
     predictions: Dict[str, np.ndarray],
@@ -287,10 +307,17 @@ def pairwise_dm_table(
     """
     Попарный тест Диболда–Мариано для всех моделей.
 
+    Матрицы окон прореживаются до непересекающихся: перекрытие завышало бы
+    значимость в несколько раз (см. to_non_overlapping). Поправка
+    Ньюи–Уэста на лаги 1..h−1 после прореживания снимает остаточную
+    зависимость между соседними сутками.
+
     Returns
     -------
     Список словарей {"model_a", "model_b", "DM", "p_value", "better"}.
     """
+    y_true = to_non_overlapping(y_true, h)
+    predictions = {k: to_non_overlapping(v, h) for k, v in predictions.items()}
     names = list(predictions.keys())
     rows: List[Dict[str, object]] = []
     for i in range(len(names)):

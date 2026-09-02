@@ -152,11 +152,17 @@ def generate_smartgrid_data(
     hours = days * 24
     t = np.arange(hours, dtype=np.float32)
     dates = pd.date_range(start=start_date, periods=hours, freq="h")
-    hour_of_day = (t % 24).astype(np.int8)
+    # Календарь берётся из фактических дат, а не из остатка от деления.
+    # weekday = day_of_sim % 7 верен только при старте в понедельник: при любой
+    # другой START_DATE день недели, выходные, пиковые часы и тарифная зона
+    # разошлись бы с колонкой timestamp, и модель училась бы на календаре, не
+    # соответствующем меткам времени. day_of_year % 365 дополнительно теряет
+    # сутки в високосном году, расходясь с годовым периодом 365.25 в температуре.
+    hour_of_day = dates.hour.to_numpy().astype(np.int8)
     day_of_sim  = (t // 24).astype(int)
-    weekday     = day_of_sim % 7
+    weekday     = dates.dayofweek.to_numpy().astype(int)
     is_weekend  = (weekday >= 5).astype(np.float32)
-    day_of_year = (day_of_sim % 365).astype(int)
+    day_of_year = dates.dayofyear.to_numpy().astype(int)
 
     # Праздники
     holiday_mask_daily = generate_holiday_mask(days, start_date)
@@ -170,7 +176,13 @@ def generate_smartgrid_data(
     # ── Температура ──────────────────────────────────────────────────────────
     # Годовой ход задан климатическими нормами: средняя температура января и
     # июля определяют среднее и амплитуду синусоиды.
-    temp_annual  = temp_annual_mean + temp_annual_amplitude*np.sin(2*np.pi*t/(24*365.25) - np.pi/2)
+    # Минимум сдвинут на 20 суток от 1 января: в московском климате самый
+    # холодный период — вторая половина января, а не самое начало года. Без
+    # сдвига годовой максимум потребления уезжал на ноябрь, и январь
+    # оказывался ниже апреля.
+    _COLD_PEAK_SHIFT_DAYS = 20.0
+    temp_annual  = temp_annual_mean + temp_annual_amplitude*np.sin(
+        2*np.pi*(t - _COLD_PEAK_SHIFT_DAYS*24)/(24*365.25) - np.pi/2)
     temp_diurnal = 3.5*np.sin(2*np.pi*(t%24)/24 - np.pi/4)
     tn = np.zeros(hours); tn[0] = rng.normal(0,1.5)
     for i in range(1,hours): tn[i] = 0.97*tn[i-1] + rng.normal(0,0.6)
@@ -248,7 +260,13 @@ def generate_smartgrid_data(
         district_curve += district_weights[d_i] * dist_scale * district_pattern
     district_curve = np.clip(district_curve, 0.80, 1.35).astype(np.float32)
 
-    holiday_base_reduction = (1.0 - 0.35*ny_mask - 0.18*holiday_mask*(1-ny_mask)).astype(np.float32)
+    # В праздники останавливается ПРОИЗВОДСТВО, а бытовое потребление слегка
+    # растёт: люди дома. Прежняя версия снижала на 35% именно бытовую
+    # компоненту, отчего новогодний провал по городу достигал 24% при
+    # фактических для ЕЭС России 8-12%, и логика была перевёрнута.
+    holiday_base_reduction = (1.0 + 0.04*ny_mask + 0.02*holiday_mask*(1-ny_mask)).astype(np.float32)
+    holiday_industrial_factor = (
+        1.0 - 0.55*ny_mask - 0.30*holiday_mask*(1-ny_mask)).astype(np.float32)
     mid  = (seasonal_winter_boost - seasonal_summer_dip)/2
     amp  = (seasonal_winter_boost + seasonal_summer_dip)/2
     seasonal_drift = (1.0 + mid + amp*np.cos(2*np.pi*day_of_year/365)).astype(np.float32)
@@ -327,8 +345,12 @@ def generate_smartgrid_data(
         is_hol_day = bool(holiday_mask_daily[day_idx] > 0)
         is_cold    = bool(temperature[day_idx*24] < -15)  # cold snap = range anxiety
 
-        # Больше зарядок в холодные дни (range anxiety)
-        charge_prob = 0.90 if is_cold else 0.85
+        # Частота зарядки. Средний суточный пробег легкового автомобиля в
+        # России — порядка 30-40 км, а типичная батарея проезжает 250-400 км,
+        # поэтому владелец подключается раз в два-три дня, а не ежедневно.
+        # Прежнее значение 0.85 давало около 27 000 кВт·ч в год на автомобиль,
+        # что соответствует пробегу порядка 130 000 км — завышение на порядок.
+        charge_prob = 0.45 if is_cold else 0.35
         n_charging  = int(rng.binomial(n_ev, charge_prob))
         home_frac   = 0.72 if (is_we_day or is_hol_day) else 0.62
 
@@ -344,7 +366,13 @@ def generate_smartgrid_data(
                 base_h = int(rng.integers(9, 18))
                 power = rng.uniform(*ev_public_power_kw)
 
-            duration = int(rng.integers(3, 9))  # 3-8 часов
+            # Длительность выводится из ОТПУСКА ЭНЕРГИИ, а не задаётся
+            # независимо от мощности. Иначе произведение «мощность × часы»
+            # ничем не ограничено сверху и не соответствует ёмкости батареи:
+            # 7 кВт в течение 8 часов — это 56 кВт·ч за сессию, больше полной
+            # ёмкости типичного автомобиля.
+            session_kwh = rng.uniform(8.0, 26.0)
+            duration = int(np.clip(round(session_kwh / max(power, 1e-6)), 1, 9))
 
             # ── ИСПРАВЛЕНИЕ v6 (КРИТИЧЕСКОЕ) ─────────────────────────────
             # БЫЛО: abs_h = day_idx*24 + (base_h + h) % 24
@@ -372,9 +400,14 @@ def generate_smartgrid_data(
                 ev_load_raw[surge_h] += n_ev * 0.10 * rng.uniform(0.8, 1.2) * ev_home_power_kw[0]
 
     # Коммерческий парк: депо заряжает грузовики ночью перед рабочим днём.
-    # Один парк примерно на тысячу домохозяйств — иначе коммерческая зарядка
-    # начинает доминировать над бытовой при низком проникновении легковых EV.
-    n_commercial = max(0, households // 1000)
+    # Число депо масштабируется проникновением электротранспорта, а не только
+    # числом домохозяйств. Прежде оно равнялось households // 1000 независимо
+    # от сценария, и при ev_penetration = 0 канал ЭВ всё равно давал около 4%
+    # городского потребления: сценарий «current» описывал сеть, где
+    # электротранспорта нет, но депо электрогрузовиков есть. Нормировка на
+    # опорное проникновение 0.15 соответствует перспективному сценарию.
+    fleet_scale = min(1.0, max(0.0, ev_penetration) / 0.15)
+    n_commercial = int(round(max(0, households // 1000) * fleet_scale))
     for _ in range(n_commercial):
         depot_start = int(rng.integers(21, 24))  # Начало зарядки в 21-23ч
         kw_truck    = rng.uniform(*ev_fleet_power_kw)
@@ -430,21 +463,59 @@ def generate_smartgrid_data(
     # Мощность отдельных объектов задаётся не абсолютной величиной, а долей от
     # бытовой нагрузки: так соотношение секторов остаётся правдоподобным при
     # любом числе домохозяйств. Профиль — марковское чередование смен.
+    # Смены привязаны к часу суток. Прежняя версия переключала состояние
+    # «работает / стоит» марковским процессом, зависящим только от дня недели,
+    # поэтому завод мог начать смену в три часа ночи. У компоненты выходил
+    # плоский суточный профиль и ACF(24) около 0.02 — она была непрогнозируема
+    # на сутки вперёд в принципе и задавала искусственный шумовой пол, на
+    # котором сидели все модели.
     industrial_shape = np.zeros(hours, np.float64)
     for ind_i in range(industrial_loads):
-        weight  = rng.uniform(0.5, 1.5)
-        p_wd = rng.uniform(0.65, 0.90)
-        p_we = rng.uniform(0.15, 0.40)
-        in_work = False
-        till_ch = int(rng.integers(4, 12))
-        for h in range(hours):
-            p = p_wd if weekday[h] < 5 else p_we
-            if till_ch <= 0:
-                in_work = rng.random() < (p if not in_work else (1-p*0.3))
-                till_ch = int(rng.integers(8,17) if in_work else rng.integers(4,9))
-            if in_work:
-                industrial_shape[h] += weight * rng.uniform(0.92, 1.08)
-            till_ch -= 1
+        weight = rng.uniform(0.5, 1.5)
+        shift_start = int(rng.integers(6, 9))
+        # Одно-, двух- и трёхсменные объекты плюс непрерывное производство.
+        shift_len = int(rng.choice([8, 16, 24], p=[0.5, 0.3, 0.2]))
+        # Загрузка задаётся УРОВНЕМ, а не двоичным «работает / стоит».
+        # Двоичное переключение означало бы, что предприятие пропускает целые
+        # смены случайным образом, и суточная автокорреляция ряда падала
+        # сильнее, чем её поднимала привязка смен к часам. Реальное
+        # производство работает по календарю, а меняется загрузка — портфель
+        # заказов, и меняется она инерционно.
+        load_wd = rng.uniform(0.85, 1.00)
+        # Выходная загрузка не падает до пятой части: в городском агрегате есть
+        # непрерывные производства, торговля и коммунальная инфраструктура.
+        # При 0.20-0.50 отношение выходные/будни по городу выходило 0.76 при
+        # эталонных для России 0.88-0.99.
+        load_we = rng.uniform(0.55, 0.85)
+        # Постоянная составляющая: вентиляция, холодильное оборудование,
+        # дежурное освещение и обогрев работают круглосуточно. Без неё ночной
+        # провал городского ряда получался вдвое глубже реального, а
+        # коэффициент заполнения проваливался ниже правдоподобного диапазона.
+        baseload = rng.uniform(0.30, 0.55)
+        level = 1.0
+        for day_idx in range(days):
+            h0 = day_idx * 24
+            base = load_wd if weekday[h0] < 5 else load_we
+            base *= float(holiday_industrial_factor[h0])
+            level = 0.78 * level + 0.22 * rng.normal(1.0, 0.10)
+            activity = max(0.0, base * level)
+            if activity <= 0.02:
+                continue
+            ramp = activity * rng.uniform(0.97, 1.03)
+            # Постоянная составляющая идёт все 24 часа суток.
+            for k in range(24):
+                h = h0 + k
+                if h < hours:
+                    industrial_shape[h] += weight * baseload * ramp
+            # Сменная составляющая накладывается поверх.
+            for k in range(shift_len):
+                h = h0 + shift_start + k
+                if h >= hours:
+                    break
+                # Плавный набор и снижение нагрузки на краях смены.
+                edge = min(1.0, (k + 1) / 2.0, (shift_len - k) / 2.0)
+                industrial_shape[h] += (weight * (1.0 - baseload) * ramp * edge
+                                        * rng.uniform(0.97, 1.03))
 
     nonres_mean_kw = residential_mean_kw * nonresidential_share
     industrial_load_raw = (
@@ -664,6 +735,18 @@ def validate_against_reference(df, households, reference=None, kwh_per_household
                 "доступен": available,
                 "ok": available and (lo <= value <= hi)}
 
+    # Форма суточного графика и годовой ход
+    by_hour = df.groupby("hour")["consumption"].mean()
+    night_level = float(by_hour.loc[1:5].mean())
+    noon_over_night = float(by_hour.loc[11:15].mean() / max(night_level, 1e-9))
+    morning_over_night = float(by_hour.loc[7:10].mean() / max(night_level, 1e-9))
+
+    months = pd.to_datetime(df["timestamp"]).dt.month
+    by_month = df.groupby(months)["consumption"].mean()
+    winter = by_month.reindex([12, 1, 2]).mean()
+    summer = by_month.reindex([6, 7, 8]).mean()
+    winter_summer_ratio = float(winter / max(summer, 1e-9)) if summer == summer else float("nan")
+
     rows = [
         row("Потребление на домохозяйство", kwh_per_hh,
             *reference.KWH_PER_HOUSEHOLD_MONTH_RANGE, "кВт·ч/мес"),
@@ -683,6 +766,16 @@ def validate_against_reference(df, households, reference=None, kwh_per_household
         row("Час вечернего максимума", float(evening_peak),
             *map(float, reference.EVENING_PEAK_HOURS), "ч"),
         row("ACF на суточном лаге", acf24, reference.ACF24_MIN, 1.0, ""),
+        # Форма суточного графика. Прежний набор показателей её не проверял, и
+        # генератор выдавал профиль, где полдень ниже трёх часов ночи, а
+        # утреннего подъёма не было вовсе, — проверка «час утреннего максимума»
+        # находила его только потому, что искала максимум в узком окне 6-11.
+        row("Полдень к ночному минимуму", noon_over_night,
+            reference.NOON_OVER_NIGHT_MIN, 3.0, ""),
+        row("Утро к ночному минимуму", morning_over_night,
+            reference.MORNING_OVER_NIGHT_MIN, 3.0, ""),
+        row("Зимний месяц к летнему", winter_summer_ratio,
+            reference.WINTER_SUMMER_MONTH_RATIO_MIN, 2.0, ""),
     ]
 
     logger.info("─" * 88)

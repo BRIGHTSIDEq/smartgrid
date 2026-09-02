@@ -327,11 +327,17 @@ def generate_panel_data(
     t = np.arange(hours, dtype=np.float64)
     dates = pd.date_range(start=start_date, periods=hours, freq="h")
 
-    hour_of_day = (t % 24).astype(np.float32)
+    # Календарь берётся из фактических дат, а не из остатка от деления.
+    # weekday = day_of_sim % 7 верен только при старте в понедельник: при любой
+    # другой START_DATE день недели, выходные, пиковые часы и тарифная зона
+    # разошлись бы с колонкой timestamp, и модель училась бы на календаре, не
+    # соответствующем меткам времени. day_of_year % 365 дополнительно теряет
+    # сутки в високосном году, расходясь с годовым периодом 365.25 в температуре.
+    hour_of_day = dates.hour.to_numpy().astype(np.float32)
     day_of_sim = (t // 24).astype(int)
-    weekday = (day_of_sim % 7).astype(np.int8)
+    weekday = dates.dayofweek.to_numpy().astype(np.int8)
     is_weekend = (weekday >= 5).astype(np.float32)
-    day_of_year = (day_of_sim % 365).astype(int)
+    day_of_year = dates.dayofyear.to_numpy().astype(int)
 
     holiday_daily = generate_holiday_mask(days, start_date)
     holiday = np.repeat(holiday_daily, 24).astype(np.float32)

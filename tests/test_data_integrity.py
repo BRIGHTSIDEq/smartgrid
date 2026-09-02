@@ -179,3 +179,66 @@ def test_actual_series_alignment(prepared):
     history = prepared["history_length"]
     expected = prepared["raw_test"][history:history + n_hours]
     assert np.allclose(actual, expected)
+
+
+def test_tariff_zone_fallback_matches_the_column():
+    """
+    Обе реализации тарифной кодировки дают одно и то же.
+
+    Запасная ветка срабатывает при инференсе на DataFrame без колонки
+    tariff_zone. Прежняя её версия присваивала пик часам 10-17 и 21-23, то есть
+    ровно полупиковым, — зоны были переставлены на 16 часах из 24, и прогноз
+    ухудшался молча, без единого признака в метриках.
+    """
+    import numpy as np
+    import pandas as pd
+
+    from data.preprocessing import _encode_tariff_zone
+    from data.panel_preprocessing import _tariff_zone_code
+
+    hours = np.tile(np.arange(24), 7)
+    weekday = np.repeat(np.arange(7), 24)
+    frame = pd.DataFrame({"hour": hours, "weekday": weekday,
+                          "is_holiday": np.zeros(len(hours), dtype=np.int8)})
+
+    fallback = _encode_tariff_zone(frame)
+    reference = _tariff_zone_code(hours.astype(np.float32),
+                                  weekday.astype(np.float32),
+                                  np.zeros(len(hours), np.float32))
+
+    assert np.allclose(fallback, reference), (
+        f"расходятся на часах {np.where(~np.isclose(fallback, reference))[0].tolist()[:10]}"
+    )
+
+    # Ветка с колонкой обязана совпадать с ними обеими.
+    zones = np.where((hours >= 7) & (hours < 10) | (hours >= 17) & (hours < 21), "peak",
+                     np.where((hours < 7) | (hours >= 23), "night", "day"))
+    zones = np.where(weekday >= 5, np.where((hours < 7) | (hours >= 23), "night", "day"), zones)
+    with_column = _encode_tariff_zone(frame.assign(tariff_zone=zones))
+    assert np.allclose(with_column, reference)
+
+
+def test_calendar_features_follow_the_actual_dates():
+    """
+    Календарные признаки согласованы с колонкой timestamp при любой стартовой дате.
+
+    Прежде weekday считался как day_of_sim % 7 и был верен только потому, что
+    START_DATE приходилась на понедельник. При другой дате день недели,
+    выходные, пиковые часы и тарифная зона разошлись бы с метками времени, и
+    модель училась бы на календаре, не соответствующем данным. Ошибка не видна
+    ни в одной проверке форм.
+    """
+    import pandas as pd
+
+    from data.generator import generate_smartgrid_data
+
+    # Четверг, чтобы остаток от деления заведомо не совпал с истиной.
+    df = generate_smartgrid_data(days=20, households=300, seed=3,
+                                 start_date="2024-03-07")
+    stamps = pd.DatetimeIndex(df["timestamp"])
+
+    assert (df["weekday"].to_numpy() == stamps.dayofweek.to_numpy()).all()
+    assert (df["hour"].to_numpy() == stamps.hour.to_numpy()).all()
+    assert (df["is_weekend"].to_numpy().astype(bool)
+            == np.asarray(stamps.dayofweek >= 5)).all()
+    assert (df["day_of_year"].to_numpy() == stamps.dayofyear.to_numpy()).all()

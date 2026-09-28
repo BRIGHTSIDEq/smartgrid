@@ -25,11 +25,11 @@
         <td>{{ r.dataset|dataset_ru }}</td>
         <td class="n">{{ r.seed }}</td>
         <td>{{ display_model(r.best or '—') }}</td>
-        <td>{% if r.status == 'completed' %}<span class="status ok">выполнен</span>
-            {% elif r.status == 'partial' %}<span class="status warn">частично</span>, отказов: {{ r.failed }}
-            {% elif r.status == 'failed' %}<span class="status err">ошибка</span>
+        <td>{% if r.status == 'completed' %}<span class="state"><i class="lamp on"></i>выполнен</span>
+            {% elif r.status == 'partial' %}<span class="state warn"><i class="lamp warn"></i>частично</span>, отказов: {{ r.failed }}
+            {% elif r.status == 'failed' %}<span class="state err"><i class="lamp err"></i>ошибка</span>
             {% elif r.status == 'unknown' %}<span class="muted">статус не записан</span>
-            {% else %}<span class="status idle">идёт или прерван</span>{% endif %}</td>
+            {% else %}<span class="state"><i class="lamp"></i>идёт или прерван</span>{% endif %}</td>
       </tr>
     {% endfor %}
     </tbody>

@@ -47,6 +47,8 @@ def rub(value: Any) -> str:
     if value is None or not _is_number(value):
         return "—"
     a = abs(value)
+    if a >= 1e9:
+        return f"{sig3(value / 1e9)}{NBSP}млрд{NBSP}₽"
     if a >= 1e6:
         return f"{sig3(value / 1e6)}{NBSP}млн{NBSP}₽"
     if a >= 1e4:
@@ -58,8 +60,9 @@ def rub_range(lo: Any, hi: Any) -> str:
     """Диапазон рублей в одних единицах: «1,2–1,9 млн ₽», «от −0,2 до 0,4 млн ₽»."""
     if not (_is_number(lo) and _is_number(hi)):
         return "—"
-    scale, unit = (1e6, "млн") if max(abs(lo), abs(hi)) >= 1e6 else \
-        (1e3, "тыс.") if max(abs(lo), abs(hi)) >= 1e4 else (1, "")
+    top = max(abs(lo), abs(hi))
+    scale, unit = (1e9, "млрд") if top >= 1e9 else (1e6, "млн") if top >= 1e6 else \
+        (1e3, "тыс.") if top >= 1e4 else (1, "")
     a, b = sig3(lo / scale), sig3(hi / scale)
     tail = f"{NBSP}{unit}{NBSP}₽" if unit else f"{NBSP}₽"
     if lo < 0:
@@ -89,13 +92,27 @@ def years(value: Any) -> str:
 
 
 def years_range(lo: Any, hi: Any) -> str:
-    """Окупаемость по краям разброса: «9–14 лет»."""
-    ok = [v for v in (lo, hi) if _is_number(v) and not math.isinf(v) and 0 < v <= 25]
-    if not ok:
+    """
+    Окупаемость по краям разброса: «9–14 лет».
+
+    Слова те же, что у years(): «больше 25 лет» — конечный, но слишком
+    долгий срок, «не окупается» — экономии нет. Прежде years_range называл
+    «не окупается» и срок в 40 лет, а years — «больше 25 лет».
+    """
+    vals = [v for v in (lo, hi) if _is_number(v)]
+    finite = [v for v in vals if not math.isinf(v) and v > 0]
+    if not finite:
         return "не окупается"
-    if len(ok) == 1:
-        return f"от {num(ok[0], 1)} лет, в неблагоприятном варианте — не окупается"
-    a, b = sorted(ok)
+    within = sorted(v for v in finite if v <= 25)
+    if not within:
+        return "больше 25 лет"
+    if len(within) == 1:
+        if len(finite) == 2:
+            return f"от {years(within[0])} до больше 25 лет"
+        if len(vals) == 2:
+            return f"от {years(within[0])}, в неблагоприятном варианте — не окупается"
+        return years(within[0])
+    a, b = within
     if round(a, 1) == round(b, 1):
         return years(a)
     # Слово согласуется с верхним краем в том виде, в каком он показан:

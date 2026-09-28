@@ -1,0 +1,20 @@
+{# Мнемосхема вместо полосы шагов: сеть → приборы учёта → предприятие → накопитель.
+   Узел — ссылка на экран и лампа состояния; участок шины «под напряжением»,
+   когда предыдущий шаг сделан. Состояние считает _mnemo_state в app.py. #}
+{% set lamp_words = {'on': 'готово', 'warn': 'есть замечание', 'off': 'ещё не сделано'} %}
+<nav class="mnemo" aria-label="Схема расчёта">
+  <ol>
+    {% for n in mnemo.nodes %}
+      {% if not loop.first %}
+        <li class="bus {{ 'live' if mnemo.live[loop.index0 - 1] }}" aria-hidden="true"><span></span></li>
+      {% endif %}
+      <li class="node lamp-{{ n.lamp }} {{ 'current' if n.id == mnemo.current }}" data-node="{{ n.id }}" data-lamp="{{ n.lamp }}">
+        <a href="{{ n.href }}" {% if n.id == mnemo.current %}aria-current="step"{% endif %}>
+          <span class="node-icon">{{ icon(n.icon, 24) }}<i class="lamp" role="img" aria-label="{{ lamp_words[n.lamp] }}"></i></span>
+          <span class="node-text"><b>{{ n.title }}</b><span>{{ n.text }}</span>
+            {%- if n.value %}<strong>{{ n.value }}</strong>{% endif %}</span>
+        </a>
+      </li>
+    {% endfor %}
+  </ol>
+</nav>

@@ -136,7 +136,9 @@ def test_economics_matches_the_calculation_code(client, uploaded):
     frame = econ.economics_frame(econ.series_for(clean, ["ТП-3 Ф-1", "ТП-12 Ф-2"])["series"])
     tariff = econ.tariff_from_form({"category": 4, "peak_hours": ",".join(map(str, range(8, 21)))})
     battery = battery_for_load(float(frame["__actual__"].max()), 16000.0, 1.0)
-    direct = evaluate_sources(frame, tariff, battery, n_boot=200)["summary"].set_index("source")
+    # Экономия считается на отрезке оценки — после суток, где выбирался прогноз.
+    evaluated = econ.selection_split(frame)[1]
+    direct = evaluate_sources(evaluated, tariff, battery, n_boot=200)["summary"].set_index("source")
     assert shown["best"]["net_savings"] == pytest.approx(direct.loc[shown["best_source"], "net_savings"])
 
 
@@ -165,11 +167,12 @@ def test_what_if_centre_equals_the_headline(client, uploaded):
     assert centre["annual"] == pytest.approx(base["best"]["annual_mean"])
 
 
-def test_gap_in_evaluation_period_is_a_clear_error(client, uploaded):
+def test_few_days_with_gaps_are_dropped_and_named(client, uploaded):
+    """30 часов без связи у ТП-7 Ф-1 — несколько суток: они исключаются, а не валят расчёт."""
     c, _, _ = client
     status = _run_economics(c, uploaded, meters=["ТП-7 Ф-1"])
-    assert status["status"] == "error"
-    assert "пропуски" in status["html"] and "сутки:" in status["html"]
+    assert status["status"] == "done", status
+    assert "Исключены сутки с пропусками данных" in status["html"]
 
 
 def test_bad_rate_is_rejected(client, uploaded):
@@ -246,6 +249,8 @@ def test_no_external_urls_in_templates_and_static():
     for folder in ("templates", "static"):
         for dirpath, _, files in os.walk(os.path.join(base, folder)):
             for name in files:
+                if name.endswith((".woff2", ".woff", ".png", ".ico")):
+                    continue                 # шрифты и картинки — двоичные, адресов в них нет
                 text = open(os.path.join(dirpath, name), encoding="utf-8").read()
                 found = re.findall(r"https?://(?!www\.w3\.org/2000/svg)[^\s\"')]+", text)
                 assert not found, f"{name}: {found}"

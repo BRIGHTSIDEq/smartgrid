@@ -1,11 +1,11 @@
-<div class="table-wrap">
+<div class="table-wrap reveal">
   <table>
     <thead><tr><th>Если</th><th class="n">В год</th><th>Разброс</th><th class="n">Окупится за</th></tr></thead>
     <tbody>
     {% for p in points %}
       <tr class="{{ 'chosen' if p.kind == 'center' }}">
         <td>{% if p.kind == 'center' %}всё как сейчас
-            {% elif p.kind == 'capacity' %}ёмкость {{ 'вдвое меньше' if p.value < 1 else 'вдвое больше' }} ({{ p.capacity_kwh|num }}&nbsp;кВт·ч)
+            {% elif p.kind == 'capacity' %}накопитель {{ 'вдвое меньше' if p.value < 1 else 'вдвое больше' }} ({{ p.capacity_kwh|num }}&nbsp;кВт·ч)
             {% elif p.kind == 'capex' %}накопитель стоит {{ p.value|num }}&nbsp;₽ за кВт·ч
             {% else %}ставки мощности {{ 'ниже' if p.value < 1 else 'выше' }} на {{ ((p.value - 1)|abs)|pct }}{% endif %}</td>
         <td class="n">{{ p.annual|rub }}</td>
@@ -17,4 +17,6 @@
     </tbody>
   </table>
 </div>
-{% if not complete %}<p class="note">Расчёт остановлен — показаны готовые варианты.</p>{% endif %}
+{% if not complete %}<p class="note">Расчёт остановлен — показаны готовые варианты. Нажмите
+  «Посчитать варианты» ещё раз, чтобы досчитать.</p>
+  <button class="btn" type="button" data-whatif="/economics/whatif?u={{ u }}">{{ icon('adjustments-horizontal', 18) }}Посчитать варианты</button>{% endif %}

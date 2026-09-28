@@ -27,6 +27,7 @@
   function rub(v) {
     if (v === null || v === undefined || isNaN(v)) return "—";
     var a = Math.abs(v);
+    if (a >= 1e9) return sig3(v / 1e9) + NBSP + "млрд" + NBSP + "₽";
     if (a >= 1e6) return sig3(v / 1e6) + NBSP + "млн" + NBSP + "₽";
     if (a >= 1e4) return sig3(v / 1e3) + NBSP + "тыс." + NBSP + "₽";
     return num(v) + NBSP + "₽";

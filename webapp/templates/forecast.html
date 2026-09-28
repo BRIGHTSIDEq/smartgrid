@@ -14,6 +14,8 @@
      сутки. На вашем файле модель не обучалась, поэтому в разделе «Экономия» используются
      простые прогнозы.</p>
 
+  {% if missing %}<p class="callout info">{{ icon('info-circle', 18) }}<span>В запуске {{ missing }} прогнозы
+     по рядам не сохранены — так было до версии с сохранением результатов. Показан другой запуск.</span></p>{% endif %}
   <form class="inline-form" method="get" action="/forecast">
     <label>Запуск исследования
       <select name="run" data-autosubmit>

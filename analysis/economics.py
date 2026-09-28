@@ -88,7 +88,8 @@ def battery_for_load(peak_kw: float, capex_rub_per_kwh: Optional[float] = None,
 def daily_savings(baseline: np.ndarray, grid: np.ndarray, charged: np.ndarray,
                   timestamps, tariff: RuTariff, battery: Battery,
                   plan: Optional[np.ndarray] = None,
-                  holidays: Optional[Sequence[bool]] = None) -> pd.Series:
+                  holidays: Optional[Sequence[bool]] = None,
+                  baseline_plan: Optional[np.ndarray] = None) -> pd.Series:
     """
     Чистая экономия по суткам; сумма равна итогу evaluate_schedule.
 
@@ -110,9 +111,10 @@ def daily_savings(baseline: np.ndarray, grid: np.ndarray, charged: np.ndarray,
     hourly -= battery.capex_rub * battery.annual_om_share / 8760.0
     if tariff.with_plan and plan is not None:
         p = np.asarray(plan, dtype=np.float64)
-        dev = lambda x: (tariff.deviation_up_rate * np.clip(x - p, 0, None)
-                         + tariff.deviation_down_rate * np.clip(p - x, 0, None))
-        hourly += dev(baseline) - dev(grid)
+        p0 = p if baseline_plan is None else np.asarray(baseline_plan, dtype=np.float64)
+        dev = lambda x, q: (tariff.deviation_up_rate * np.clip(x - q, 0, None)
+                            + tariff.deviation_down_rate * np.clip(q - x, 0, None))
+        hourly += dev(baseline, p0) - dev(grid, p)
     frame = cal.assign(v=hourly, base=baseline, grid=grid, peak=peaks)
     out = frame.groupby("day")["v"].sum()
 
@@ -198,18 +200,19 @@ def evaluate_sources(frame: pd.DataFrame, tariff: RuTariff, battery: Battery,
                               actual)
 
     from optimization.tariffs_ru import monthly_bill
-    base_bill = monthly_bill(actual, ts, tariff, plan=actual, region_load=actual,
-                             holidays=holidays)
     for name, (sched, fc) in schedules.items():
         plan = fc + (sched["grid"] - actual) if tariff.with_plan else None
+        base_plan = fc if tariff.with_plan else None
         res = evaluate_schedule(sched["grid"], sched["charged"], actual, ts, tariff,
-                                battery, plan=plan, holidays=holidays)
+                                battery, plan=plan, holidays=holidays, baseline_plan=base_plan)
         d = daily_savings(actual, sched["grid"], sched["charged"], ts, tariff, battery,
-                          plan=plan, holidays=holidays)
+                          plan=plan, holidays=holidays, baseline_plan=base_plan)
         boot = block_bootstrap_annual(d, n_boot=n_boot)
         mae = float(np.mean(np.abs(fc - actual)))
         summary.append({"source": name, "forecast_MAE": mae, **res, **boot})
         days[name] = d
+        base_bill = monthly_bill(actual, ts, tariff, plan=base_plan, region_load=actual,
+                                 holidays=holidays)
         bill = monthly_bill(sched["grid"], ts, tariff, plan=plan, region_load=actual,
                             holidays=holidays)
         for (_, b0), (_, b1) in zip(base_bill.iterrows(), bill.iterrows()):

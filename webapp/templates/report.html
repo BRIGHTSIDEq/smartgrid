@@ -1,0 +1,98 @@
+{% extends "base.html" %}
+{% from "_term.html" import plural %}
+{% block title %}Расчёт экономии накопителя — {{ meta.filename }}{% endblock %}
+{% block body_class %}report{% endblock %}
+{% block content %}
+{% set b = r.best %}
+{% set bound = r.sources|selectattr('source', 'equalto', 'Оптимум при известном будущем')|first %}
+<div class="actions no-print" style="margin:0 0 18px">
+  <button class="btn primary" type="button" onclick="window.print()">{{ icon('printer', 18) }}Печать или PDF</button>
+  <a class="btn" href="/economics/export.xlsx?u={{ u }}">{{ icon('file-type-xls', 18) }}Excel</a>
+  <a class="btn" href="/economics?u={{ u }}">{{ icon('arrow-back-up', 18) }}К расчёту</a>
+</div>
+
+<header class="report-head">
+  <div>
+    <h1 style="margin:0">Экономия от накопителя энергии</h1>
+    <p class="muted" style="margin:4px 0 0">{{ meta.filename }} · категория {{ r.tariff.category }} ·
+      период {{ r.period[0] }}–{{ r.period[1] }}</p>
+  </div>
+  <div class="meta">Smart Grid<br>расчёт по почасовой нагрузке</div>
+</header>
+
+<section class="plate readout">
+  <div>
+    {% if r.annual_shown %}
+      <span class="figure-label">Экономия в год{% if r.tariff.example %} — по примерным ставкам{% endif %}</span>
+      <span class="figure-value">{{ b.annual_mean|rub }}</span>
+      <span class="figure-note">скорее всего {{ b.annual_lo|rub_between(b.annual_hi) }}</span>
+      <span class="spread" data-spread data-big="1" data-lo="{{ b.annual_lo }}" data-hi="{{ b.annual_hi }}"
+            data-mid="{{ b.annual_mean }}" data-zero="1"></span>
+    {% else %}
+      <span class="figure-label">Экономия за {{ r.n_days }} сут.</span>
+      <span class="figure-value">{{ b.net_savings|rub }}</span>
+    {% endif %}
+  </div>
+  <div>
+    <table>
+      <tr><td>Накопитель</td><td class="n">{{ r.battery.power_kw|num }}&nbsp;кВт / {{ r.battery.capacity_kwh|num }}&nbsp;кВт·ч</td></tr>
+      <tr><td>Вложения</td><td class="n">{{ r.battery.capex_rub|rub }}</td></tr>
+      {% if r.annual_shown %}<tr><td>Простая окупаемость</td><td class="n">{{ b.payback_lo|years_range(b.payback_hi) }}</td></tr>{% endif %}
+      {% if fin and r.annual_shown %}
+        <tr><td>NPV за {{ fin.params.life }} лет при {{ (fin.params.discount * 100)|num(1) }}&nbsp;%</td><td class="n">{{ fin.mean.npv|rub }}</td></tr>
+        <tr><td>IRR</td><td class="n">{{ fin.mean.irr|pct(1) if fin.mean.irr is not none else 'не окупается' }}</td></tr>
+      {% endif %}
+      {% if bound and r.annual_shown %}<tr><td>Доля от предела при идеальном знании нагрузки</td><td class="n">{{ b.share_of_bound|pct }}</td></tr>{% endif %}
+    </table>
+  </div>
+</section>
+
+{% if r.peak_risk and r.annual_shown %}
+<h2>Если час пика региона окажется другим</h2>
+<div class="table-wrap"><table>
+  <tr><td>как в расчёте — по максимуму объекта</td><td class="n">{{ b.annual_mean|rub }}</td></tr>
+  <tr><td>любой из плановых часов, в среднем</td><td class="n">{{ r.peak_risk.annual_mean|rub }}</td></tr>
+  <tr><td>каждый раз самый неудачный час</td><td class="n">{{ r.peak_risk.annual_worst|rub }}</td></tr>
+</table></div>
+{% endif %}
+
+<h2>На чём основан расчёт</h2>
+<table class="basis">
+  {% for p in passport %}<tr class="{{ p.kind or '' }}"><th scope="row"><span>{{ p.level }}</span></th><td>{{ p.text }}</td></tr>{% endfor %}
+</table>
+
+<h2>Из чего складывается экономия за {{ r.n_days }} сут.</h2>
+<div class="table-wrap"><table>
+  {% for part in r.parts %}<tr><td>{{ part.label }}</td><td class="n">{{ part.value|rub }}</td></tr>{% endfor %}
+  <tr class="total"><td>Итого</td><td class="n">{{ b.net_savings|rub }}</td></tr>
+</table></div>
+
+{% if r.profile %}
+<h2>Средние рабочие сутки</h2>
+<div class="chart short" id="profile-chart"></div>
+<script type="application/json" class="chart-data" data-kind="profile">{{ {'load': r.profile.load, 'grid': r.profile.grid, 'window': r.tariff.window}|tojson }}</script>
+{% endif %}
+
+{% if r.monthly|length > 1 %}
+<h2>По месяцам</h2>
+<div class="table-wrap"><table>
+  <thead><tr><th>Месяц</th><th class="n">Суток</th><th class="n">Снижение счёта</th></tr></thead>
+  {% for mo in r.monthly %}<tr><td>{{ mo.month|month_ru }}{{ ' (неполный)' if mo.partial }}</td><td class="n">{{ mo.days }}</td><td class="n">{{ mo.gross_savings|rub }}</td></tr>{% endfor %}
+</table></div>
+{% endif %}
+
+{% if whatif %}
+<h2>Что будет, если…</h2>
+{% with points = whatif, complete = true %}{% include "_whatif.html" %}{% endwith %}
+{% endif %}
+
+<h2>Параметры</h2>
+<div class="table-wrap"><table>
+  <tr><td>Приборы</td><td>{{ (params.meters or [])|join(', ') }}</td></tr>
+  <tr><td>Часы пиковой нагрузки</td><td>{{ r.tariff.window[0] }}–{{ r.tariff.window[1] }} ч, будни</td></tr>
+  <tr><td>Прогноз для плана заряда</td><td>{{ r.best_source|source_ru }}</td></tr>
+  {% for f in tariff_fields(r.tariff.category) if params[f] not in (none, '') %}
+    <tr><td>{{ TARIFF_LABELS[f]|capitalize }}</td><td>{{ params[f]|num(2) }}{{ ' (пример)' if TARIFF_LABELS[f] in (r.tariff.example_fields or []) }}</td></tr>
+  {% endfor %}
+</table></div>
+{% endblock %}

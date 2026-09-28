@@ -1,0 +1,31 @@
+{% from "_term.html" import term %}
+{% set p = fin.params %}
+<h2 class="plate-title">{{ icon('report-money', 18) }}Вложение за срок службы
+  <span class="right">дисконтированные потоки, пересчёт сразу</span></h2>
+<form class="fin-form" data-finance="/economics/finance?u={{ u }}">
+  <label>Ставка дисконтирования
+    <span class="input-unit"><input name="discount" value="{{ (p.discount * 100)|num(1) }}" inputmode="decimal"><span>% в год</span></span></label>
+  <label>Срок службы
+    <span class="input-unit"><input name="life" value="{{ p.life }}" inputmode="numeric"><span>лет</span></span></label>
+  <label>Рост тарифов
+    <span class="input-unit"><input name="growth" value="{{ (p.growth * 100)|num(1) }}" inputmode="decimal"><span>% в год</span></span></label>
+</form>
+<div class="fin-grid">
+  <div><span class="figure-label">NPV {{ term('npv') }}</span>
+    <span class="figure-value {{ 'neg' if fin.mean.npv < 0 }}">{{ fin.mean.npv|rub }}</span>
+    <span class="figure-note">разброс: {{ fin.lo.npv|rub_between(fin.hi.npv) }}</span></div>
+  <div><span class="figure-label">IRR {{ term('irr') }}</span>
+    <span class="figure-value">{{ fin.mean.irr|pct(1) if fin.mean.irr is not none else '—' }}</span>
+    <span class="figure-note">{% if fin.mean.irr is none %}за {{ p.life }} лет вложения не возвращаются
+      {% elif fin.mean.irr > p.discount %}выше ставки дисконтирования — вложение выгодно
+      {% else %}ниже ставки дисконтирования — деньги выгоднее держать под эту ставку{% endif %}</span></div>
+  <div><span class="figure-label">Окупится с учётом стоимости денег</span>
+    <span class="figure-value">{{ fin.mean.payback|years if fin.mean.payback else 'нет' }}</span>
+    <span class="figure-note">{% if not fin.mean.payback %}за срок службы {{ p.life }} лет не окупается
+      {% else %}простая окупаемость короче: она не учитывает ставку{% endif %}</span></div>
+</div>
+<div class="chart short" id="cashflow-chart"></div>
+<script type="application/json" class="chart-data" data-kind="cashflow">{{ {'mean': fin.mean.cumulative, 'lo': fin.lo.cumulative, 'hi': fin.hi.cumulative, 'payback': fin.mean.payback}|tojson }}</script>
+<p class="caption" style="margin:8px 0 0">Накопленный дисконтированный поток по годам: ниже нуля —
+   вложения ещё не вернулись. Полоса — разброс годовой экономии. Первый год — оценка
+   расчёта, дальше экономия растёт вместе с тарифами.</p>

@@ -1,93 +1,120 @@
 {% extends "base.html" %}
-{% from "_term.html" import term %}
+{% from "_term.html" import term, plural %}
 {% block title %}Данные — Smart Grid{% endblock %}
 {% block content %}
 
 {% if state == "empty" %}
-  <h1>Сколько сэкономит накопитель на вашем объекте</h1>
-  <p class="lead">Проверим выгрузку учёта и покажем, где в ней ошибки. Посчитаем экономию
-     на оплате мощности при ваших ставках. Покажем срок окупаемости и насколько можно
-     доверять цифре.</p>
+  {# Типичные будни и выходные по часам — подложка зоны загрузки: так выглядит
+     неделя нагрузки, которую приложение построит из вашего файла. #}
+  {% set shape = [0.10,0.08,0.07,0.07,0.08,0.12,0.22,0.40,0.62,0.74,0.78,0.80,0.76,0.78,0.80,0.78,0.74,0.66,0.56,0.44,0.32,0.24,0.17,0.12] %}
+  <div class="intro">
+    <div>
+      <h1>Сколько сэкономит накопитель на вашем объекте</h1>
+      <p class="lead">Загрузите почасовую выгрузку учёта. Приложение проверит её, посчитает
+         экономию на оплате мощности по вашим ставкам и покажет, насколько цифре можно доверять.</p>
+      <ol class="how">
+        <li><span class="n">1</span><div><b>Проверим выгрузку</b>
+          <span>Пропуски, зависшие счётчики, ошибки знака и единиц.</span></div></li>
+        <li><span class="n">2</span><div><b>Посчитаем экономию</b>
+          <span>По вашей ценовой категории, ставкам и часам пика.</span></div></li>
+        <li><span class="n">3</span><div><b>Покажем окупаемость и риски</b>
+          <span>Срок, NPV, разброс и что будет, если условия изменятся.</span></div></li>
+      </ol>
+    </div>
 
-  <div class="welcome">
-    <form action="/data/upload" method="post" enctype="multipart/form-data" class="dropzone"
-          id="dropzone">
-      <svg width="34" height="40" viewBox="0 0 14 16" aria-hidden="true"><path d="M2 1h6l4 4v10H2z" fill="none" stroke="currentColor" stroke-width=".9"/><path d="M8 1v4h4" fill="none" stroke="currentColor" stroke-width=".9"/></svg>
-      <b>Перетащите файл CSV сюда</b>
-      <span class="or">или</span>
-      <label class="button primary">
-        Выбрать файл
-        <input type="file" name="file" accept=".csv,.txt" required hidden data-autosubmit>
-      </label>
-    </form>
-
-    <section class="panel">
-      <h3>Что понадобится</h3>
-      <ul>
-        <li>Выгрузка из АСКУЭ в CSV: шаг 15, 30 или 60 минут, лучше за год, минимум за
-            шесть недель.</li>
-        <li>Ставки из счёта сбытовой компании — их можно ввести позже, а пока посмотреть
-            на примерных.</li>
-        <li>Ценовая категория из договора (3–6).</li>
-      </ul>
-      <form action="/data/demo" method="post" class="actions">
-        <button class="button" type="submit">Посмотреть на примере</button>
+    <div>
+      <form action="/data/upload" method="post" enctype="multipart/form-data" class="drop" id="dropzone">
+        <div class="drop-grid" aria-hidden="true">
+          {% for d in range(7) %}{% for h in range(24) %}<i style="--c:{{ h }};--a:{{ ((shape[h] * (0.34 if d < 5 else 0.12)) + 0.04)|round(3) }}"></i>{% endfor %}{% endfor %}
+        </div>
+        <div class="drop-body">
+          {{ icon('file-upload', 30) }}
+          <b>Перетащите выгрузку сюда</b>
+          <span class="muted">CSV или Excel (.xlsx), шаг 5–60 минут, до 50 МБ. Лучше за год,
+            минимум — три недели.</span>
+          <label class="btn primary">{{ icon('file-spreadsheet', 18) }}Выбрать файл
+            <input type="file" name="file" accept=".csv,.txt,.xlsx" required hidden data-autosubmit></label>
+        </div>
       </form>
-      <p class="note">Пример — шесть фидеров за 2025 год. В данные специально добавлены
-         ошибки: увидите, как приложение их находит.</p>
-    </section>
+
+      <section class="plate demo-plate">
+        <h2 class="plate-title">{{ icon('building-factory-2', 18) }}Нет файла под рукой?</h2>
+        <p>Откройте пример: шесть фидеров за 2025 год. В данные специально добавлены ошибки —
+           увидите, как приложение их находит.</p>
+        <form action="/data/demo" method="post" class="actions" style="margin-top:8px">
+          <button class="btn" type="submit">{{ icon('eye', 18) }}Посмотреть на примере</button>
+        </form>
+        <h3 style="margin-top:18px">Что понадобится для своего расчёта</h3>
+        <ul>
+          <li>Выгрузка из АСКУЭ или от сбытовой компании.</li>
+          <li>Ставки из счёта — можно ввести позже, а пока посмотреть на примерных.</li>
+          <li>Ценовая категория из договора (3–6).</li>
+        </ul>
+      </section>
+    </div>
   </div>
 
 {% elif state == "parse" %}
   {% set f = sniff.format %}
-  {% set first_time = sniff.preview[1][sniff.columns.index(f.timestamp_col)] if sniff.preview|length > 1 else '' %}
+  {% set time_idx = sniff.columns.index(f.timestamp_col) if f.timestamp_col in sniff.columns else 0 %}
+  {% set first_time = sniff.preview[1][time_idx] if sniff.preview|length > 1 else '' %}
+  {% set m = f.interval_minutes or 30 %}
+  {% set t_end = ('10:%02d' % m) if m < 60 else '11:00' %}
   <h1>Проверьте, правильно ли мы прочитали файл</h1>
   <p class="lead">Формат мы определили сами. Осталось ответить на два вопроса — по цифрам
-     их не угадать.</p>
+     их не угадать. Можно отвечать клавишами <kbd>1</kbd>–<kbd>4</kbd>.</p>
 
-  <form action="/data/read?u={{ u }}" method="post">
-    <section class="panel">
+  <form action="/data/read?u={{ u }}" method="post" id="parse-form">
+    <section class="plate">
       <div class="question">
-        <p>Что означают числа в таблице? {{ term('units') }}</p>
+        <div class="q">Что означают числа в таблице? {{ term("units") }}</div>
         <div class="choices">
-          <label class="choice"><input type="radio" name="unit" value="kW" required>
-            <b>Мощность, кВт</b>
-            <span>средняя за {{ f.interval_minutes or '…' }} минут
+          <label class="choice"><input type="radio" name="unit" value="kW" required data-key="1"
+                 {% if f.unit == 'kW' %}checked{% endif %}>
+            <b><i class="lamp"></i>Мощность, кВт</b>
+            <span>средняя за {{ f.interval_minutes or '…' }} мин
               {%- if units %}. Тогда за {{ units.day|dmy }} — {{ units.kw_day|kwh }},
-              пик {{ units.kw_peak|kwh }} за час{% endif %}</span></label>
-          <label class="choice"><input type="radio" name="unit" value="kWh">
-            <b>Энергия, кВт·ч</b>
-            <span>израсходовано за {{ f.interval_minutes or '…' }} минут
+              пик {{ units.kw_peak|kwh }} за час{% endif %}</span><kbd>1</kbd></label>
+          <label class="choice"><input type="radio" name="unit" value="kWh" data-key="2"
+                 {% if f.unit == 'kWh' %}checked{% endif %}>
+            <b><i class="lamp"></i>Энергия, кВт·ч</b>
+            <span>израсходовано за {{ f.interval_minutes or '…' }} мин
               {%- if units %}. Тогда за {{ units.day|dmy }} — {{ units.kwh_day|kwh }},
-              пик {{ units.kwh_peak|kwh }} за час{% endif %}</span></label>
+              пик {{ units.kwh_peak|kwh }} за час{% endif %}</span><kbd>2</kbd></label>
         </div>
-        {% if units %}<p class="callout">Сверьте с суточным расходом из АСКУЭ или счёта:
-          неверный ответ исказит все рубли
-          {% if f.interval_minutes == 30 %}вдвое{% else %}в {{ 60 // f.interval_minutes }} раза{% endif %}.</p>{% endif %}
-      </div>
-
-      <div class="question">
-        <p>Строка «{{ first_time }}» — это какой интервал?</p>
-        <div class="choices">
-          <label class="choice"><input type="radio" name="stamp_at" value="end" required>
-            <b>Время конца интервала</b>
-            <span>«10:30» — это расход с 10:00 до 10:30</span></label>
-          <label class="choice"><input type="radio" name="stamp_at" value="start">
-            <b>Время начала интервала</b>
-            <span>«10:30» — это расход с 10:30 до 11:00</span></label>
-        </div>
-        {% if first_time.endswith(':30') or first_time.endswith(':15') %}
-          <p class="callout info">Файл начинается с {{ first_time[-5:] }}, а не с 00:00 —
-             обычно так пишут время конца интервала.</p>
+        {% if units and f.interval_minutes and f.interval_minutes < 60 %}
+          {% set times = {30: 'вдвое', 15: 'в 4 раза', 10: 'в 6 раз', 5: 'в 12 раз'} %}
+          <p class="callout">{{ icon('alert-triangle', 18) }}<span>Сверьте с суточным расходом из АСКУЭ
+            или счёта: неверный ответ исказит все рубли {{ times.get(f.interval_minutes, 'в несколько раз') }}.</span></p>
         {% endif %}
       </div>
 
+      <div class="question">
+        <div class="q">Строка «{{ first_time }}» — это какой интервал?</div>
+        <div class="choices">
+          <label class="choice"><input type="radio" name="stamp_at" value="end" required data-key="3"
+                 {% if f.stamp_at == 'end' %}checked{% endif %}>
+            <b><i class="lamp"></i>Время конца интервала</b>
+            <span>«{{ t_end }}» — это расход с 10:00 до {{ t_end }}</span><kbd>3</kbd></label>
+          <label class="choice"><input type="radio" name="stamp_at" value="start" data-key="4"
+                 {% if f.stamp_at == 'start' %}checked{% endif %}>
+            <b><i class="lamp"></i>Время начала интервала</b>
+            <span>«10:00» — это расход с 10:00 до {{ t_end }}</span><kbd>4</kbd></label>
+        </div>
+        {% if first_time.endswith(':30') or first_time.endswith(':15') or first_time.endswith('24:00') %}
+          <p class="callout info">{{ icon('info-circle', 18) }}<span>Файл начинается с {{ first_time[-5:] }}, а не с 00:00 —
+             обычно так пишут время конца интервала.</span></p>
+        {% endif %}
+      </div>
+
+      {% for note in sniff.notes %}<p class="callout info">{{ icon('info-circle', 18) }}<span>{{ note }}</span></p>{% endfor %}
+
       <details class="fold">
-        <summary>Определено автоматически: разделитель «{{ '⇥' if f.sep == '\t' else f.sep }}»,
+        <summary>{{ icon('chevron-right', 16) }}<span>Определено автоматически: разделитель «{{ '⇥' if f.sep == '\t' else f.sep }}»,
           десятичная {{ 'запятая' if f.decimal == ',' else 'точка' }},
           {{ 'Windows-1251' if f.encoding == 'cp1251' else 'UTF-8' }},
           шаг {{ f.interval_minutes or '?' }} мин, {{ 'по столбцу на прибор' if f.wide else 'по строке на значение' }}.
-          <b>Изменить</b></summary>
+          <b>Изменить</b></span></summary>
         <div class="grid-fields">
           <label>Столбец времени
             <select name="timestamp_col">
@@ -100,7 +127,7 @@
             </select></label>
           <label>Шаг
             <select name="interval_minutes">
-              {% for m in [15, 30, 60] %}<option value="{{ m }}" {% if f.interval_minutes == m %}selected{% endif %}>{{ m }} мин</option>{% endfor %}
+              {% for mm in [5, 10, 15, 30, 60] %}<option value="{{ mm }}" {% if f.interval_minutes == mm %}selected{% endif %}>{{ mm }} мин</option>{% endfor %}
             </select></label>
           <label>Разделитель столбцов
             <select name="sep">
@@ -126,29 +153,28 @@
           {% endif %}
         </div>
         {% if f.wide and sniff.columns|length > 2 %}
-          <p class="field-label"><b>Какие столбцы — не приборы?</b>
-            {% if f.exclude_columns %}«{{ f.exclude_columns|join('», «') }}» мы уже исключили.{% endif %}</p>
-          {% for c in sniff.columns if c != f.timestamp_col %}
+          <p style="margin:6px 0"><b>Какие столбцы — не приборы?</b>
+            {% if f.exclude_columns %}<span class="muted">«{{ f.exclude_columns|join('», «') }}» мы уже исключили.</span>{% endif %}</p>
+          {% for c in sniff.columns if c not in (f.timestamp_col, f.time_col) %}
             <label class="check"><input type="checkbox" name="exclude_columns" value="{{ c }}"
               {% if c in f.exclude_columns %}checked{% endif %}> {{ c }}</label>
           {% endfor %}
         {% endif %}
       </details>
 
-      <div class="actions"><button class="button primary" type="submit">Прочитать и проверить данные</button></div>
+      <div class="actions"><button class="btn primary" type="submit">{{ icon('list-check', 18) }}Прочитать и проверить данные</button></div>
     </section>
   </form>
 
   <h3>Начало файла</h3>
-  <p class="caption">Подсвечены столбец времени и приборы, зачёркнуты исключённые столбцы.</p>
-  {% set time_idx = sniff.columns.index(f.timestamp_col) %}
+  <p class="caption">Синим подсвечено время, зелёным — приборы, зачёркнуты исключённые столбцы.</p>
   <div class="table-wrap">
     <table class="raw">
       {% for row in sniff.preview[:8] %}
         <tr{% if loop.first %} class="head"{% endif %}>
           {% for cell in row[:9] %}
             {% set col = sniff.columns[loop.index0] if loop.index0 < sniff.columns|length else '' %}
-            <td class="{{ 'col-time' if loop.index0 == time_idx else 'col-excluded' if col in f.exclude_columns else 'col-meter' if f.wide }}">{{ cell }}</td>
+            <td class="{{ 'col-time' if col in (f.timestamp_col, f.time_col) else 'col-excluded' if col in f.exclude_columns else 'col-meter' if f.wide }}">{{ cell }}</td>
           {% endfor %}
         </tr>
       {% endfor %}
@@ -156,14 +182,19 @@
   </div>
 
 {% else %}
-  <h1>{% if summary.ok == summary.total %}Можно считать все {{ summary.total }} приборов
-      {% else %}Можно считать {{ summary.ok }} {{ 'прибор' if summary.ok == 1 else 'прибора' if summary.ok in [2, 3, 4] else 'приборов' }} из {{ summary.total }}{% endif %}</h1>
+  {% set word = plural(summary.ok, 'прибор', 'прибора', 'приборов') %}
+  <div class="block-head">
+    <h1>{% if summary.total == 1 %}{{ 'Прибор можно считать' if summary.ok else 'Прибор нужно проверить' }}
+        {% elif summary.ok == summary.total %}Можно считать все {{ summary.total }} {{ plural(summary.total, 'прибор', 'прибора', 'приборов') }}
+        {% else %}Можно считать {{ summary.ok }} {{ word }} из {{ summary.total }}{% endif %}</h1>
+  </div>
   <p class="lead">{% if summary.ok < summary.total %}У остальных есть замечания — их можно
      посмотреть ниже и всё равно включить в расчёт, если вы знаете причину.
      {% else %}Ошибок учёта не найдено.{% endif %}</p>
   <div class="actions" style="margin-top:0">
-    <a class="button primary" href="/economics?u={{ u }}">Посчитать экономию</a>
-    <a class="button" href="/data">Загрузить другой файл</a>
+    <a class="btn primary" href="/economics?u={{ u }}">{{ icon('calculator', 18) }}Посчитать экономию</a>
+    <a class="btn" href="/data?u={{ u }}&reparse=1">{{ icon('adjustments-horizontal', 18) }}Изменить, как читать файл</a>
+    <a class="btn" href="/data">{{ icon('replace', 18) }}Загрузить другой файл</a>
   </div>
   {% if meta.skipped_rows %}
     <p class="note" style="margin-top:12px">Пропущено строк без даты: {{ meta.skipped_rows }}
@@ -172,7 +203,7 @@
 
   <section class="block">
     <h2>Приборы</h2>
-    <p class="caption">Нажмите на строку, чтобы увидеть подробности и график прибора.</p>
+    <p class="caption">Нажмите на строку, чтобы увидеть подробности и нагрузку прибора.</p>
     <div class="table-wrap">
       <table class="quality">
         <thead><tr><th>Прибор</th><th>Период</th><th class="n">Есть данные</th><th>Что с данными</th></tr></thead>
@@ -180,23 +211,23 @@
         {% for r in quality %}
           {% set problems = human_problems(r) %}
           <tr class="expandable" data-series="{{ r.series }}" tabindex="0">
-            <td><span class="caret" aria-hidden="true"></span>{{ r.series }}</td>
+            <td><span class="caret" aria-hidden="true">{{ icon('chevron-right', 16) }}</span>{{ r.series }}</td>
             <td>{{ r.start|dmy }}–{{ r.end|dmy }}</td>
             <td class="n">{{ (r.coverage * 100)|num(1) }}&nbsp;%</td>
-            <td>{% if not problems %}<span class="status ok">можно считать</span>
-                {% else %}<span class="status warn">{{ problems[0]|capitalize }}</span>
+            <td>{% if not problems %}<span class="state"><i class="lamp on"></i>можно считать</span>
+                {% else %}<span class="state warn"><i class="lamp warn"></i>{{ problems[0]|capitalize }}</span>
                   {%- if problems|length > 1 %}<span class="muted">; ещё {{ problems[1:]|join('; ') }}</span>{% endif %}{% endif %}</td>
           </tr>
           <tr class="details" hidden>
             <td colspan="4">
               <dl class="facts">
-                <div><dt>Часов без данных</dt><dd>{{ r.missing_hours|num }}</dd></div>
-                <div><dt>Самый длинный пропуск</dt><dd>{{ r.longest_gap_hours|num }}&nbsp;ч</dd></div>
+                <div><dt>Часов без данных</dt><dd class="{{ 'bad' if r.missing_hours }}">{{ r.missing_hours|num }}</dd></div>
+                <div><dt>Самый длинный пропуск</dt><dd class="{{ 'bad' if r.longest_gap_hours > 24 }}">{{ r.longest_gap_hours|num }}&nbsp;ч</dd></div>
                 <div><dt>Часы с частью интервалов</dt><dd>{{ r.incomplete_hours|num }}</dd></div>
                 <div><dt>Повторы строк (убраны)</dt><dd>{{ r.duplicate_rows|num }}</dd></div>
-                <div><dt>Отрицательные значения</dt><dd>{{ r.negative_values|num }}</dd></div>
+                <div><dt>Отрицательные значения</dt><dd class="{{ 'bad' if r.negative_values }}">{{ r.negative_values|num }}</dd></div>
                 <div><dt>Нули в начале — прибор ещё не подключён</dt><dd>{{ r.leading_zero_hours|num }}&nbsp;ч</dd></div>
-                <div><dt>Застывшие показания</dt><dd>{{ r.flat_runs_over_limit|num }}&nbsp;раз</dd></div>
+                <div><dt>Застывшие показания</dt><dd class="{{ 'bad' if r.flat_runs_over_limit }}">{{ r.flat_runs_over_limit|num }}&nbsp;раз</dd></div>
                 <div><dt>Необычные часы — на расчёт не влияют</dt><dd>{{ r.outliers|num }}</dd></div>
               </dl>
             </td>
@@ -216,19 +247,31 @@
         <button type="button" data-days="0">весь период</button>
       </div>
     </div>
-    <p class="legend"><span><i style="background:var(--ink)"></i>расход за час, кВт·ч</span>
-      <span><i class="box" style="background:rgba(180,35,24,.25)"></i>проблемный участок</span></p>
+    <p class="caption">Весь период одним ковром: столбец — сутки, строка — час, чем темнее, тем
+       больше расход. Красным отмечены проблемные часы. Нажмите на сутки, чтобы увидеть их ниже.</p>
+    <div class="carpet-wrap" id="meter-carpet">
+      <div class="carpet-hours" aria-hidden="true"><span>0 ч</span><span>6</span><span>12</span><span>18</span><span>24</span></div>
+      <canvas role="img" aria-label="Расход по часам и суткам"></canvas>
+      <div class="carpet-axis" aria-hidden="true"></div>
+      <div class="carpet-legend"><span>меньше</span><span class="scale"></span><span>больше</span>
+        <span><i class="bad"></i> проблемный час</span></div>
+    </div>
     <div class="chart" id="meter-chart" data-u="{{ u }}" data-series="{{ quality[0].series }}"></div>
     <p class="chart-note" id="meter-note"></p>
   </section>
 
   <section class="block">
     <h2>Расход по месяцам</h2>
-    <p class="caption">Все приборы вместе — сверьте со счётами.</p>
+    <p class="caption">Все приборы вместе. Впишите расход из счетов — приложение покажет
+       расхождение. {{ term('bill_check') }}</p>
     <div class="table-wrap narrow">
-      <table>
-        <thead><tr><th>Месяц</th><th class="n">Расход, кВт·ч</th></tr></thead>
-        <tbody>{% for m in monthly %}<tr><td>{{ m.month|month_ru }}</td><td class="n">{{ m.kwh|num }}</td></tr>{% endfor %}</tbody>
+      <table class="bill-check" data-u="{{ u }}">
+        <thead><tr><th>Месяц</th><th class="n">По выгрузке, кВт·ч</th><th class="n">По счёту, кВт·ч</th><th class="n">Расхождение</th></tr></thead>
+        <tbody>{% for mo in monthly %}
+          <tr data-month="{{ mo.month }}" data-kwh="{{ mo.kwh }}"><td>{{ mo.month|month_ru }}</td><td class="n">{{ mo.kwh|num }}</td>
+            <td class="n"><input class="bill" inputmode="decimal" aria-label="Расход по счёту за {{ mo.month|month_ru }}"></td>
+            <td class="n diff">—</td></tr>
+        {% endfor %}</tbody>
       </table>
     </div>
   </section>

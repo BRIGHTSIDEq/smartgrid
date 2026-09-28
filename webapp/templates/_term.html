@@ -1,3 +1,7 @@
 {%- macro term(key, label='Что это?') -%}
-<details class="term"><summary>{{ label }}</summary><div>{{ TERMS[key] }}</div></details>
+<details class="term"><summary>{{ icon('help-circle', 15) }}{{ label }}</summary><div>{{ TERMS[key] }}</div></details>
+{%- endmacro -%}
+{%- macro plural(n, one, few, many) -%}
+{%- set n = n|int -%}
+{{- one if n % 10 == 1 and n % 100 != 11 else few if 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14 else many -}}
 {%- endmacro -%}

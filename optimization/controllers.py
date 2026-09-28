@@ -230,14 +230,22 @@ def perfect_foresight_ru(actual: np.ndarray, timestamps, tariff: RuTariff,
 def evaluate_schedule(grid: np.ndarray, charged: np.ndarray, baseline: np.ndarray,
                       timestamps, tariff: RuTariff, battery: Battery,
                       plan: Optional[np.ndarray] = None,
-                      holidays: Optional[Sequence[bool]] = None) -> Dict[str, float]:
+                      holidays: Optional[Sequence[bool]] = None,
+                      baseline_plan: Optional[np.ndarray] = None) -> Dict[str, float]:
     """
     Экономия по счёту: без накопителя минус с накопителем, минус износ и O&M.
 
     Час пика субъекта в обоих счетах определяется по нагрузке без накопителя:
     один потребитель не сдвигает пик региона.
+
+    План для категорий 5 и 6 у двух счетов разный: без накопителя потребитель
+    заявил бы сам прогноз (baseline_plan), с накопителем — прогноз вместе с
+    расписанием заряда (plan). Прежде оба счёта брали plan, и при идеальном
+    прогнозе «без накопителя» появлялись отклонения, которых не было бы, —
+    накопителю засчитывалась их несуществующая экономия.
     """
-    base_bill = monthly_bill(baseline, timestamps, tariff, plan=plan,
+    base_bill = monthly_bill(baseline, timestamps, tariff,
+                             plan=plan if baseline_plan is None else baseline_plan,
                              region_load=baseline, holidays=holidays)
     batt_bill = monthly_bill(grid, timestamps, tariff, plan=plan,
                              region_load=baseline, holidays=holidays)

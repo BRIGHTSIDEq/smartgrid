@@ -5,11 +5,11 @@
 <h1>{{ meta.mode|mode_ru|capitalize }} от {{ name[6:8] }}.{{ name[4:6] }}.{{ name[:4] }}</h1>
 <p class="lead">
   {{ (meta.dataset or 'synthetic')|dataset_ru|capitalize }}, повтор {{ meta.seed }}.
-  {% if meta.status == 'completed' %}<span class="status ok">выполнен</span>
-  {% elif meta.status == 'partial' %}<span class="status warn">частично</span>
-  {% elif meta.status == 'failed' %}<span class="status err">ошибка</span>
+  {% if meta.status == 'completed' %}<span class="state"><i class="lamp on"></i>выполнен</span>
+  {% elif meta.status == 'partial' %}<span class="state warn"><i class="lamp warn"></i>частично</span>
+  {% elif meta.status == 'failed' %}<span class="state err"><i class="lamp err"></i>ошибка</span>
   {% elif (meta.status or 'unknown') == 'unknown' %}<span class="muted">статус не записан</span>
-            {% else %}<span class="status idle">идёт или прерван</span>{% endif %}
+            {% else %}<span class="state"><i class="lamp"></i>идёт или прерван</span>{% endif %}
   {% if meta.runtime_sec %} · {{ (meta.runtime_sec / 60)|num(0) }}&nbsp;мин{% endif %}
 </p>
 {% for f in (meta.failed_models or []) + (meta.failed_blocks or []) %}
@@ -79,6 +79,6 @@
 {% endif %}
 
 {% if has_dashboard %}
-  <div class="actions"><a class="button" href="/models/{{ name }}/dashboard" target="_blank">Открыть полную сводку прогона</a></div>
+  <div class="actions"><a class="btn" href="/models/{{ name }}/dashboard" target="_blank">Открыть полную сводку прогона</a></div>
 {% endif %}
 {% endblock %}

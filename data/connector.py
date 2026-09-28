@@ -46,6 +46,41 @@ class ExportFormat:
     encoding: str = "utf-8-sig"
     dayfirst: bool = True
     exclude_columns: List[str] = field(default_factory=list)
+    time_col: Optional[str] = None  # время отдельным столбцом («Дата» + «Время»)
+    skip_rows: int = 0              # строки шапки отчёта до заголовка таблицы
+
+
+_ISO = r"^\d{4}-\d{1,2}-\d{1,2}"
+_MIDNIGHT = r"\b24:00(?::00)?$"
+
+
+def parse_stamps(values: pd.Series, dayfirst: bool = True) -> pd.Series:
+    """
+    Дата и время выгрузки → datetime; неразобранное — NaT.
+
+    Три ловушки реальных выгрузок:
+      * ISO-даты («2025-03-01 00:00») с dayfirst=True pandas разбирает по
+        формату, угаданному из первой строки с днём ≤ 12, и переставляет день
+        и месяц во всём столбце — поэтому ISO разбирается отдельно, строго;
+      * «24:00» — конец суток, то есть 00:00 следующих;
+      * смещение пояса («+03:00») отбрасывается: выгрузка АСКУЭ записана в
+        местном времени, и часы пика задаются в нём же.
+    """
+    if pd.api.types.is_datetime64_any_dtype(values):
+        return values.dt.tz_localize(None) if getattr(values.dt, "tz", None) else values
+    s = values.astype(str).str.strip()
+    s = s.str.replace(r"(?<=\d)T(?=\d)", " ", regex=True)
+    s = s.str.replace(r"\s*(Z|[+-]\d{2}:?\d{2})$", "", regex=True)
+    midnight = s.str.contains(_MIDNIGHT, regex=True)
+    s = s.str.replace(_MIDNIGHT, "00:00", regex=True)
+    iso = s.str.match(_ISO)
+    out = pd.Series(pd.NaT, index=s.index, dtype="datetime64[ns]")
+    if iso.any():
+        out[iso] = pd.to_datetime(s[iso], format="ISO8601", errors="coerce")
+    if (~iso).any():
+        out[~iso] = pd.to_datetime(s[~iso], dayfirst=dayfirst, errors="coerce")
+    out[midnight] = out[midnight] + pd.Timedelta(days=1)
+    return out
 
 
 def _infer_interval(stamps: pd.Series) -> int:
@@ -72,10 +107,20 @@ def read_meter_export(path_or_frame, fmt: Optional[ExportFormat] = None) -> pd.D
         raw = path_or_frame.copy()
     else:
         raw = pd.read_csv(path_or_frame, sep=fmt.sep, decimal=fmt.decimal,
-                          encoding=fmt.encoding)
+                          encoding=fmt.encoding, skiprows=fmt.skip_rows)
     if fmt.timestamp_col not in raw.columns:
         raise ValueError(f"Нет колонки времени {fmt.timestamp_col!r}")
-    raw[fmt.timestamp_col] = pd.to_datetime(raw[fmt.timestamp_col], dayfirst=fmt.dayfirst)
+    if fmt.time_col:
+        if fmt.time_col not in raw.columns:
+            raise ValueError(f"Нет колонки времени {fmt.time_col!r}")
+        raw[fmt.timestamp_col] = (raw[fmt.timestamp_col].astype(str).str.strip() + " "
+                                  + raw[fmt.time_col].astype(str).str.strip())
+        raw = raw.drop(columns=[fmt.time_col])
+    stamps = parse_stamps(raw[fmt.timestamp_col], fmt.dayfirst)
+    if stamps.isna().any():
+        bad = raw.loc[stamps.isna(), fmt.timestamp_col].astype(str).iloc[0]
+        raise ValueError(f"Не удалось разобрать дату и время: {bad!r}")
+    raw[fmt.timestamp_col] = stamps
 
     if fmt.wide:
         value_cols = [c for c in raw.columns
@@ -113,6 +158,14 @@ def read_meter_export(path_or_frame, fmt: Optional[ExportFormat] = None) -> pd.D
         "duplicates": long.groupby(keys)["repeat"].sum(),
     }).reset_index().rename(columns={"hour": "timestamp"})
     hourly["expected_intervals"] = 60 // minutes
+    # Больше значений в часе, чем допускает шаг, — шаг указан неверно (5 мин
+    # вместо 15): энергия часа завысилась бы в разы, а отчёт о качестве этого
+    # не заметил бы. Повторы строк уже исключены, так что это не они.
+    extra = hourly["intervals"] > hourly["expected_intervals"]
+    if extra.any():
+        worst = int(hourly.loc[extra, "intervals"].max())
+        raise ValueError(f"В часе встречается {worst} значений, а при шаге {minutes} мин их "
+                         f"не больше {60 // minutes} — проверьте шаг выгрузки")
     return hourly
 
 

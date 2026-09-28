@@ -33,7 +33,7 @@ class Job:
     id: str
     key: str
     title: str
-    status: str = "running"          # running | done | error
+    status: str = "running"          # running | done | stopped | error
     progress: float = 0.0
     stage: str = ""
     result: Any = None
@@ -62,6 +62,8 @@ class ImmediateExecutor(Executor):
 
 
 class JobRunner:
+    KEEP = 40                          # сколько задач держать в памяти (HTML — сотни КБ)
+
     def __init__(self, executor: Optional[Executor] = None):
         self.executor = executor or ThreadPoolExecutor(max_workers=1)
         self.jobs: Dict[str, Job] = {}
@@ -74,24 +76,27 @@ class JobRunner:
         Запускает fn(job) или возвращает уже посчитанную задачу с тем же ключом.
 
         fn сама обновляет job.progress и job.stage по ходу работы.
-        Задача с ошибкой не кэшируется: повтор запускает расчёт заново.
+        Задача с ошибкой и остановленная не кэшируются: повтор запускает
+        расчёт заново. Прежде остановленный «что если» возвращался из кэша
+        как готовый, и пересчитать его было нельзя.
         """
         with self._lock:
             known = self.by_key.get(key)
-            if known and self.jobs[known].status in ("running", "done"):
+            if known and known in self.jobs and self.jobs[known].status in ("running", "done"):
                 return self.jobs[known]
             job = Job(id=uuid.uuid4().hex[:12], key=key, title=title)
             self.jobs[job.id] = job
             self.by_key[key] = job.id
+            self._trim()
 
         def run():
             try:
                 job.result = fn(job)
                 job.progress = 1.0
-                job.status = "done"
+                job.status = "stopped" if job.stop.is_set() else "done"
             except BaseException as exc:      # noqa: BLE001
                 job.error = exc
-                job.status = "error"
+                job.status = "stopped" if job.stop.is_set() else "error"
             finally:
                 job.finished = time.time()
 
@@ -100,3 +105,11 @@ class JobRunner:
 
     def get(self, job_id: str) -> Optional[Job]:
         return self.jobs.get(job_id)
+
+    def _trim(self) -> None:
+        """Старые завершённые задачи уходят из памяти; идущие не трогаются."""
+        done = [j for j in self.jobs.values() if j.status != "running"]
+        for job in sorted(done, key=lambda j: j.started)[:max(0, len(self.jobs) - self.KEEP)]:
+            self.jobs.pop(job.id, None)
+            if self.by_key.get(job.key) == job.id:
+                self.by_key.pop(job.key, None)

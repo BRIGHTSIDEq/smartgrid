@@ -172,3 +172,30 @@ def test_short_period_still_has_an_interval():
     """На четырёх сутках интервал не схлопывается в точку."""
     r = block_bootstrap_annual(pd.Series([10.0, 50.0, 20.0, 80.0]), n_boot=500)
     assert r["annual_lo"] < r["annual_hi"]
+
+
+@pytest.mark.parametrize("category", [5, 6])
+def test_perfect_forecast_saves_no_deviation_cost(category):
+    """
+    При идеальном прогнозе отклонений от плана нет ни с накопителем, ни без.
+
+    Прежде счёт «без накопителя» брал план, в который уже было вшито
+    расписание накопителя, и накопителю засчитывалась экономия на
+    отклонениях, которых без него не было бы.
+    """
+    frame = _frame()
+    tariff = RuTariff(category=category, deviation_up_rate=2.0, deviation_down_rate=2.0)
+    battery = battery_for_load(frame[ACTUAL_COLUMN].max())
+    table = evaluate_sources(frame, tariff, battery, n_boot=50)["summary"].set_index("source")
+    assert table.loc[ORACLE, "saved_deviation_cost"] == pytest.approx(0.0, abs=1e-6)
+
+
+def test_monthly_savings_add_up_to_the_total():
+    frame = _frame()
+    tariff = RuTariff(category=6)
+    battery = battery_for_load(frame[ACTUAL_COLUMN].max())
+    res = evaluate_sources(frame, tariff, battery, n_boot=50)
+    table = res["summary"].set_index("source")
+    monthly = res["monthly"].groupby("source")["gross_savings"].sum()
+    for source in table.index:
+        assert monthly[source] == pytest.approx(table.loc[source, "gross_savings"], rel=1e-6, abs=1e-3)

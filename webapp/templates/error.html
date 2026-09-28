@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+{% block title %}Ошибка — Smart Grid{% endblock %}
+{% block content %}
+  {% include "_error.html" %}
+  <div class="actions">
+    {% if back %}<a class="button" href="{{ back }}">Вернуться</a>{% endif %}
+    <a class="button" href="/data">К загрузке данных</a>
+  </div>
+{% endblock %}

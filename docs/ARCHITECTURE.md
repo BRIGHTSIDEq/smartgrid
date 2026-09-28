@@ -71,6 +71,7 @@ flowchart LR
 | `utils/client_config.py`, `clients/example.yaml` | Конфигурация клиента: выгрузка, тариф, накопитель |
 | `utils/dashboard.py` | Автономная HTML-сводка каталога прогона |
 | `service/api.py` | REST API: прогноз, экономика, качество данных |
+| `webapp/` | Веб-приложение: `app.py` (маршруты), `services/` (загрузки, разбор формата, экономика, чтение прогонов, фоновые задачи), `templates/`, `static/` (CSS и собственные SVG-графики без внешних библиотек), `demo/` (демонстрационная выгрузка). Экраны и вид — `docs/design/` |
 | `experiments/ecl_protocol.py` | Протокол ECL для сравнения с опубликованными результатами |
 | `experiments/transformer_ablation.py` | Ablation трансформеров, в полном объёме не запускался |
 

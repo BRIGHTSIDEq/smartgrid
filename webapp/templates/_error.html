@@ -1,0 +1,5 @@
+<div class="error-box" role="alert">
+  <p class="error-title">{{ error.title }}</p>
+  {% if error.detail %}<p>{{ error.detail }}</p>{% endif %}
+  {% if error.hint %}<p class="muted">{{ error.hint }}</p>{% endif %}
+</div>

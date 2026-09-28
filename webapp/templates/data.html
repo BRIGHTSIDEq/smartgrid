@@ -1,0 +1,237 @@
+{% extends "base.html" %}
+{% from "_term.html" import term %}
+{% block title %}Данные — Smart Grid{% endblock %}
+{% block content %}
+
+{% if state == "empty" %}
+  <h1>Сколько сэкономит накопитель на вашем объекте</h1>
+  <p class="lead">Проверим выгрузку учёта и покажем, где в ней ошибки. Посчитаем экономию
+     на оплате мощности при ваших ставках. Покажем срок окупаемости и насколько можно
+     доверять цифре.</p>
+
+  <div class="welcome">
+    <form action="/data/upload" method="post" enctype="multipart/form-data" class="dropzone"
+          id="dropzone">
+      <svg width="34" height="40" viewBox="0 0 14 16" aria-hidden="true"><path d="M2 1h6l4 4v10H2z" fill="none" stroke="currentColor" stroke-width=".9"/><path d="M8 1v4h4" fill="none" stroke="currentColor" stroke-width=".9"/></svg>
+      <b>Перетащите файл CSV сюда</b>
+      <span class="or">или</span>
+      <label class="button primary">
+        Выбрать файл
+        <input type="file" name="file" accept=".csv,.txt" required hidden data-autosubmit>
+      </label>
+    </form>
+
+    <section class="panel">
+      <h3>Что понадобится</h3>
+      <ul>
+        <li>Выгрузка из АСКУЭ в CSV: шаг 15, 30 или 60 минут, лучше за год, минимум за
+            шесть недель.</li>
+        <li>Ставки из счёта сбытовой компании — их можно ввести позже, а пока посмотреть
+            на примерных.</li>
+        <li>Ценовая категория из договора (3–6).</li>
+      </ul>
+      <form action="/data/demo" method="post" class="actions">
+        <button class="button" type="submit">Посмотреть на примере</button>
+      </form>
+      <p class="note">Пример — шесть фидеров за 2025 год. В данные специально добавлены
+         ошибки: увидите, как приложение их находит.</p>
+    </section>
+  </div>
+
+{% elif state == "parse" %}
+  {% set f = sniff.format %}
+  {% set first_time = sniff.preview[1][sniff.columns.index(f.timestamp_col)] if sniff.preview|length > 1 else '' %}
+  <h1>Проверьте, правильно ли мы прочитали файл</h1>
+  <p class="lead">Формат мы определили сами. Осталось ответить на два вопроса — по цифрам
+     их не угадать.</p>
+
+  <form action="/data/read?u={{ u }}" method="post">
+    <section class="panel">
+      <div class="question">
+        <p>Что означают числа в таблице? {{ term('units') }}</p>
+        <div class="choices">
+          <label class="choice"><input type="radio" name="unit" value="kW" required>
+            <b>Мощность, кВт</b>
+            <span>средняя за {{ f.interval_minutes or '…' }} минут
+              {%- if units %}. Тогда за {{ units.day|dmy }} — {{ units.kw_day|kwh }},
+              пик {{ units.kw_peak|kwh }} за час{% endif %}</span></label>
+          <label class="choice"><input type="radio" name="unit" value="kWh">
+            <b>Энергия, кВт·ч</b>
+            <span>израсходовано за {{ f.interval_minutes or '…' }} минут
+              {%- if units %}. Тогда за {{ units.day|dmy }} — {{ units.kwh_day|kwh }},
+              пик {{ units.kwh_peak|kwh }} за час{% endif %}</span></label>
+        </div>
+        {% if units %}<p class="callout">Сверьте с суточным расходом из АСКУЭ или счёта:
+          неверный ответ исказит все рубли
+          {% if f.interval_minutes == 30 %}вдвое{% else %}в {{ 60 // f.interval_minutes }} раза{% endif %}.</p>{% endif %}
+      </div>
+
+      <div class="question">
+        <p>Строка «{{ first_time }}» — это какой интервал?</p>
+        <div class="choices">
+          <label class="choice"><input type="radio" name="stamp_at" value="end" required>
+            <b>Время конца интервала</b>
+            <span>«10:30» — это расход с 10:00 до 10:30</span></label>
+          <label class="choice"><input type="radio" name="stamp_at" value="start">
+            <b>Время начала интервала</b>
+            <span>«10:30» — это расход с 10:30 до 11:00</span></label>
+        </div>
+        {% if first_time.endswith(':30') or first_time.endswith(':15') %}
+          <p class="callout info">Файл начинается с {{ first_time[-5:] }}, а не с 00:00 —
+             обычно так пишут время конца интервала.</p>
+        {% endif %}
+      </div>
+
+      <details class="fold">
+        <summary>Определено автоматически: разделитель «{{ '⇥' if f.sep == '\t' else f.sep }}»,
+          десятичная {{ 'запятая' if f.decimal == ',' else 'точка' }},
+          {{ 'Windows-1251' if f.encoding == 'cp1251' else 'UTF-8' }},
+          шаг {{ f.interval_minutes or '?' }} мин, {{ 'по столбцу на прибор' if f.wide else 'по строке на значение' }}.
+          <b>Изменить</b></summary>
+        <div class="grid-fields">
+          <label>Столбец времени
+            <select name="timestamp_col">
+              {% for c in sniff.columns %}<option {% if c == f.timestamp_col %}selected{% endif %}>{{ c }}</option>{% endfor %}
+            </select></label>
+          <label>Как устроена таблица
+            <select name="wide">
+              <option value="1" {% if f.wide %}selected{% endif %}>по столбцу на прибор</option>
+              <option value="0" {% if not f.wide %}selected{% endif %}>по строке на значение</option>
+            </select></label>
+          <label>Шаг
+            <select name="interval_minutes">
+              {% for m in [15, 30, 60] %}<option value="{{ m }}" {% if f.interval_minutes == m %}selected{% endif %}>{{ m }} мин</option>{% endfor %}
+            </select></label>
+          <label>Разделитель столбцов
+            <select name="sep">
+              {% for v, t in [(';', 'точка с запятой'), (',', 'запятая'), ('\t', 'табуляция')] %}
+                <option value="{{ v }}" {% if f.sep == v %}selected{% endif %}>{{ t }}</option>
+              {% endfor %}
+            </select></label>
+          <label>Десятичный знак
+            <select name="decimal">
+              <option value="," {% if f.decimal == ',' %}selected{% endif %}>запятая</option>
+              <option value="." {% if f.decimal == '.' %}selected{% endif %}>точка</option>
+            </select></label>
+          <label>Кодировка
+            <select name="encoding">
+              <option value="cp1251" {% if f.encoding == 'cp1251' %}selected{% endif %}>Windows-1251</option>
+              <option value="utf-8-sig" {% if f.encoding != 'cp1251' %}selected{% endif %}>UTF-8</option>
+            </select></label>
+          {% if not f.wide %}
+            <label>Столбец прибора
+              <select name="series_col">{% for c in sniff.columns %}<option {% if c == f.series_col %}selected{% endif %}>{{ c }}</option>{% endfor %}</select></label>
+            <label>Столбец значения
+              <select name="value_col">{% for c in sniff.columns %}<option {% if c == f.value_col %}selected{% endif %}>{{ c }}</option>{% endfor %}</select></label>
+          {% endif %}
+        </div>
+        {% if f.wide and sniff.columns|length > 2 %}
+          <p class="field-label"><b>Какие столбцы — не приборы?</b>
+            {% if f.exclude_columns %}«{{ f.exclude_columns|join('», «') }}» мы уже исключили.{% endif %}</p>
+          {% for c in sniff.columns if c != f.timestamp_col %}
+            <label class="check"><input type="checkbox" name="exclude_columns" value="{{ c }}"
+              {% if c in f.exclude_columns %}checked{% endif %}> {{ c }}</label>
+          {% endfor %}
+        {% endif %}
+      </details>
+
+      <div class="actions"><button class="button primary" type="submit">Прочитать и проверить данные</button></div>
+    </section>
+  </form>
+
+  <h3>Начало файла</h3>
+  <p class="caption">Подсвечены столбец времени и приборы, зачёркнуты исключённые столбцы.</p>
+  {% set time_idx = sniff.columns.index(f.timestamp_col) %}
+  <div class="table-wrap">
+    <table class="raw">
+      {% for row in sniff.preview[:8] %}
+        <tr{% if loop.first %} class="head"{% endif %}>
+          {% for cell in row[:9] %}
+            {% set col = sniff.columns[loop.index0] if loop.index0 < sniff.columns|length else '' %}
+            <td class="{{ 'col-time' if loop.index0 == time_idx else 'col-excluded' if col in f.exclude_columns else 'col-meter' if f.wide }}">{{ cell }}</td>
+          {% endfor %}
+        </tr>
+      {% endfor %}
+    </table>
+  </div>
+
+{% else %}
+  <h1>{% if summary.ok == summary.total %}Можно считать все {{ summary.total }} приборов
+      {% else %}Можно считать {{ summary.ok }} {{ 'прибор' if summary.ok == 1 else 'прибора' if summary.ok in [2, 3, 4] else 'приборов' }} из {{ summary.total }}{% endif %}</h1>
+  <p class="lead">{% if summary.ok < summary.total %}У остальных есть замечания — их можно
+     посмотреть ниже и всё равно включить в расчёт, если вы знаете причину.
+     {% else %}Ошибок учёта не найдено.{% endif %}</p>
+  <div class="actions" style="margin-top:0">
+    <a class="button primary" href="/economics?u={{ u }}">Посчитать экономию</a>
+    <a class="button" href="/data">Загрузить другой файл</a>
+  </div>
+  {% if meta.skipped_rows %}
+    <p class="note" style="margin-top:12px">Пропущено строк без даты: {{ meta.skipped_rows }}
+      {%- if meta.skipped_examples %} («{{ meta.skipped_examples|join('», «') }}»){% endif %}.</p>
+  {% endif %}
+
+  <section class="block">
+    <h2>Приборы</h2>
+    <p class="caption">Нажмите на строку, чтобы увидеть подробности и график прибора.</p>
+    <div class="table-wrap">
+      <table class="quality">
+        <thead><tr><th>Прибор</th><th>Период</th><th class="n">Есть данные</th><th>Что с данными</th></tr></thead>
+        <tbody>
+        {% for r in quality %}
+          {% set problems = human_problems(r) %}
+          <tr class="expandable" data-series="{{ r.series }}" tabindex="0">
+            <td><span class="caret" aria-hidden="true"></span>{{ r.series }}</td>
+            <td>{{ r.start|dmy }}–{{ r.end|dmy }}</td>
+            <td class="n">{{ (r.coverage * 100)|num(1) }}&nbsp;%</td>
+            <td>{% if not problems %}<span class="status ok">можно считать</span>
+                {% else %}<span class="status warn">{{ problems[0]|capitalize }}</span>
+                  {%- if problems|length > 1 %}<span class="muted">; ещё {{ problems[1:]|join('; ') }}</span>{% endif %}{% endif %}</td>
+          </tr>
+          <tr class="details" hidden>
+            <td colspan="4">
+              <dl class="facts">
+                <div><dt>Часов без данных</dt><dd>{{ r.missing_hours|num }}</dd></div>
+                <div><dt>Самый длинный пропуск</dt><dd>{{ r.longest_gap_hours|num }}&nbsp;ч</dd></div>
+                <div><dt>Часы с частью интервалов</dt><dd>{{ r.incomplete_hours|num }}</dd></div>
+                <div><dt>Повторы строк (убраны)</dt><dd>{{ r.duplicate_rows|num }}</dd></div>
+                <div><dt>Отрицательные значения</dt><dd>{{ r.negative_values|num }}</dd></div>
+                <div><dt>Нули в начале — прибор ещё не подключён</dt><dd>{{ r.leading_zero_hours|num }}&nbsp;ч</dd></div>
+                <div><dt>Застывшие показания</dt><dd>{{ r.flat_runs_over_limit|num }}&nbsp;раз</dd></div>
+                <div><dt>Необычные часы — на расчёт не влияют</dt><dd>{{ r.outliers|num }}</dd></div>
+              </dl>
+            </td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="block">
+    <div class="block-head">
+      <h2 id="meter-title">{{ quality[0].series }}</h2>
+      <div class="segmented" data-range-for="meter-chart">
+        <button type="button" data-days="7">7 суток</button>
+        <button type="button" data-days="30" aria-pressed="true">30 суток</button>
+        <button type="button" data-days="0">весь период</button>
+      </div>
+    </div>
+    <p class="legend"><span><i style="background:var(--ink)"></i>расход за час, кВт·ч</span>
+      <span><i class="box" style="background:rgba(180,35,24,.25)"></i>проблемный участок</span></p>
+    <div class="chart" id="meter-chart" data-u="{{ u }}" data-series="{{ quality[0].series }}"></div>
+    <p class="chart-note" id="meter-note"></p>
+  </section>
+
+  <section class="block">
+    <h2>Расход по месяцам</h2>
+    <p class="caption">Все приборы вместе — сверьте со счётами.</p>
+    <div class="table-wrap narrow">
+      <table>
+        <thead><tr><th>Месяц</th><th class="n">Расход, кВт·ч</th></tr></thead>
+        <tbody>{% for m in monthly %}<tr><td>{{ m.month|month_ru }}</td><td class="n">{{ m.kwh|num }}</td></tr>{% endfor %}</tbody>
+      </table>
+    </div>
+  </section>
+{% endif %}
+
+{% endblock %}

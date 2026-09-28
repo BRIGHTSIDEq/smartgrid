@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Smart Grid{% endblock %}</title>
+  <link rel="stylesheet" href="/static/css/app.css?v={{ asset_v }}">
+</head>
+<body>
+  {% set q = ('?u=' ~ u) if u else '' %}
+  <header class="topbar">
+    <a class="brand" href="/data{{ q }}"><b>Smart Grid</b><span>расчёт накопителя</span></a>
+    <nav class="tabs" aria-label="Расчёт">
+      <a href="/data{{ q }}" {% if nav == 'data' %}aria-current="page"{% endif %}>Данные</a>
+      <a href="/economics{{ q }}" {% if nav == 'economics' %}aria-current="page"{% endif %}>Экономия</a>
+    </nav>
+    <nav class="tabs research" aria-label="Исследование">
+      <span class="group-label">Исследование:</span>
+      <a href="/forecast" {% if nav == 'forecast' %}aria-current="page"{% endif %}>Прогноз</a>
+      <a href="/models" {% if nav == 'models' %}aria-current="page"{% endif %}>Модели</a>
+    </nav>
+    {% if meta and meta.filename %}
+      <span class="file-chip" title="Текущий файл">
+        <svg width="14" height="16" viewBox="0 0 14 16" aria-hidden="true"><path d="M2 1h6l4 4v10H2z" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M8 1v4h4" fill="none" stroke="currentColor" stroke-width="1.3"/></svg>
+        <span>{{ meta.filename }}</span>
+        <a href="/data">сменить</a>
+      </span>
+    {% endif %}
+  </header>
+  <main class="page {% block main_class %}{% endblock %}">
+    {% if step %}
+      {% set labels = ['Загрузка', 'Формат файла', 'Качество данных', 'Экономия'] %}
+      {% set links = ['/data', '/data' ~ q, '/data' ~ q, '/economics' ~ q] %}
+      <ol class="steps" aria-label="Шаги">
+        {% for label in labels %}
+          {% set i = loop.index %}
+          <li class="{{ 'done' if i < step else 'current' if i == step }}">
+            {% if i < step and i > 1 and u %}<a href="{{ links[i - 1] }}">{% endif %}
+            <span class="num">{{ '✓' if i < step else i }}</span>{{ label }}
+            {% if i < step and i > 1 and u %}</a>{% endif %}
+          </li>
+        {% endfor %}
+      </ol>
+    {% endif %}
+    {% block content %}{% endblock %}
+  </main>
+  <script src="/static/js/format.js?v={{ asset_v }}"></script>
+  <script src="/static/js/chart.js?v={{ asset_v }}"></script>
+  <script src="/static/js/app.js?v={{ asset_v }}"></script>
+  {% block scripts %}{% endblock %}
+</body>
+</html>

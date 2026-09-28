@@ -1,0 +1,134 @@
+{% from "_term.html" import term %}
+{% set b = r.best %}
+{% set names = {'Идеальный прогноз': 'точный прогноз на сутки',
+                'Оптимум при известном будущем': 'предел: вся нагрузка известна заранее'} %}
+{% set bound = r.sources|selectattr('source', 'equalto', 'Оптимум при известном будущем')|first %}
+
+<section class="panel">
+  <div class="headline-panel">
+    <div>
+      {% if r.annual_shown %}
+        <span class="figure-label">Накопитель сэкономит в год
+          {% if r.tariff.example %}<span class="chip">по примерным ставкам</span>{% endif %}</span>
+        <span class="figure-value">{{ b.annual_mean|rub }}</span>
+        <span class="figure-note">скорее всего {{ b.annual_lo|rub_between(b.annual_hi) }} {{ term('spread') }}</span>
+        <span class="spread" data-spread data-lo="{{ b.annual_lo }}" data-hi="{{ b.annual_hi }}"
+              data-mid="{{ b.annual_mean }}" data-zero="1"></span>
+      {% else %}
+        <span class="figure-label">Накопитель сэкономил бы за {{ r.n_days }} сут.</span>
+        <span class="figure-value">{{ b.net_savings|rub }}</span>
+        <span class="figure-note">данных меньше двух недель — за год не пересчитываем</span>
+      {% endif %}
+    </div>
+    <div>
+      <span class="figure-label">Окупится за {{ term('payback') }}</span>
+      <span class="figure-value">{{ b.payback_lo|years_range(b.payback_hi) }}</span>
+      <span class="figure-note">вложения {{ r.battery.capex_rub|rub }} ÷ экономия в год</span>
+    </div>
+    <div class="headline-foot">
+      {% if b.annual_lo <= 0 %}<p><b>В неблагоприятном случае экономии нет.</b></p>{% endif %}
+      <p>Экономия появляется, потому что накопитель срезает ваш максимум нагрузки в пиковые
+         часы, а за этот максимум вы платите по ставке мощности. Накопитель
+         {{ r.battery.power_kw|num }}&nbsp;кВт, ёмкость {{ r.battery.capacity_kwh|num }}&nbsp;кВт·ч.</p>
+      <p class="muted">План заряда строится на сутки вперёд по прогнозу
+         «{{ r.best_source|lower }}» — на ваших данных он лучший из простых. {{ term('forecast_used') }}</p>
+    </div>
+  </div>
+</section>
+
+<section class="panel">
+  <h3>На чём основан расчёт</h3>
+  <table class="basis">
+    {% for p in passport %}
+      <tr class="{{ p.kind or '' }}"><th scope="row">{{ p.level }}</th><td>{{ p.text }}</td></tr>
+    {% endfor %}
+  </table>
+</section>
+
+<section class="block">
+  <h2>Откуда берётся экономия</h2>
+  <p class="caption">За {{ r.n_days }} суток. Зелёное — экономия, серое — затраты накопителя.</p>
+  <div class="table-wrap">
+    <table class="bars">
+      <tbody>
+      {% for part in r.parts %}
+        <tr>
+          <td>{% if part.label == 'Энергия и передача' %}Энергия{% if part.value < 0 %}: потери при заряде и разряде{% endif %}
+              {% elif part.label == 'Мощность (покупка)' %}Покупка мощности
+              {% elif part.label == 'Сетевая мощность' %}Передача: содержание сетей
+              {% else %}{{ part.label }}{% endif %}</td>
+          <td class="n">{{ part.value|rub }}</td>
+          <td class="bar-cell"><div class="divbar"><span class="{{ 'minus' if part.value < 0 else 'plus' }}"
+              style="--w: {{ ((part.value|abs) / r.parts_max * 50)|round(1) }}%"></span></div></td>
+        </tr>
+      {% endfor %}
+      <tr class="total"><td>Итого за {{ r.n_days }} сут.</td><td class="n">{{ b.net_savings|rub }}</td><td></td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section class="block">
+  <h2>Насколько важен точный прогноз</h2>
+  {% if bound and r.annual_shown %}
+    <p class="lead" style="font-size:16px">Если бы вся нагрузка была известна заранее, накопитель
+       сэкономил бы {{ bound.annual_mean|rub }} в год. Простой прогноз даёт
+       {{ b.share_of_bound|pct }} от этого предела. {{ term('limit') }}</p>
+  {% endif %}
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>По какому прогнозу планировать</th><th class="n">В год</th>
+        <th class="n">От предела</th><th>Разброс</th></tr></thead>
+      <tbody>
+      {% for s in r.sources %}
+        <tr class="{{ 'ref' if s.source in names }}{{ ' chosen' if s.source == r.best_source }}">
+          <td>{{ names.get(s.source, s.source|lower) }}{% if s.source == r.best_source %}<span class="tag">в расчёте</span>{% endif %}</td>
+          <td class="n">{{ (s.annual_mean if r.annual_shown else s.net_savings)|rub }}</td>
+          <td class="n">{{ s.share_of_bound|pct }}</td>
+          <td><span class="spread small" data-spread data-lo="{{ s.annual_lo }}"
+                data-hi="{{ s.annual_hi }}" data-mid="{{ s.annual_mean }}" data-shared="sources"></span></td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section class="block">
+  <h2>Как работает накопитель</h2>
+  <p class="legend">
+    <span><i style="background:#9AA1A6"></i>ваша нагрузка</span>
+    <span><i style="background:var(--ink)"></i>взято из сети с накопителем</span>
+    <span><i class="box" style="background:var(--peak)"></i>часы пика</span>
+  </p>
+  <div class="segmented" data-range-for="schedule-chart">
+    <button type="button" data-days="7" aria-pressed="true">7 суток</button>
+    <button type="button" data-days="30">30 суток</button>
+    <button type="button" data-days="0">весь период</button>
+  </div>
+  <div class="chart" id="schedule-chart"></div>
+  <p class="chart-note">В часы пика чёрная линия ниже серой — накопитель отдаёт энергию и
+     срезает максимум. Всплески чёрной линии вне пика — накопитель заряжается.</p>
+  <div class="chart short" id="soc-chart"></div>
+  <script type="application/json" class="chart-data" data-kind="schedule">{{ r.schedule|tojson }}</script>
+</section>
+
+{% if r.monthly|length > 1 %}
+<section class="block">
+  <h2>По месяцам</h2>
+  <p class="caption">Снижение счёта по месяцам, до вычета износа и обслуживания. Светлые
+     столбики — неполные месяцы.</p>
+  <div class="chart short" id="monthly-chart"></div>
+  <script type="application/json" class="chart-data" data-kind="monthly">{{ r.monthly|tojson }}</script>
+</section>
+{% endif %}
+
+<section class="block" id="whatif">
+  <h2>Что будет, если…</h2>
+  <p class="caption">Экономия в год, если изменить одно условие: ёмкость ×0,5 и ×2,
+     цена накопителя 12 и 24 тыс. ₽ за кВт·ч, ставки мощности на 30 % ниже и выше.
+     Первая строка — текущий расчёт.</p>
+  <div id="whatif-body">
+    <button class="button" type="button" data-whatif="/economics/whatif?u={{ u }}">Посчитать варианты</button>
+  </div>
+</section>

@@ -90,3 +90,72 @@ def test_cleaning_fills_short_gaps_only():
     assert s.index[0] == ts[3], "нули до подключения отрезаются"
     assert s.loc[ts[10]] == pytest.approx(cons[10]), "короткий пропуск интерполируется"
     assert s.loc[ts[20:30]].isna().all(), "длинный пропуск не выдумывается"
+
+
+def test_negative_half_hour_is_not_hidden_by_the_hourly_sum():
+    """
+    Минус в одном получасе виден в отчёте и выбрасывается при очистке.
+
+    Прежде отрицательное значение складывалось с положительным соседним
+    получасом, почасовая сумма оставалась положительной, и ошибка знака
+    исчезала из отчёта (найдено на демонстрационной выгрузке).
+    """
+    end = pd.date_range("2025-01-01 00:30", periods=48 * 20, freq="30min")
+    frame = pd.DataFrame({"timestamp": end, "series": "M", "value": 100.0})
+    frame.loc[101, "value"] = -40.0
+    hourly = read_meter_export(frame, ExportFormat(unit="kW", stamp_at="end"))
+    r = quality_report(hourly).iloc[0]
+    assert r["negative_values"] == 1
+    clean = clean_hourly(hourly, max_fill_hours=0)
+    bad_hour = (end[101] - pd.Timedelta(minutes=30)).floor("h")
+    assert clean.set_index("timestamp").loc[bad_hour, "consumption"] != \
+        clean.set_index("timestamp").loc[bad_hour, "consumption"]      # NaN
+
+
+def test_duplicate_rows_do_not_double_the_energy():
+    end = pd.date_range("2025-01-01 00:15", periods=96, freq="15min")
+    frame = pd.DataFrame({"timestamp": end, "series": "M", "value": 1.0})
+    frame = pd.concat([frame, frame.iloc[[0]]]).reset_index(drop=True)
+    hourly = read_meter_export(frame, ExportFormat(unit="kWh", stamp_at="end"))
+    first = hourly.iloc[0]
+    assert first["consumption"] == pytest.approx(4.0)
+    assert first["duplicates"] == 1 and first["intervals"] == 4
+
+
+def test_holidays_are_not_reported_as_outliers():
+    """Праздничный провал производства — не дефект учёта."""
+    ts = pd.date_range("2024-12-02", periods=24 * 70, freq="h")
+    base = np.asarray(300 + 50 * np.sin(2 * np.pi * ts.hour / 24))
+    base[(ts >= "2025-01-01") & (ts < "2025-01-09")] *= 0.45
+    frame = pd.DataFrame({"series": "Завод", "timestamp": ts, "consumption": base,
+                          "intervals": 1, "expected_intervals": 1, "duplicates": 0})
+    assert quality_report(frame).iloc[0]["outliers"] == 0
+    assert quality_report(frame, holidays=False).iloc[0]["outliers"] > 0
+
+
+def test_seasonal_change_is_not_an_outlier():
+    """
+    Летнее снижение нагрузки не считается выбросом.
+
+    Эталон по всему ряду делал каждый летний час «нетипичным» у фидера с
+    узким разбросом; эталон по соседним неделям следует за сезоном.
+    """
+    ts = pd.date_range("2025-01-06", periods=24 * 7 * 30, freq="h")
+    season = 1 - 0.35 * np.sin(np.pi * np.arange(len(ts)) / len(ts))
+    load = np.asarray(300 + 40 * np.sin(2 * np.pi * ts.hour / 24)) * season
+    frame = pd.DataFrame({"series": "Цех", "timestamp": ts, "consumption": load,
+                          "intervals": 1, "expected_intervals": 1, "duplicates": 0})
+    assert quality_report(frame, holidays=False).iloc[0]["outliers"] == 0
+    spiked = frame.copy()
+    spiked.loc[4000, "consumption"] *= 3
+    assert quality_report(spiked, holidays=False).iloc[0]["outliers"] == 1
+
+
+def test_empty_hours_are_missing_not_incomplete():
+    ts = pd.date_range("2025-01-01", periods=48, freq="h")
+    frame = pd.DataFrame({"series": "M", "timestamp": ts, "consumption": 10.0,
+                          "intervals": 2, "expected_intervals": 2, "duplicates": 0})
+    frame.loc[5, "intervals"] = 1
+    frame = frame.drop(index=[20])
+    r = quality_report(frame).iloc[0]
+    assert r["incomplete_hours"] == 1 and r["missing_hours"] == 1

@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% block title %}Модели — Smart Grid{% endblock %}
+{% block content %}
+<h1>Результаты исследования</h1>
+<p class="lead">Каждая строка — один запуск сравнения моделей прогноза. Откройте запуск,
+   чтобы увидеть, какая модель точнее и насколько.</p>
+
+<p class="caption">
+  {% if smoke %}<a href="/models">Скрыть проверочные прогоны</a>
+  {% else %}Проверочные прогоны (smoke) скрыты. <a href="/models?smoke=1">Показать</a>{% endif %}
+</p>
+
+{% if not runs %}
+  <section class="empty"><p>Прогонов с метриками пока нет.</p></section>
+{% else %}
+<div class="table-wrap">
+  <table>
+    <thead><tr><th>Дата</th><th>Запуск</th><th>Данные</th><th class="n">Повтор</th>
+      <th>Лучшая модель</th><th>Чем закончился</th></tr></thead>
+    <tbody>
+    {% for r in runs %}
+      <tr class="link-row">
+        <td><a href="/models/{{ r.name }}">{{ r.started[6:8] }}.{{ r.started[4:6] }}.{{ r.started[:4] }}</a></td>
+        <td>{{ r.mode|mode_ru }}</td>
+        <td>{{ r.dataset|dataset_ru }}</td>
+        <td class="n">{{ r.seed }}</td>
+        <td>{{ display_model(r.best or '—') }}</td>
+        <td>{% if r.status == 'completed' %}<span class="status ok">выполнен</span>
+            {% elif r.status == 'partial' %}<span class="status warn">частично</span>, отказов: {{ r.failed }}
+            {% elif r.status == 'failed' %}<span class="status err">ошибка</span>
+            {% elif r.status == 'unknown' %}<span class="muted">статус не записан</span>
+            {% else %}<span class="status idle">идёт или прерван</span>{% endif %}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+{% endblock %}

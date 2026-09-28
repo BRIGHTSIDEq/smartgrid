@@ -12,6 +12,8 @@
 | `docs/ARCHITECTURE.md` | Карта модулей, потоки данных, инварианты, раскладка артефактов |
 | `docs/ROADMAP.md` | Этапы улучшения с чек-листами и текущим статусом |
 | `docs/RESULTS.md` | Какие прогоны стоят за каждой цифрой и актуальны ли они |
+| `docs/design/INTERFACE.md` | Веб-приложение: экраны, словарь терминов, сценарий защиты |
+| `docs/design/VISUAL_SYSTEM.md` | Веб-приложение: цвета, шрифты, графики, запреты |
 | `docs/archive/` | Устаревшие планы и черновики, хранятся для истории |
 
 ## Команды
@@ -49,6 +51,7 @@ python main.py --mode panel-smoke --dataset uci --seed 0
 Инструменты поверх каталогов прогонов (модели не переобучаются):
 
 ```bash
+python -m webapp --open
 python -m analysis.economics results/runs/<прогон> --category 4 --sensitivity-source <модель>
 python forecast.py --models results/runs/<прогон>/models --history h.csv --weather w.csv --out f.csv
 python -m utils.dashboard results/runs/<прогон>
@@ -78,3 +81,5 @@ python -m utils.dashboard results/runs/<прогон>
 - Цифры в README брать из каталогов прогонов `results/runs/*/`, а не из сводных файлов в корне `results/`. Сводные файлы пока ненадёжны (см. `docs/ROADMAP.md`, этап 1).
 - Отбор моделей и параметров решающего правила — только по валидации. Тест используется один раз.
 - Отрицательные результаты и отозванные выводы фиксируются в CHANGELOG, а не удаляются.
+- Веб-приложение только вызывает функции проекта и не пишет в `results/`. Новый экран
+  или элемент сверяется с `docs/design/`; отступление записывается туда с причиной.

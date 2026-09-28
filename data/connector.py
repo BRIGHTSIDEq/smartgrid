@@ -97,11 +97,21 @@ def read_meter_export(path_or_frame, fmt: Optional[ExportFormat] = None) -> pd.D
     energy = long["value"] * (minutes / 60.0) if fmt.unit.lower() == "kw" else long["value"]
     long = long.assign(hour=start.dt.floor("h"), energy=energy)
 
-    hourly = (long.groupby(["series", "hour"])
-                  .agg(consumption=("energy", lambda v: v.sum(min_count=1)),
-                       intervals=("energy", "count"),
-                       duplicates=("timestamp", lambda t: int(t.duplicated().sum())))
-                  .reset_index().rename(columns={"hour": "timestamp"}))
+    # Отрицательные значения считаются ДО сложения в час: минус в одном
+    # получасе гасится плюсом соседнего, и в почасовом ряду ошибка знака
+    # становилась невидимой. Повторы — тоже по исходным строкам.
+    long["negative"] = (long["energy"] < 0).astype(int)
+    long["repeat"] = long.duplicated(["series", "timestamp"]).astype(int)
+    keys = ["series", "hour"]
+    # Повтор строки не должен удваивать энергию часа: энергия и число
+    # интервалов считаются по строкам без повторов, а сами повторы — отдельно.
+    unique = long[long["repeat"] == 0].groupby(keys)
+    hourly = pd.DataFrame({
+        "consumption": unique["energy"].sum(min_count=1),
+        "intervals": unique["energy"].count(),
+        "negatives": unique["negative"].sum(),
+        "duplicates": long.groupby(keys)["repeat"].sum(),
+    }).reset_index().rename(columns={"hour": "timestamp"})
     hourly["expected_intervals"] = 60 // minutes
     return hourly
 
@@ -121,7 +131,8 @@ def _runs(mask: np.ndarray) -> List[int]:
 
 
 def quality_report(hourly: pd.DataFrame, flat_hours: int = 6, zero_hours: int = 24,
-                   outlier_z: float = 6.0, min_coverage: float = 0.95) -> pd.DataFrame:
+                   outlier_z: float = 6.0, min_coverage: float = 0.95,
+                   holidays: bool = True) -> pd.DataFrame:
     """
     Проблемы данных по каждому ряду.
 
@@ -151,11 +162,29 @@ def quality_report(hourly: pd.DataFrame, flat_hours: int = 6, zero_hours: int = 
 
         how = pd.Series(body, index=full[lead_zeros:])
         key_how = np.asarray(how.index.dayofweek * 24 + how.index.hour)
-        med = how.groupby(key_how).transform("median")
-        mad = (how - med).abs().groupby(key_how).transform("median") * 1.4826
+        # Эталон — тот же час недели в соседних девяти неделях, а не за весь
+        # ряд: летняя нагрузка отличается от годовой медианы того же часа, и
+        # у промышленного фидера с узким разбросом весь сезон выглядел бы
+        # выбросом (сотни ложных срабатываний на демонстрационной выгрузке).
+        local = lambda v: v.rolling(9, center=True, min_periods=3).median()
+        med = how.groupby(key_how).transform(local)
+        mad = (how - med).abs().groupby(key_how).transform(local) * 1.4826
+        # Нижняя граница разброса — 5% типичного уровня ряда: на ровном
+        # участке MAD близок к нулю, и любое колебание выглядело бы выбросом.
+        floor = 0.05 * float(np.nanmedian(np.abs(body))) if len(body) else 0.0
+        mad = mad.clip(lower=floor if floor > 0 else None)
         z = ((how - med).abs() / mad.replace(0, np.nan)).to_numpy()
+        # Праздник — не дефект данных: производство в новогодние дни падает
+        # вдвое, и без этого исключения промышленный фидер получал сотни
+        # «нетипичных значений», которые пользователь принял бы за ошибки учёта.
+        if holidays is not False and len(how):
+            from data.generator import holiday_flags
+            z = np.where(holiday_flags(how.index), np.nan, z)
 
-        incomplete = int((g["intervals"] < g["expected_intervals"]).sum())
+        # Неполный час — часть интервалов есть, часть нет. Полностью пустой
+        # час уже учтён как пропущенный и второй раз не считается.
+        incomplete = int(((g["intervals"] > 0)
+                          & (g["intervals"] < g["expected_intervals"])).sum())
         coverage = float(present.mean())
         row = {
             "series": key,
@@ -165,7 +194,8 @@ def quality_report(hourly: pd.DataFrame, flat_hours: int = 6, zero_hours: int = 
             "longest_gap_hours": max(_runs(~present), default=0),
             "incomplete_hours": incomplete,
             "duplicate_rows": int(g["duplicates"].sum()),
-            "negative_values": int(np.nansum(values < 0)),
+            "negative_values": int(g["negatives"].sum()) if "negatives" in g.columns
+                               else int(np.nansum(values < 0)),
             "leading_zero_hours": lead_zeros,
             "zero_runs_over_limit": sum(r >= zero_hours for r in zero_runs),
             "flat_runs_over_limit": sum(r >= flat_hours for r in flat_runs),
@@ -178,8 +208,8 @@ def quality_report(hourly: pd.DataFrame, flat_hours: int = 6, zero_hours: int = 
             problems.append(f"пропуск {row['longest_gap_hours']} ч подряд")
         if row["negative_values"]:
             problems.append("отрицательные значения")
-        if row["duplicate_rows"]:
-            problems.append("повторы строк")
+        # Повторы строк сами по себе ряд не портят: read_meter_export считает
+        # энергию часа без повторов. Они остаются в отчёте для сведения.
         if row["zero_runs_over_limit"]:
             problems.append("длительные нули")
         if row["flat_runs_over_limit"]:
@@ -205,6 +235,8 @@ def clean_hourly(hourly: pd.DataFrame, max_fill_hours: int = 3) -> pd.DataFrame:
         g = g.set_index("timestamp").reindex(full)
         s = g["consumption"].where(g["intervals"] >= g["expected_intervals"])
         s = s.where(s >= 0)
+        if "negatives" in g.columns:
+            s = s.where(g["negatives"].fillna(0) == 0)
         nonzero = np.flatnonzero(s.fillna(0).to_numpy() > 0)
         if not len(nonzero):
             continue

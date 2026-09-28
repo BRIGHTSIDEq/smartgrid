@@ -372,8 +372,10 @@ def test_requirements_list_no_unused_packages():
 
     aliases = {"scikit-learn": "sklearn", "tensorflow-cpu": "tensorflow", "pyyaml": "yaml"}
     # Нужны без импорта в коде: uvicorn запускает service.api, httpx требуется
-    # тестовому клиенту FastAPI. Список явный, чтобы исключение не расползалось.
-    runtime_only = {"uvicorn", "httpx"}
+    # тестовому клиенту FastAPI, jinja2 и python-multipart FastAPI подключает
+    # сам для шаблонов и загрузки файлов. Список явный, чтобы исключение не
+    # расползалось.
+    runtime_only = {"uvicorn", "httpx", "jinja2", "python-multipart"}
     unused = {d for d in declared
               if aliases.get(d, d) not in imported and aliases.get(d, d) not in stdlib
               and d not in runtime_only}

@@ -1,0 +1,61 @@
+{% extends "base.html" %}
+{% block title %}Прогноз — Smart Grid{% endblock %}
+{% block content %}
+<h1>Как модель прогнозирует нагрузку</h1>
+
+{% if not runs %}
+  <section class="empty">
+    <p>Прогнозы появляются после многорядного прогона с сохранёнными моделями
+       (например, <code>python main.py --mode panel-fast</code>). Обучение запускается
+       из командной строки.</p>
+  </section>
+{% else %}
+  <p class="lead">Здесь видно, как модель из исследования угадывала нагрузку на следующие
+     сутки. На вашем файле модель не обучалась, поэтому в разделе «Экономия» используются
+     простые прогнозы.</p>
+
+  <form class="inline-form" method="get" action="/forecast">
+    <label>Запуск исследования
+      <select name="run" data-autosubmit>
+        {% for r in runs %}
+          <option value="{{ r.name }}" {% if r.name == chosen %}selected{% endif %}>
+            {{ r.started[6:8] }}.{{ r.started[4:6] }}.{{ r.started[:4] }} · {{ r.mode|mode_ru }} ·
+            {{ r.dataset|dataset_ru }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>Объект
+      <select name="series" data-autosubmit>
+        {% for s in series_names %}<option value="{{ s }}" {% if s == series %}selected{% endif %}>{{ s|series_ru }}</option>{% endfor %}
+      </select>
+    </label>
+  </form>
+
+  {% if check %}
+  <section class="block">
+    <div class="block-head">
+      <h2>Как модель угадала последние {{ check.days }} суток</h2>
+    </div>
+    <p class="lead" style="font-size:16px">
+      В среднем модель ошибалась на {{ check.mae|num(1) }}&nbsp;кВт·ч в час
+      {%- if check.vs_naive is not none %} —
+        {% if check.vs_naive < 0 %}<b class="good">на {{ (-check.vs_naive)|pct }} точнее</b>{% else %}<b>на {{ check.vs_naive|pct }} хуже</b>{% endif %},
+        чем прогноз «как вчера» ({{ check.mae_naive|num(1) }}&nbsp;кВт·ч){% endif %}.
+    </p>
+    <p class="legend"><span><i style="background:var(--ink)"></i>факт</span>
+      <span><i style="background:var(--accent)"></i>прогноз модели</span></p>
+    <p class="caption">Модель — {{ display_model(meta.best_model_by_val or '') }}, лучшая в
+      этом запуске на отложенных данных. Прогноз на каждые сутки построен накануне по данным
+      до полуночи.
+      {% if not quantile %}Коридора возможных значений нет: его дают вероятностные модели
+      (запуск с ключом <code>--probabilistic</code>).{% endif %}</p>
+    <div class="segmented" data-range-for="forecast-chart">
+      <button type="button" data-days="7" aria-pressed="true">7 суток</button>
+      <button type="button" data-days="0">весь период</button>
+    </div>
+    <div class="chart" id="forecast-chart"></div>
+    <script type="application/json" class="chart-data" data-kind="forecast">{{ check|tojson }}</script>
+  </section>
+  {% endif %}
+{% endif %}
+{% endblock %}

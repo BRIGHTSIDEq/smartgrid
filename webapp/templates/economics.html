@@ -1,0 +1,118 @@
+{% extends "base.html" %}
+{% from "_term.html" import term %}
+{% block title %}Экономия — Smart Grid{% endblock %}
+{% block main_class %}wide{% endblock %}
+{% block content %}
+
+{% if not ready %}
+  <section class="panel" style="max-width:720px">
+    <h1>Экономия накопителя</h1>
+    <p class="lead">Экономия считается по вашей почасовой нагрузке. Сначала загрузите
+       выгрузку учёта — это займёт пару минут.</p>
+    <div class="actions"><a class="button primary" href="/data">Загрузить данные</a></div>
+  </section>
+{% else %}
+{% set cats = {3: '3 — мощность по часам пика, передача одноставочная',
+               4: '4 — то же, передача двухставочная',
+               5: '5 — как 3, плюс почасовое планирование',
+               6: '6 — как 4, плюс почасовое планирование'} %}
+<div class="split {{ 'has-result' if cached_html }}">
+  <aside class="params" aria-label="Параметры расчёта">
+    <form id="econ-form" data-run="/economics/run?u={{ u }}">
+      <details class="group" {% if not cached_html %}{% endif %}>
+        <summary><b>Какие приборы сложить</b>
+          <span data-summary="meters">выбрано {{ params.meters|length }} из {{ meters|length }}</span></summary>
+        <div class="group-body">
+          {% for m in meters %}
+            {% set probs = human_problems(m) %}
+            <label class="check"><input type="checkbox" name="meters" value="{{ m.series }}"
+              {% if m.series in params.meters %}checked{% endif %}>
+              <span>{{ m.series }}{% if probs %} <span class="muted">— {{ probs[0] }}</span>{% endif %}</span></label>
+          {% endfor %}
+          <p class="hint">Приборы с замечаниями не выбраны. Отметьте их, если знаете причину.
+             Сумма считается по часам, где есть все выбранные приборы.</p>
+        </div>
+      </details>
+
+      <details class="group" {% if not cached_html %}open{% endif %}>
+        <summary><b>Тариф</b>
+          <span data-summary="tariff">категория {{ params.category }} · ставки примерные</span></summary>
+        <div class="group-body">
+          <div class="banner" id="example-banner">
+            Сейчас стоят примерные ставки. Замените их своими из счёта — или оставьте, если
+            хотите просто посмотреть.
+            <br><button type="button" class="linklike" data-confirm-rates>Это наши ставки</button>
+          </div>
+          <label>Ценовая категория {{ term('category') }}
+            <select name="category" data-category>
+              {% for c, text in cats.items() %}<option value="{{ c }}" {% if params.category|int == c %}selected{% endif %}>{{ text }}</option>{% endfor %}
+            </select>
+          </label>
+          {% set fields = [
+            ('energy_price', 'Электроэнергия', '₽/кВт·ч', 'all', 'средняя цена энергии в счёте', none),
+            ('gen_capacity_rate', 'Покупка мощности', '₽/кВт·мес', 'all', 'строка «мощность» в счёте сбытовой', 'gen_capacity'),
+            ('net_capacity_rate', 'Передача: содержание сетей', '₽/кВт·мес', 'two-rate', 'ставка на содержание в тарифе на передачу', 'net_capacity'),
+            ('net_energy_rate', 'Передача: оплата потерь', '₽/кВт·ч', 'two-rate', 'ставка на потери в тарифе на передачу', none),
+            ('net_single_rate', 'Передача', '₽/кВт·ч', 'one-rate', 'одноставочный тариф на передачу', none),
+            ('deviation_up_rate', 'Взяли больше плана', '₽/кВт·ч', 'plan', 'плата за отклонение вверх', none),
+            ('deviation_down_rate', 'Взяли меньше плана', '₽/кВт·ч', 'plan', 'плата за отклонение вниз', none),
+          ] %}
+          {% for name, label, unit, group, hint, help in fields %}
+            <label class="money" data-group="{{ group }}">{{ label }}{% if help %} {{ term(help) }}{% endif %}
+              <span class="input-unit"><input name="{{ name }}" value="{{ params[name]|num(2) }}"
+                inputmode="decimal" data-example><span><em class="example-chip">пример</em>{{ unit }}</span></span>
+              <span class="hint">{{ hint }}</span>
+            </label>
+          {% endfor %}
+        </div>
+      </details>
+
+      <details class="group">
+        <summary><b>Часы пиковой нагрузки в регионе</b>
+          <span data-summary="hours">…</span></summary>
+        <div class="group-body">
+          <p class="hint" style="margin:0 0 10px">Их публикует Системный оператор на каждый
+             месяц. Протяните по шкале, чтобы выделить часы. {{ term('peak_hours') }}</p>
+          <div class="dayscale" data-dayscale data-value="{{ params.peak_hours }}"
+               role="group" aria-label="Часы суток"></div>
+          <input type="hidden" name="peak_hours" value="{{ params.peak_hours }}">
+          <div class="presets">
+            <button type="button" class="button small" data-hours="8-21">Будни 8–21</button>
+            <button type="button" class="button small" data-hours="7-10,17-21">Утро и вечер</button>
+          </div>
+        </div>
+      </details>
+
+      <details class="group">
+        <summary><b>Накопитель</b>
+          <span data-summary="battery">…</span></summary>
+        <div class="group-body">
+          <label>Мощность накопителя
+            <span class="input-unit"><input name="power_share" value="{{ (params.power_share * 100)|num(0) }}"
+              inputmode="decimal"><span>% от вашего максимума</span></span>
+            <span class="hint">Ёмкость — четыре часа на этой мощности.</span></label>
+          <label>Стоимость
+            <span class="input-unit"><input name="capex_per_kwh" value="{{ params.capex_per_kwh|num(0) }}"
+              inputmode="decimal"><span>₽ за кВт·ч ёмкости</span></span>
+            <span class="hint">Под ключ, с инвертором. Сейчас на рынке около 16 000 ₽.</span></label>
+        </div>
+      </details>
+
+      <div class="submit"><button class="button primary wide" type="submit">Посчитать экономию</button></div>
+    </form>
+  </aside>
+
+  <section class="result" id="econ-result" aria-live="polite">
+    {% if cached_html %}{{ cached_html|safe }}{% else %}
+      <section class="panel placeholder">
+        <h1>Экономия накопителя</h1>
+        <p class="lead" style="margin-bottom:8px">Проверьте тариф слева и нажмите
+           «Посчитать экономию». Расчёт по году данных занимает несколько секунд.</p>
+        <p class="note">Экономия появляется, потому что накопитель срезает ваш максимум
+           нагрузки в пиковые часы, а за этот максимум вы платите по ставке мощности.</p>
+      </section>
+    {% endif %}
+  </section>
+</div>
+{% endif %}
+{% endblock %}

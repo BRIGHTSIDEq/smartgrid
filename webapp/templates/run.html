@@ -1,0 +1,84 @@
+{% extends "base.html" %}
+{% block title %}Прогон {{ name }} — Smart Grid{% endblock %}
+{% block content %}
+<p class="crumbs"><a href="/models">← Все запуски</a></p>
+<h1>{{ meta.mode|mode_ru|capitalize }} от {{ name[6:8] }}.{{ name[4:6] }}.{{ name[:4] }}</h1>
+<p class="lead">
+  {{ (meta.dataset or 'synthetic')|dataset_ru|capitalize }}, повтор {{ meta.seed }}.
+  {% if meta.status == 'completed' %}<span class="status ok">выполнен</span>
+  {% elif meta.status == 'partial' %}<span class="status warn">частично</span>
+  {% elif meta.status == 'failed' %}<span class="status err">ошибка</span>
+  {% elif (meta.status or 'unknown') == 'unknown' %}<span class="muted">статус не записан</span>
+            {% else %}<span class="status idle">идёт или прерван</span>{% endif %}
+  {% if meta.runtime_sec %} · {{ (meta.runtime_sec / 60)|num(0) }}&nbsp;мин{% endif %}
+</p>
+{% for f in (meta.failed_models or []) + (meta.failed_blocks or []) %}
+  <p class="note">Отказ: {{ f.model or f.block }} — {{ f.error }}</p>
+{% endfor %}
+
+<section class="block">
+  <h2>Какая модель точнее</h2>
+  <p class="caption">Сравнение с простым прогнозом «как вчера» на тех же сутках. Лучшая
+     модель выбрана заранее на отложенных данных: {{ display_model(meta.best_model_by_val or '—') }}.</p>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Модель</th><th class="n">Ошибка, кВт·ч в час</th>
+        <th class="n">По сравнению с «как вчера»</th><th class="n">MASE</th><th class="n">Обучение, с</th></tr></thead>
+      <tbody>
+      {% for m in models %}
+        <tr class="{{ 'chosen' if m.code == meta.best_model_by_val }}">
+          <td>{{ m.model }}</td>
+          <td class="n">{{ m.mae|num(2) }}</td>
+          <td class="n">{% if m.vs_naive is none %}—{% elif m.vs_naive < -0.005 %}<span class="good">точнее на {{ (-m.vs_naive)|pct }}</span>{% elif m.vs_naive > 0.005 %}хуже на {{ m.vs_naive|pct }}{% else %}так же{% endif %}</td>
+          <td class="n muted">{{ m.mase|num(3) if m.mase is not none else '—' }}</td>
+          <td class="n">{{ m.train_time|num(0) if m.train_time is not none else '—' }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+
+{% if series %}
+<section class="block">
+  <h2>Где лучшая модель слабее всего</h2>
+  <p class="caption">Ряды от худшего к лучшему по сравнению с «как вчера».</p>
+  <div class="table-wrap narrow">
+    <table>
+      <thead><tr><th>Ряд</th><th class="n">Ошибка, кВт·ч в час</th><th class="n">По сравнению с «как вчера»</th></tr></thead>
+      <tbody>{% for s in series[:12] %}
+        <tr><td>{{ s.series|series_ru }}</td><td class="n">{{ s.mae|num(2) }}</td>
+          <td class="n">{% if s.vs_naive is none %}—{% elif s.vs_naive < -0.005 %}<span class="good">точнее на {{ (-s.vs_naive)|pct }}</span>{% elif s.vs_naive > 0.005 %}хуже на {{ s.vs_naive|pct }}{% else %}так же{% endif %}</td></tr>
+      {% endfor %}</tbody>
+    </table>
+  </div>
+</section>
+{% endif %}
+
+{% if clients %}
+<section class="block">
+  <h2>Экономия накопителя по клиентам</h2>
+  <p class="caption">Категория 4, ставки примерные, планирование по прогнозу модели.
+     Рубли показаны рядом с пиком клиента и не суммируются: клиенты несопоставимы
+     по масштабу. Период — {{ clients[0].n_days }}&nbsp;сут.{% if clients[0].n_days < 21 %}, разброс ориентировочный{% endif %}.</p>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Клиент</th><th class="n">Пик, кВт</th><th class="n">В год, ₽</th>
+        <th>Разброс</th><th class="n">Потолок, ₽/год</th><th class="n">Окупаемость</th></tr></thead>
+      <tbody>{% for c in clients %}
+        <tr><td>{{ c.series|series_ru }}</td><td class="n">{{ c.peak_kw|num }}</td>
+          <td class="n">{{ c.annual|num }}</td>
+          <td><span class="spread small" data-spread data-lo="{{ c.lo }}" data-hi="{{ c.hi }}"
+                data-mid="{{ c.annual }}"></span></td>
+          <td class="n">{{ c.bound|num if c.bound is not none else '—' }}</td>
+          <td class="n">{{ c.payback|years }}</td></tr>
+      {% endfor %}</tbody>
+    </table>
+  </div>
+</section>
+{% endif %}
+
+{% if has_dashboard %}
+  <div class="actions"><a class="button" href="/models/{{ name }}/dashboard" target="_blank">Открыть полную сводку прогона</a></div>
+{% endif %}
+{% endblock %}

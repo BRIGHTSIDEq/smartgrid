@@ -1,0 +1,20 @@
+<div class="table-wrap">
+  <table>
+    <thead><tr><th>Если</th><th class="n">В год</th><th>Разброс</th><th class="n">Окупится за</th></tr></thead>
+    <tbody>
+    {% for p in points %}
+      <tr class="{{ 'chosen' if p.kind == 'center' }}">
+        <td>{% if p.kind == 'center' %}всё как сейчас
+            {% elif p.kind == 'capacity' %}ёмкость {{ 'вдвое меньше' if p.value < 1 else 'вдвое больше' }} ({{ p.capacity_kwh|num }}&nbsp;кВт·ч)
+            {% elif p.kind == 'capex' %}накопитель стоит {{ p.value|num }}&nbsp;₽ за кВт·ч
+            {% else %}ставки мощности {{ 'ниже' if p.value < 1 else 'выше' }} на {{ ((p.value - 1)|abs)|pct }}{% endif %}</td>
+        <td class="n">{{ p.annual|rub }}</td>
+        <td><span class="spread small" data-spread data-lo="{{ p.annual_lo }}" data-hi="{{ p.annual_hi }}"
+              data-mid="{{ p.annual }}" data-shared="whatif"></span></td>
+        <td class="n">{{ p.payback|years }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% if not complete %}<p class="note">Расчёт остановлен — показаны готовые варианты.</p>{% endif %}

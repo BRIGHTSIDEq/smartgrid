@@ -20,13 +20,13 @@ https://claude.ai/artifact/3nxwbec2ehonkNxxhgdDJZ
 
 Сохранность результатов:
 
-- [ ] Колонка источника данных в ключе сводных файлов; `aggregate_seeds` группирует по режиму и источнику (`utils/reporting.py:229`)
-- [ ] `metrics.json` со всеми сплитами (`utils/reporting.py:245`)
-- [ ] `storage_threshold_sweep.csv` и `forecast_series_*.csv` в каталог прогона (`main.py:828–863`)
-- [ ] Сохранение панельных моделей (`panel_pipeline.py:287`)
-- [ ] Итоги walk-forward в CSV и метаданные (`main.py:502`)
-- [ ] Статус `failed` при падении; метрики экспортируются сразу после оценки, необязательные блоки не уничтожают их (`main.py:441`, `panel_pipeline.py:330`)
-- [ ] Отказ вероятностной модели учитывается в коде возврата (`panel_pipeline.py:213`)
+- [x] Колонка источника данных в ключе сводных файлов; `aggregate_seeds` группирует по режиму и источнику (`utils/reporting.py:229`)
+- [x] `metrics.json` со всеми сплитами (`utils/reporting.py:245`)
+- [x] `storage_threshold_sweep.csv` и `forecast_series_*.csv` в каталог прогона (`main.py:828–863`)
+- [x] Сохранение панельных моделей (`panel_pipeline.py:287`)
+- [x] Итоги walk-forward в CSV и метаданные (`main.py:502`)
+- [x] Статус `failed` при падении; метрики экспортируются сразу после оценки, необязательные блоки не уничтожают их (`main.py:441`, `panel_pipeline.py:330`)
+- [x] Отказ вероятностной модели учитывается в коде возврата (`panel_pipeline.py:213`)
 
 После исправлений:
 

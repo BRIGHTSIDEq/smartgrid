@@ -159,8 +159,13 @@ def run_rolling_origin_backtest(
     total = len(df)
     step = (1.0 - initial_train_share) / n_origins
 
+    # Пропущенные и упавшие точки отсечения записываются явно: иначе итог по
+    # трём из пяти origin-ов неотличим от итога по всем пяти.
     results: Dict[str, Any] = {"origins": [], "MAE": [], "RMSE": [],
-                               "MAPE": [], "R2": [], "MASE": []}
+                               "MAPE": [], "R2": [], "MASE": [],
+                               "train_rows": [], "test_windows": [],
+                               "n_requested": int(n_origins),
+                               "skipped_origins": [], "failed_origins": []}
 
     logger.info("=" * 70)
     logger.info("ROLLING-ORIGIN БЭКТЕСТИНГ: %s | %d origin-ов, переобучение на каждом",
@@ -191,6 +196,7 @@ def run_rolling_origin_backtest(
                 k + 1, n_origins, history_length, forecast_horizon,
                 train_rows, val_rows, test_rows,
             )
+            results["skipped_origins"].append(k + 1)
             continue
 
         train_ratio = train_rows / end_idx
@@ -217,12 +223,16 @@ def run_rolling_origin_backtest(
             for key in ("MAE", "RMSE", "MAPE", "R2"):
                 results[key].append(m[key])
             results["MASE"].append(m.get("MASE", float("nan")))
+            results["train_rows"].append(int(avail))
+            results["test_windows"].append(int(len(data_k["X_test"])))
 
             logger.info("Origin %d: MAE=%.2f  MAPE=%.2f%%  R²=%.4f  MASE=%s",
                         k + 1, m["MAE"], m["MAPE"], m["R2"],
                         f"{m['MASE']:.3f}" if "MASE" in m else "н/д")
         except Exception as exc:
             logger.error("Origin %d провален: %s", k + 1, exc)
+            results["failed_origins"].append(
+                {"origin": k + 1, "error": f"{type(exc).__name__}: {exc}"})
 
     if results["MAE"]:
         results["mean_MAE"] = float(np.mean(results["MAE"]))

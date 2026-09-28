@@ -19,7 +19,7 @@ utils/reporting.py — Экспорт результатов в машиночи
 import json
 import logging
 import os
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -31,7 +31,7 @@ logger = logging.getLogger("smart_grid.utils.reporting")
 SCHEMA_VERSION = 2
 
 # Порядок колонок в сводной таблице: сначала то, что идёт в записку.
-_METRIC_ORDER = ["model", "mode", "scenario", "seed", "split", "MAE", "RMSE", "MAPE", "sMAPE", "R2",
+_METRIC_ORDER = ["model", "mode", "dataset", "scenario", "seed", "split", "MAE", "RMSE", "MAPE", "sMAPE", "R2",
                  "MASE", "DW", "ACF_24", "ACF_168", "kurtosis",
                  "n_params", "train_time_sec"]
 
@@ -138,17 +138,29 @@ def collect_environment() -> Dict[str, Any]:
     }
 
 
-def make_run_dir(output_dir: str, mode: str, scenario: str, seed: int) -> str:
+# Каталог прогона, созданный в этом процессе. Нужен обработчику отказа:
+# исключение может возникнуть в любом месте конвейера, и передавать каталог
+# через все вызовы ради одной записи статуса было бы избыточно.
+_CURRENT_RUN_DIR: Optional[str] = None
+
+
+def make_run_dir(output_dir: str, mode: str, scenario: str, seed: int,
+                 dataset: str = "synthetic") -> str:
     """
     Создаёт отдельный каталог для результатов прогона.
 
     Каждый запуск пишет в собственную директорию, поэтому результаты разных
     режимов и сценариев не перезаписывают друг друга и не смешиваются:
     сравнивать smoke-прогон с optimal по одному и тому же файлу нельзя.
+
+    Источник данных входит в имя, если он не синтетический: прогоны панели на
+    синтетике и на UCI с одним режимом и сидом иначе различались только
+    отметкой времени.
     """
     from datetime import datetime
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    name = f"{stamp}_{mode}_{scenario}_seed{seed}"
+    source = "" if dataset in ("", "synthetic") else f"_{dataset}"
+    name = f"{stamp}_{mode}{source}_{scenario}_seed{seed}"
     path = os.path.join(output_dir, "runs", name)
     os.makedirs(path, exist_ok=True)
 
@@ -157,9 +169,74 @@ def make_run_dir(output_dir: str, mode: str, scenario: str, seed: int) -> str:
     # прерванного вручную или от успешного, у которого файлы просто не
     # прочитались: единственным признаком было отсутствие run_metadata.json.
     write_run_metadata(path, {"mode": mode, "scenario": scenario, "seed": seed,
+                              "dataset": dataset,
                               "status": "running", "started_at": stamp})
+    global _CURRENT_RUN_DIR
+    _CURRENT_RUN_DIR = path
     logger.info("Каталог прогона: %s", path)
     return path
+
+
+def mark_run_status(run_dir: str, status: str, error: Optional[str] = None) -> None:
+    """
+    Меняет статус прогона, сохраняя уже записанные метаданные.
+
+    Упавший прогон навсегда оставался в статусе running: по каталогу нельзя было
+    отличить аварию от прогона, который ещё идёт в соседнем окне.
+    """
+    path = os.path.join(run_dir, "run_metadata.json")
+    meta: Dict[str, Any] = {}
+    if os.path.exists(path):
+        try:
+            with open(path, encoding="utf-8") as f:
+                meta = json.load(f)
+        except Exception as exc:                       # повреждённый файл
+            meta = {"metadata_read_error": str(exc)}
+    meta.pop("environment", None)
+    meta["status"] = status
+    if error is not None:
+        meta["error"] = error
+    write_run_metadata(run_dir, meta)
+
+
+def run_with_status(entry, argv=None) -> int:
+    """
+    Запускает конвейер и отражает его исход в статусе прогона.
+
+    Исключение даёт статус failed и текст ошибки, код 1 после создания
+    каталога — тоже failed, код 2 — partial: часть моделей или
+    необязательных блоков отказала, но основные результаты посчитаны.
+    """
+    global _CURRENT_RUN_DIR
+    _CURRENT_RUN_DIR = None
+    try:
+        code = entry(argv)
+    except BaseException as exc:
+        if _CURRENT_RUN_DIR is not None:
+            mark_run_status(_CURRENT_RUN_DIR, "failed", f"{type(exc).__name__}: {exc}")
+        raise
+    if _CURRENT_RUN_DIR is not None and code:
+        mark_run_status(_CURRENT_RUN_DIR, "partial" if code == 2 else "failed",
+                        f"код завершения {code}")
+    return code
+
+
+def run_optional_block(name: str, fn, failures: List[Dict[str, str]]):
+    """
+    Выполняет необязательный блок конвейера, не давая его отказу уничтожить
+    уже посчитанные результаты.
+
+    Графики внимания, анализ остатков, бэктестинг и экономика накопителя идут
+    после оценки моделей. Раньше исключение в любом из них обрывало прогон до
+    экспорта метрик. Отказ записывается в список и превращает итог прогона в
+    частичный: скрывать его нельзя, но и терять из-за него метрики тоже.
+    """
+    try:
+        return fn()
+    except Exception as exc:
+        logger.error("Блок «%s» завершился ошибкой: %s", name, exc, exc_info=True)
+        failures.append({"block": name, "error": f"{type(exc).__name__}: {exc}"})
+        return None
 
 
 def write_run_metadata(run_dir: str, meta: Dict[str, Any]) -> str:
@@ -197,9 +274,13 @@ def export_metrics(
     append: bool = True,
     mode: str = "",
     scenario: str = "",
+    dataset: str = "",
 ) -> str:
     """
     Сохраняет сводную таблицу метрик в CSV и JSON.
+
+    Ключ строки — модель, режим, источник данных, сценарий, сид и сплит.
+    JSON содержит все сплиты этого прогона, а не только последний записанный.
 
     Parameters
     ----------
@@ -212,13 +293,17 @@ def export_metrics(
     # Режим и сценарий обязаны попасть в таблицу: без них строки прогонов
     # smoke, fast и optimal с одним сидом неразличимы, затирают друг друга при
     # дозаписи, а агрегация по сидам смешивает несопоставимые результаты.
+    # Источник данных — часть того же ключа: панель на синтетике и на UCI с
+    # одним режимом и сидом затирала строки друг друга, а агрегация по сидам
+    # усредняла реальные данные с синтетическими.
     mode = mode or (run_meta or {}).get("mode", "")
     scenario = scenario or (run_meta or {}).get("scenario", "")
+    dataset = dataset or (run_meta or {}).get("dataset", "synthetic")
 
     rows = []
     for name, m in all_metrics.items():
-        row: Dict[str, Any] = {"model": name, "mode": mode, "scenario": scenario,
-                               "seed": seed, "split": split}
+        row: Dict[str, Any] = {"model": name, "mode": mode, "dataset": dataset,
+                               "scenario": scenario, "seed": seed, "split": split}
         row.update({k: v for k, v in m.items()})
         rows.append(row)
 
@@ -228,22 +313,39 @@ def export_metrics(
     if append and os.path.exists(csv_path):
         try:
             df_old = pd.read_csv(csv_path)
-            # Перезаписывается только та же комбинация режим+сценарий+сид+сплит.
+            # Перезаписывается только та же комбинация режима, источника,
+            # сценария, сида и сплита. Строки, записанные до появления колонки
+            # dataset, остаются с пустым источником и новыми не затираются.
             same = (df_old.get("seed") == seed) & (df_old.get("split") == split)
             if "mode" in df_old.columns:
                 same &= df_old["mode"].fillna("") == mode
             if "scenario" in df_old.columns:
                 same &= df_old["scenario"].fillna("") == scenario
+            if "dataset" in df_old.columns:
+                same &= df_old["dataset"].fillna("") == dataset
+            else:
+                same &= False
             mask = ~same
             df_new = pd.concat([df_old[mask], df_new], ignore_index=True)
         except Exception as exc:
             logger.warning("Не удалось прочитать существующий metrics.csv (%s), "
                            "файл будет перезаписан.", exc)
 
+    df_new = _ordered_frame(df_new.to_dict("records"))
     df_new.to_csv(csv_path, index=False, encoding="utf-8-sig")
 
+    # Прежде JSON писался только из строк текущего вызова, и запись
+    # валидационного сплита стирала тестовый. Теперь в него идут все сплиты
+    # этого прогона из объединённой таблицы.
+    this_run = df_new[(df_new["seed"] == seed)
+                      & (df_new["mode"].fillna("") == mode)
+                      & (df_new["scenario"].fillna("") == scenario)
+                      & (df_new["dataset"].fillna("") == dataset)]
+    run_rows = [{k: v for k, v in r.items()
+                 if not (isinstance(v, float) and np.isnan(v))}
+                for r in this_run.to_dict("records")]
     json_path = os.path.join(output_dir, "metrics.json")
-    dump_strict_json({"run": run_meta or {}, "metrics": rows}, json_path)
+    dump_strict_json({"run": run_meta or {}, "metrics": run_rows}, json_path)
 
     logger.info("Метрики сохранены: %s и %s", csv_path, json_path)
     return csv_path
@@ -281,6 +383,40 @@ def export_dm_tests(
     pd.DataFrame(dm_rows).to_csv(path, index=False, encoding="utf-8-sig")
     logger.info("Тесты Диболда–Мариано сохранены: %s", path)
     return path
+
+
+def export_walk_forward(results: Dict[str, Any], model_name: str,
+                        output_dir: str) -> Tuple[str, Dict[str, Any]]:
+    """
+    Сохраняет итоги walk-forward по каждой точке отсечения и сводку для метаданных.
+
+    Прежде результат процедуры оставался только в логе и на графике: цифры для
+    пояснительной записки приходилось переписывать из консоли.
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    rows = []
+    for i, origin in enumerate(results.get("origins", [])):
+        row: Dict[str, Any] = {"model": model_name, "origin": origin}
+        for key in ("train_rows", "test_windows", "MAE", "RMSE", "MAPE", "R2", "MASE"):
+            values = results.get(key, [])
+            if i < len(values):
+                row[key] = values[i]
+        rows.append(row)
+    path = os.path.join(output_dir, "walk_forward.csv")
+    pd.DataFrame(rows).to_csv(path, index=False, encoding="utf-8-sig")
+
+    mae = [r["MAE"] for r in rows if "MAE" in r]
+    summary = {
+        "model": model_name,
+        "n_requested": results.get("n_requested"),
+        "n_completed": len(rows),
+        "skipped_origins": list(results.get("skipped_origins", [])),
+        "failed_origins": list(results.get("failed_origins", [])),
+        "mean_MAE": float(np.mean(mae)) if mae else None,
+        "std_MAE": float(np.std(mae)) if mae else None,
+    }
+    logger.info("Итоги walk-forward сохранены: %s", path)
+    return path, summary
 
 
 def _upper_bound(storage_results):
@@ -411,11 +547,16 @@ def aggregate_seeds(output_dir: str) -> Optional[str]:
                     "Запустите пайплайн с --seed 0,1,2 для оценки разброса.")
         return None
 
-    # Агрегируются только сопоставимые прогоны: смешивать режимы нельзя.
-    if "mode" in df.columns and df["mode"].nunique() > 1:
-        latest = df.sort_index().iloc[-1]["mode"]
-        logger.info("В metrics.csv несколько режимов — агрегация только по '%s'.", latest)
-        df = df[df["mode"] == latest]
+    # Агрегируются только сопоставимые прогоны: тот же режим, источник данных
+    # и сценарий, что у последней записи. Прежде фильтр был только по режиму,
+    # и сиды панели на UCI усреднялись с сидами на синтетике.
+    key_cols = [c for c in ("mode", "dataset", "scenario") if c in df.columns]
+    if key_cols:
+        keys = df[key_cols].fillna("").astype(str)
+        latest = keys.iloc[-1]
+        df = df[(keys == latest).all(axis=1)]
+        logger.info("Агрегация по сидам для %s.",
+                    ", ".join(f"{c}={latest[c]}" for c in key_cols))
     df = df[df.get("split", "test") == "test"] if "split" in df.columns else df
     if df["seed"].nunique() < 2:
         logger.info("Агрегация по сидам пропущена: в выбранном режиме один сид.")
@@ -431,7 +572,9 @@ def aggregate_seeds(output_dir: str) -> Optional[str]:
     # неинтерпретируема — MAE агрегатного ряда города и MAE отдельного фидера
     # различаются в разы, и по одним числам не понять, что именно усреднено.
     agg.insert(0, "mode", str(df["mode"].iloc[-1]) if "mode" in df.columns else "")
-    agg.insert(1, "seeds", ",".join(str(s) for s in sorted(df["seed"].unique())))
+    agg.insert(1, "dataset", str(df["dataset"].fillna("").iloc[-1])
+               if "dataset" in df.columns else "")
+    agg.insert(2, "seeds", ",".join(str(s) for s in sorted(df["seed"].unique())))
 
     path = os.path.join(output_dir, "metrics_by_seed.csv")
     agg.to_csv(path, encoding="utf-8-sig")

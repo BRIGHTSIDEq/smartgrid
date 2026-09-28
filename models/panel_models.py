@@ -186,6 +186,13 @@ class PanelSklearnModel:
         self.per_horizon = per_horizon
         self.models: List[Any] = []
 
+    def __getstate__(self) -> Dict[str, Any]:
+        # Фабрика нужна только для обучения и обычно замыкание, которое pickle
+        # не сериализует. Обученной модели для прогноза она не требуется.
+        state = dict(self.__dict__)
+        state["factory"] = None
+        return state
+
     def _batch(self, data: Dict[str, Any], split: str) -> Dict[str, np.ndarray]:
         return {"hist": data[f"X_hist_{split}"], "future": data[f"X_future_{split}"],
                 "static": data[f"X_static_{split}"], "series": data[f"series_{split}"],
@@ -240,57 +247,62 @@ def _fit_one(model, X, y, X_val, y_val) -> None:
         model.fit(X, y)
 
 
+class PanelRidgeCV:
+    """
+    Ridge с перебором alpha по отложенной валидации.
+
+    Готовый RidgeCV из sklearn здесь не подходит: он отбирает по перекрёстной
+    проверке со случайным разбиением, а на временном ряде это обучение на
+    будущем. Нужен именно хронологический отложенный отрезок.
+
+    Класс вынесен на уровень модуля: объявленный внутри функции, он не
+    сериализовался, и обученную панельную модель нельзя было сохранить.
+    """
+
+    def __init__(self, grid):
+        self.grid = list(grid)
+        self.model = None
+        self.alpha_ = None
+        self.val_mae_ = None
+
+    def fit(self, X, Y, X_val=None, Y_val=None):
+        from sklearn.linear_model import Ridge
+
+        if X_val is None or Y_val is None:
+            raise ValueError(
+                "PanelRidgeCV требует валидационную выборку: без неё отбор alpha "
+                "не выполняется и модель молча остаётся с первым значением сетки."
+            )
+
+        grid = self.grid
+        best = (np.inf, None, None)
+        for a in grid:
+            m = Ridge(alpha=a).fit(X, Y)
+            score = float(np.mean(np.abs(Y_val - m.predict(X_val))))
+            if score < best[0]:
+                best = (score, a, m)
+        self.val_mae_, self.alpha_, self.model = best
+
+        # Оптимум на краю сетки означает, что она не покрывает нужный
+        # диапазон, и выбранное значение упирается в границу перебора.
+        if self.alpha_ in (grid[0], grid[-1]) and len(grid) > 1:
+            logger.warning(
+                "Panel Ridge: alpha=%.4g на границе сетки [%.4g, %.4g] — "
+                "оптимум может лежать за её пределами",
+                self.alpha_, grid[0], grid[-1])
+
+        logger.info("Panel Ridge: alpha=%.4g (MAE_val=%.5f, перебрано %d значений)",
+                    self.alpha_, self.val_mae_, len(grid))
+        return self
+
+    def predict(self, X):
+        return self.model.predict(X)
+
+
 def build_panel_ridge(alphas=None):
     """Ridge с подбором регуляризации по валидации, один на весь горизонт."""
-    from sklearn.linear_model import Ridge
-
     grid = list(alphas) if alphas is not None else list(np.logspace(-3, 5, 17))
-
-    class _RidgeCV:
-        """
-        Перебор alpha по отложенной валидации.
-
-        Готовый RidgeCV из sklearn здесь не подходит: он отбирает по
-        перекрёстной проверке со случайным разбиением, а на временном ряде это
-        обучение на будущем. Нужен именно хронологический отложенный отрезок.
-        """
-
-        def __init__(self):
-            self.model = None
-            self.alpha_ = None
-            self.val_mae_ = None
-
-        def fit(self, X, Y, X_val=None, Y_val=None):
-            if X_val is None or Y_val is None:
-                raise ValueError(
-                    "_RidgeCV требует валидационную выборку: без неё отбор alpha "
-                    "не выполняется и модель молча остаётся с первым значением сетки."
-                )
-
-            best = (np.inf, None, None)
-            for a in grid:
-                m = Ridge(alpha=a).fit(X, Y)
-                score = float(np.mean(np.abs(Y_val - m.predict(X_val))))
-                if score < best[0]:
-                    best = (score, a, m)
-            self.val_mae_, self.alpha_, self.model = best
-
-            # Оптимум на краю сетки означает, что она не покрывает нужный
-            # диапазон, и выбранное значение упирается в границу перебора.
-            if self.alpha_ in (grid[0], grid[-1]) and len(grid) > 1:
-                logger.warning(
-                    "Panel Ridge: alpha=%.4g на границе сетки [%.4g, %.4g] — "
-                    "оптимум может лежать за её пределами",
-                    self.alpha_, grid[0], grid[-1])
-
-            logger.info("Panel Ridge: alpha=%.4g (MAE_val=%.5f, перебрано %d значений)",
-                        self.alpha_, self.val_mae_, len(grid))
-            return self
-
-        def predict(self, X):
-            return self.model.predict(X)
-
-    return PanelSklearnModel("Ridge", lambda h: _RidgeCV(),
+    return PanelSklearnModel("Ridge", lambda h: PanelRidgeCV(grid),
                              aggregate_history=False, per_horizon=False)
 
 

@@ -32,7 +32,7 @@ import os
 import random
 import sys
 import time
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 import pandas as pd
@@ -463,51 +463,86 @@ def main(argv=None) -> int:
     y_true = inverse_scale(scaler, data["Y_test"])
     predictions = {t.model_name: t.predict_original_scale(data, "test") for t in trainers}
 
-    plot_metrics_comparison(test_metrics, plots_dir=Config.PLOTS_DIR)
-    plot_predictions_comparison(y_true, predictions, plots_dir=Config.PLOTS_DIR)
-    plot_accuracy_vs_cost(test_metrics, plots_dir=Config.PLOTS_DIR)
-
     # Деградация ошибки по шагам горизонта
     per_horizon = {
         name: metrics_by_horizon(y_true, pred, mase_scale=data.get("mase_scale"))
         for name, pred in predictions.items()
     }
-    plot_metrics_by_horizon(per_horizon, plots_dir=Config.PLOTS_DIR)
     _log_horizon_summary(per_horizon, logger)
 
     # Статистическая значимость различий между моделями
     dm_rows = pairwise_dm_table(y_true, predictions, h=Config.FORECAST_HORIZON)
     _log_dm_summary(dm_rows, best_name, logger)
 
+    # Метрики пишутся сразу после оценки. Прежде они выгружались в самом конце,
+    # и сбой в любом последующем блоке — графиках внимания, бэктестинге,
+    # экономике — уничтожал результат многочасового обучения. В конце прогона
+    # файлы перезаписываются с полными метаданными.
+    early_meta = {"mode": args.mode, "scenario": args.scenario, "seed": args.seed,
+                  "dataset": "synthetic", "best_model_by_val": best_name}
+    for target in (run_dir, Config.OUTPUT_DIR):
+        reporting.export_metrics(test_metrics, target, seed=args.seed,
+                                 split="test", run_meta=early_meta, append=True)
+        reporting.export_metrics(val_metrics, target, seed=args.seed,
+                                 split="val", run_meta=early_meta, append=True)
+    reporting.export_horizon_metrics(per_horizon, run_dir, seed=args.seed)
+    reporting.export_dm_tests(dm_rows, run_dir)
+
+    # Всё, что ниже, — необязательные блоки: их отказ делает прогон частичным,
+    # но не обрывает его.
+    failed_blocks: List[Dict[str, str]] = []
+
+    def _comparison_plots():
+        plot_metrics_comparison(test_metrics, plots_dir=Config.PLOTS_DIR)
+        plot_predictions_comparison(y_true, predictions, plots_dir=Config.PLOTS_DIR)
+        plot_accuracy_vs_cost(test_metrics, plots_dir=Config.PLOTS_DIR)
+        plot_metrics_by_horizon(per_horizon, plots_dir=Config.PLOTS_DIR)
+
+    reporting.run_optional_block("графики сравнения", _comparison_plots, failed_blocks)
+
     # ── [8/10] Диагностика: внимание и остатки ───────────────────────────────
     logger.info("\n[8/10] Диагностика лучшей модели: %s", best_name)
     if not args.skip_attention:
-        _visualize_attention(trainers, data, logger)
+        reporting.run_optional_block(
+            "веса внимания", lambda: _visualize_attention(trainers, data, logger),
+            failed_blocks)
 
-    analyze_residuals(y_true, predictions[best_name],
-                      model_name=best_name, plots_dir=Config.PLOTS_DIR)
+    reporting.run_optional_block(
+        "анализ остатков",
+        lambda: analyze_residuals(y_true, predictions[best_name],
+                                  model_name=best_name, plots_dir=Config.PLOTS_DIR),
+        failed_blocks)
 
     # ── [9/10] Устойчивость и бэктестинг ─────────────────────────────────────
     logger.info("\n[9/10] Устойчивость прогноза во времени...")
-    analyze_stability_over_windows(
-        best_trainer.model, data, n_windows=8,
-        plots_dir=Config.PLOTS_DIR, model_name=best_name,
-    )
+    reporting.run_optional_block(
+        "устойчивость по окнам",
+        lambda: analyze_stability_over_windows(
+            best_trainer.model, data, n_windows=8,
+            plots_dir=Config.PLOTS_DIR, model_name=best_name),
+        failed_blocks)
 
+    walk_forward_summary: Optional[Dict[str, Any]] = None
     if args.rolling_origin > 0:
         best_key = next((k for k, v in MODEL_REGISTRY.items() if v == best_name), None)
         if best_key:
             logger.info("Запуск walk-forward бэктестинга (%d origin-ов)...",
                         args.rolling_origin)
-            run_rolling_origin_backtest(
-                build_fn=lambda: build_models([best_key], logger,
-                                              n_train_windows=len(data["X_train"]))[0][0],
-                df=df, model_name=best_name, n_origins=args.rolling_origin,
-                history_length=Config.HISTORY_LENGTH,
-                forecast_horizon=Config.FORECAST_HORIZON,
-                epochs=Config.EPOCHS, batch_size=Config.BATCH_SIZE,
-                patience=Config.PATIENCE, plots_dir=Config.PLOTS_DIR,
-            )
+
+            def _walk_forward():
+                results = run_rolling_origin_backtest(
+                    build_fn=lambda: build_models([best_key], logger,
+                                                  n_train_windows=len(data["X_train"]))[0][0],
+                    df=df, model_name=best_name, n_origins=args.rolling_origin,
+                    history_length=Config.HISTORY_LENGTH,
+                    forecast_horizon=Config.FORECAST_HORIZON,
+                    epochs=Config.EPOCHS, batch_size=Config.BATCH_SIZE,
+                    patience=Config.PATIENCE, plots_dir=Config.PLOTS_DIR,
+                )
+                return reporting.export_walk_forward(results, best_name, run_dir)[1]
+
+            walk_forward_summary = reporting.run_optional_block(
+                "walk-forward", _walk_forward, failed_blocks)
 
     # ── [10/10] Оптимизация накопителя ───────────────────────────────────────
     storage_results: Dict[str, Any] = {}
@@ -516,18 +551,23 @@ def main(argv=None) -> int:
         logger.info("\n[10/10] Блок накопителя пропущен (--skip-storage)")
     else:
         logger.info("\n[10/10] Оптимизация накопителя энергии...")
-        storage_results, storage_forecasts = _run_storage_block(
-            data, predictions, best_name, logger,
-            compare_strategies, compare_forecast_sources,
-            plot_storage_result, plot_forecast_value,
-            reconstruct_day_ahead_series, actual_series_for_forecast,
-            best_trainer=best_trainer,
-        )
+        storage_out = reporting.run_optional_block(
+            "экономика накопителя",
+            lambda: _run_storage_block(
+                data, predictions, best_name, logger,
+                compare_strategies, compare_forecast_sources,
+                plot_storage_result, plot_forecast_value,
+                reconstruct_day_ahead_series, actual_series_for_forecast,
+                best_trainer=best_trainer, run_dir=run_dir),
+            failed_blocks)
+        if storage_out is not None:
+            storage_results, storage_forecasts = storage_out
 
     # ── Экспорт результатов ──────────────────────────────────────────────────
     logger.info("\nЭкспорт результатов...")
     run_meta = {
         "mode": args.mode, "scenario": args.scenario, "seed": args.seed,
+        "dataset": "synthetic",
         "reference_check_passed": bool(reference_ok),
         "reference_check": reference_rows,
         "kwh_per_household_month": Config.GEN_KWH_PER_HOUSEHOLD_MONTH,
@@ -553,6 +593,8 @@ def main(argv=None) -> int:
                         "val": int(len(data["X_val"])),
                         "test": int(len(data["X_test"]))},
         "n_train_windows": int(len(data["X_train"])),
+        "walk_forward": walk_forward_summary,
+        "failed_blocks": failed_blocks,
         "runtime_sec": round(time.time() - t_start, 1),
     }
     reporting.write_run_metadata(run_dir, run_meta)
@@ -569,8 +611,6 @@ def main(argv=None) -> int:
                                  split="test", run_meta=run_meta, append=True)
         reporting.export_metrics(val_metrics, target, seed=args.seed,
                                  split="val", run_meta=run_meta, append=True)
-    reporting.export_horizon_metrics(per_horizon, run_dir, seed=args.seed)
-    reporting.export_dm_tests(dm_rows, run_dir)
     if storage_results:
         reporting.export_storage_results(
             storage_results, run_dir,
@@ -587,16 +627,17 @@ def main(argv=None) -> int:
     # валидации регулярно оказывается не нейросеть, а градиентный бустинг:
     # прежнее ограничение на tf.keras.Model означало, что заявленная лучшая
     # модель оставалась без работающего инференса.
-    bundle_dir = export_model_bundle(
+    bundle_dir = reporting.run_optional_block("бандл лучшей модели", lambda: export_model_bundle(
         best_trainer.model, data,
         {"HISTORY_LENGTH": Config.HISTORY_LENGTH,
          "FORECAST_HORIZON": Config.FORECAST_HORIZON,
          "N_FEATURES": Config.N_FEATURES,
          "model_name": best_name, "mode": args.mode, "seed": args.seed},
         export_dir=Config.MODELS_DIR, model_name=best_name,
-    )
-    run_meta["deployable_model"] = best_name
+    ), failed_blocks)
+    run_meta["deployable_model"] = best_name if bundle_dir else None
     run_meta["bundle_dir"] = bundle_dir
+    run_meta["failed_blocks"] = failed_blocks
     reporting.write_run_metadata(run_dir, run_meta)
 
     logger.info("\n" + "=" * 78)
@@ -614,6 +655,12 @@ def main(argv=None) -> int:
         logger.error("  Результаты построены только по обученным моделям: %s",
                      ", ".join(trained_models))
         logger.info("  Результаты: %s", run_dir)
+        logger.info("=" * 78)
+        return 2
+    if failed_blocks:
+        logger.error("Пайплайн завершён ЧАСТИЧНО за %.1f мин: отказали блоки %s. "
+                     "Метрики моделей сохранены. Результаты: %s", elapsed_min,
+                     ", ".join(b["block"] for b in failed_blocks), run_dir)
         logger.info("=" * 78)
         return 2
 
@@ -691,10 +738,14 @@ def _run_storage_block(
     compare_strategies, compare_forecast_sources,
     plot_storage_result, plot_forecast_value,
     reconstruct_day_ahead_series, actual_series_for_forecast,
-    best_trainer=None,
+    best_trainer=None, run_dir=None,
 ):
     """
     Оптимизация накопителя на РЕАЛЬНОМ прогнозе модели.
+
+    Перебор порога и прогнозные ряды пишутся в каталог прогона. Прежде они
+    ложились в корень results/ и перезаписывались каждым следующим запуском,
+    в том числе smoke-прогоном поверх полного.
 
     Два принципиальных момента, без которых расчёт теряет смысл:
       1. Тарифные зоны привязываются к календарю тестового периода. Значения по
@@ -834,8 +885,9 @@ def _run_storage_block(
     sweep = sweep_shaving_threshold(
         forecast=forecasts[best_name], actual=actual, label="тест (верхняя граница)",
         **sweep_kwargs)
+    out_dir = run_dir or Config.OUTPUT_DIR
     pd.DataFrame(sweep).to_csv(
-        os.path.join(Config.OUTPUT_DIR, "storage_threshold_sweep.csv"),
+        os.path.join(out_dir, "storage_threshold_sweep.csv"),
         index=False, encoding="utf-8-sig")
 
     forecasts["__actual__"] = actual
@@ -859,7 +911,7 @@ def _run_storage_block(
                 data["train_end_idx"] + hist: data["train_end_idx"] + hist + n_v]
             pd.DataFrame({"timestamp": ts_val,
                           "forecast": val_series[:n_v], "actual": val_actual[:n_v]}).to_csv(
-                os.path.join(Config.OUTPUT_DIR, "forecast_series_val.csv"),
+                os.path.join(out_dir, "forecast_series_val.csv"),
                 index=False, encoding="utf-8-sig")
         except Exception as exc:
             logger.warning("Валидационные ряды не сохранены: %s", exc)
@@ -868,11 +920,12 @@ def _run_storage_block(
     frame.insert(0, "timestamp",
                  pd.to_datetime(data["timestamps"])[
                      data["test_start_idx"]: data["test_start_idx"] + len(frame)])
-    frame.to_csv(os.path.join(Config.OUTPUT_DIR, "forecast_series_test.csv"),
+    frame.to_csv(os.path.join(out_dir, "forecast_series_test.csv"),
                  index=False, encoding="utf-8-sig")
 
     return value_results, forecasts
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    from utils.reporting import run_with_status
+    sys.exit(run_with_status(main))

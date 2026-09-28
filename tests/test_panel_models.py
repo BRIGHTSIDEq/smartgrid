@@ -390,3 +390,54 @@ def test_panel_trainer_reports_macro_and_worst(panel_data):
         assert key in m
     assert m["MAE_worst_series"] >= m["MAE_macro"], "худший ряд не может быть лучше среднего"
     assert len(m["per_series_MAE"]) == len(panel_data["series_index"])
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# СОХРАНЕНИЕ ОБУЧЕННЫХ МОДЕЛЕЙ
+# ══════════════════════════════════════════════════════════════════════════════
+
+def test_trained_panel_models_survive_save_and_load(tmp_path, panel_data):
+    """
+    Каждая обученная панельная модель сохраняется и после загрузки даёт тот же
+    прогноз.
+
+    Каталог models/ панельного прогона оставался пустым, а Ridge и не мог быть
+    сохранён: его класс был объявлен внутри функции, XGBoost держал
+    замыкание-фабрику. Обе причины делали pickle невозможным.
+    """
+    import json
+    import pickle
+    from models.panel_models import build_panel_xgboost
+    from panel_pipeline import save_panel_models
+
+    nH = len(panel_data["feature_names_hist"])
+    nF = len(panel_data["feature_names_future"])
+    nS = len(panel_data["static_names"])
+    trainers = []
+    for model, name in ((PanelNaive24(), "Naive24"), (PanelHourlyProfile(), "HourlyProfile"),
+                        (build_panel_ridge(alphas=[0.1, 1.0]), "Ridge"),
+                        (build_panel_xgboost(n_estimators=5, max_depth=2), "XGBoost"),
+                        (build_dlinear(48, 24, nH, nF, nS), "DLinear")):
+        trainers.append(PanelTrainer(model, name).train(panel_data, epochs=1, batch_size=256))
+
+    manifest = save_panel_models(trainers, panel_data, str(tmp_path), best_name="Ridge")
+    assert manifest["failed"] == {}
+    assert sorted(manifest["models"]) == sorted(t.name for t in trainers)
+
+    for trainer in trainers:
+        path = tmp_path / manifest["models"][trainer.name]
+        if path.suffix == ".keras":
+            loaded = PanelTrainer(tf.keras.models.load_model(path), trainer.name)
+        else:
+            with open(path, "rb") as f:
+                loaded = PanelTrainer(pickle.load(f), trainer.name)
+        np.testing.assert_allclose(loaded.predict(panel_data, "test"),
+                                   trainer.predict(panel_data, "test"), rtol=1e-5,
+                                   err_msg=f"{trainer.name}: прогноз после загрузки другой")
+
+    with open(tmp_path / "preprocessing.pkl", "rb") as f:
+        prep = pickle.load(f)
+    assert set(prep["series_scalers"]) == set(panel_data["series_scalers"])
+    np.testing.assert_allclose(prep["static_std"], panel_data["static_std"])
+    with open(tmp_path / "manifest.json", encoding="utf-8") as f:
+        assert json.load(f)["best_model_by_val"] == "Ridge"

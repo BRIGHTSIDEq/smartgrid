@@ -416,3 +416,150 @@ def test_requirements_list_no_unused_packages():
               if aliases.get(d, d) not in imported and aliases.get(d, d) not in stdlib}
 
     assert not unused, f"объявлены, но не используются: {', '.join(sorted(unused))}"
+
+
+# ── Ключ сводных файлов: источник данных ─────────────────────────────────────
+
+def test_metrics_csv_keeps_uci_and_synthetic_rows_apart(tmp_path):
+    """
+    Панель на синтетике и на UCI с одним режимом и сидом не затирает друг друга.
+
+    Ключ строки состоял из режима, сценария, сида и сплита. Второй из двух
+    прогонов panel-smoke --seed 0 (синтетика, затем UCI) молча удалял строки
+    первого из сводного metrics.csv.
+    """
+    import pandas as pd
+    from utils import reporting
+
+    out = str(tmp_path)
+    for dataset, mae in (("synthetic", 10.0), ("uci", 20.0)):
+        reporting.export_metrics({"XGBoost": {"MAE": mae}}, out, seed=0, split="test",
+                                 run_meta={"mode": "panel-smoke", "scenario": "current",
+                                           "dataset": dataset})
+
+    df = pd.read_csv(tmp_path / "metrics.csv", encoding="utf-8-sig")
+    assert sorted(df["dataset"]) == ["synthetic", "uci"]
+    assert df.set_index("dataset").loc["synthetic", "MAE"] == 10.0
+
+
+def test_seed_aggregation_does_not_mix_data_sources(tmp_path):
+    """
+    Агрегация по сидам не усредняет реальные данные с синтетическими.
+
+    Фильтр был только по режиму: сиды panel-fast на UCI и на синтетике
+    попадали в одно среднее, хотя масштаб ошибок у них различается в разы.
+    """
+    import pandas as pd
+    from utils import reporting
+
+    rows = []
+    for dataset, base in (("synthetic", 10.0), ("uci", 100.0)):
+        for seed in (0, 1):
+            rows.append({"model": "XGBoost", "mode": "panel-fast", "dataset": dataset,
+                         "scenario": "current", "seed": seed, "split": "test",
+                         "MAE": base + seed, "RMSE": 1.0, "MAPE": 1.0, "R2": 0.9, "MASE": 0.5})
+    pd.DataFrame(rows).to_csv(tmp_path / "metrics.csv", index=False, encoding="utf-8-sig")
+
+    out = reporting.aggregate_seeds(str(tmp_path))
+    agg = pd.read_csv(out, encoding="utf-8-sig")
+
+    assert (agg["dataset"] == "uci").all(), "агрегируется источник последней записи"
+    assert agg.loc[agg["model"] == "XGBoost", "MAE_mean"].iloc[0] == 100.5
+    assert agg.loc[agg["model"] == "XGBoost", "MAE_count"].iloc[0] == 2
+
+
+def test_metrics_json_keeps_every_split_of_the_run(tmp_path):
+    """
+    metrics.json содержит и тестовый, и валидационный сплит.
+
+    JSON писался из строк текущего вызова. Конвейер записывает сначала test,
+    потом val, поэтому в каталоге каждого прогона JSON содержал только
+    валидацию, а тестовых метрик в нём не было.
+    """
+    from utils import reporting
+
+    meta = {"mode": "smoke", "scenario": "current", "dataset": "synthetic"}
+    reporting.export_metrics({"Ridge": {"MAE": 1.0}}, str(tmp_path), seed=0,
+                             split="test", run_meta=meta)
+    reporting.export_metrics({"Ridge": {"MAE": 2.0}}, str(tmp_path), seed=0,
+                             split="val", run_meta=meta)
+
+    with open(tmp_path / "metrics.json", encoding="utf-8") as f:
+        payload = json.load(f)
+    by_split = {r["split"]: r["MAE"] for r in payload["metrics"]}
+    assert by_split == {"test": 1.0, "val": 2.0}
+
+
+def test_metrics_json_holds_only_the_current_run(tmp_path):
+    """В JSON сводного каталога не попадают строки других прогонов."""
+    from utils import reporting
+
+    reporting.export_metrics({"Ridge": {"MAE": 1.0}}, str(tmp_path), seed=0, split="test",
+                             run_meta={"mode": "smoke", "scenario": "current"})
+    reporting.export_metrics({"Ridge": {"MAE": 3.0}}, str(tmp_path), seed=1, split="test",
+                             run_meta={"mode": "smoke", "scenario": "current"})
+
+    with open(tmp_path / "metrics.json", encoding="utf-8") as f:
+        payload = json.load(f)
+    assert [r["seed"] for r in payload["metrics"]] == [1]
+
+
+def test_run_dir_name_carries_the_data_source(tmp_path):
+    """Каталоги прогонов на UCI отличимы от синтетических по имени."""
+    import os
+    from utils import reporting
+
+    uci = reporting.make_run_dir(str(tmp_path), "panel-smoke", "current", 0, dataset="uci")
+    synthetic = reporting.make_run_dir(str(tmp_path), "panel-smoke", "current", 0)
+
+    assert "_panel-smoke_uci_current_seed0" in os.path.basename(uci)
+    assert "_panel-smoke_current_seed0" in os.path.basename(synthetic)
+    with open(os.path.join(uci, "run_metadata.json"), encoding="utf-8") as f:
+        assert json.load(f)["dataset"] == "uci"
+
+
+# ── Walk-forward: итоги в файле и метаданных ────────────────────────────────
+
+def test_walk_forward_records_failed_and_skipped_origins(tmp_path):
+    """
+    Упавшие и пропущенные точки отсечения видны в результате.
+
+    Прежде они оставались только в логе: итог по трём из пяти origin-ов был
+    неотличим от итога по всем пяти.
+    """
+    from analysis.backtesting import run_rolling_origin_backtest
+    from data.generator import generate_smartgrid_data
+
+    df = generate_smartgrid_data(days=30, households=40, seed=5)
+
+    def broken():
+        raise RuntimeError("сборка модели не удалась")
+
+    failed = run_rolling_origin_backtest(broken, df, n_origins=2, epochs=1,
+                                         plots_dir=str(tmp_path), save=False)
+    assert [f["origin"] for f in failed["failed_origins"]] == [1, 2]
+    assert "RuntimeError" in failed["failed_origins"][0]["error"]
+
+    skipped = run_rolling_origin_backtest(broken, df, n_origins=8, epochs=1,
+                                          plots_dir=str(tmp_path), save=False)
+    assert skipped["skipped_origins"] == list(range(1, 9))
+    assert skipped["n_requested"] == 8
+
+
+def test_walk_forward_export_writes_every_origin(tmp_path):
+    """Итоги walk-forward сохраняются по каждой точке отсечения и в сводку."""
+    import pandas as pd
+    from utils import reporting
+
+    results = {"origins": [1, 3], "MAE": [10.0, 14.0], "RMSE": [12.0, 16.0],
+               "MAPE": [4.0, 5.0], "R2": [0.9, 0.8], "MASE": [0.7, 0.9],
+               "train_rows": [500, 700], "test_windows": [80, 80], "n_requested": 3,
+               "skipped_origins": [], "failed_origins": [{"origin": 2, "error": "X"}]}
+    path, summary = reporting.export_walk_forward(results, "XGBoost", str(tmp_path))
+
+    df = pd.read_csv(path, encoding="utf-8-sig")
+    assert list(df["origin"]) == [1, 3]
+    assert list(df["train_rows"]) == [500, 700]
+    assert summary["n_completed"] == 2 and summary["n_requested"] == 3
+    assert summary["mean_MAE"] == 12.0
+    assert summary["failed_origins"] == [{"origin": 2, "error": "X"}]

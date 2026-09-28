@@ -20,7 +20,7 @@ panel_pipeline.py — конвейер многорядного (panel) прог
 import logging
 import os
 import time
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -145,8 +145,63 @@ def build_panel_models(data: Dict[str, Any], seed: int) -> List[Tuple[Any, str]]
     ]
 
 
+PREPROCESSING_KEYS = (
+    "series_index", "series_scalers", "weather_scalers",
+    "feature_names_hist", "feature_names_future", "static_names",
+    "static_mean", "static_std", "history_length", "forecast_horizon",
+    "consumption_channel",
+)
+
+
+def save_panel_models(trainers: List[Any], data: Dict[str, Any], models_dir: str,
+                      best_name: str) -> Dict[str, Any]:
+    """
+    Сохраняет обученные панельные модели и состояние предобработки.
+
+    Прежде каталог models/ панельного прогона оставался пустым: получить
+    прогноз обученной моделью можно было только повторным обучением. Вместе с
+    моделями сохраняются нормировщики рядов и погоды и параметры
+    стандартизации статических признаков — без них модель бесполезна, потому
+    что обучена на нормированных входах.
+
+    Ошибка сохранения одной модели не прерывает остальные и не отменяет
+    метрики: она попадает в манифест.
+    """
+    import json
+    import pickle
+
+    os.makedirs(models_dir, exist_ok=True)
+    manifest: Dict[str, Any] = {"best_model_by_val": best_name, "models": {},
+                                "failed": {}}
+    for trainer in trainers:
+        try:
+            if trainer._is_keras():
+                fname = f"{trainer.name}.keras"
+                trainer.model.save(os.path.join(models_dir, fname))
+            else:
+                fname = f"{trainer.name}.pkl"
+                with open(os.path.join(models_dir, fname), "wb") as f:
+                    pickle.dump(trainer.model, f)
+            manifest["models"][trainer.name] = fname
+        except Exception as exc:
+            logger.warning("Модель %s не сохранена: %s", trainer.name, exc)
+            manifest["failed"][trainer.name] = f"{type(exc).__name__}: {exc}"
+
+    with open(os.path.join(models_dir, "preprocessing.pkl"), "wb") as f:
+        pickle.dump({k: data[k] for k in PREPROCESSING_KEYS if k in data}, f)
+    manifest["preprocessing"] = "preprocessing.pkl"
+
+    with open(os.path.join(models_dir, "manifest.json"), "w", encoding="utf-8") as f:
+        json.dump(manifest, f, ensure_ascii=False, indent=2)
+    logger.info("Сохранено панельных моделей: %d из %d (%s)",
+                len(manifest["models"]), len(trainers), models_dir)
+    return manifest
+
+
 def run_probabilistic_block(data: Dict[str, Any], args, run_dir: str,
-                           logger_obj) -> List[Dict[str, Any]]:
+                           logger_obj,
+                           failures: Optional[List[Dict[str, str]]] = None,
+                           ) -> List[Dict[str, Any]]:
     """
     Обучает и оценивает вероятностные модели на той же панели.
 
@@ -158,8 +213,14 @@ def run_probabilistic_block(data: Dict[str, Any], args, run_dir: str,
     Тривиальный базлайн идёт первым: интервал по историческому разбросу ошибок
     уже даёт разумное покрытие, и без него нельзя утверждать, что обучаемая
     вероятностная модель что-то добавляет.
+
+    Отказы моделей дописываются в failures. Прежде упавшая вероятностная модель
+    только попадала в лог, а прогон завершался с кодом 0, и таблица квантилей
+    без нейросети выглядела полной.
     """
     import pandas as pd
+
+    failures = failures if failures is not None else []
 
     from models.quantile_models import (
         DEFAULT_QUANTILES, PanelQuantileXGBoost, QuantileNaive,
@@ -210,11 +271,12 @@ def run_probabilistic_block(data: Dict[str, Any], args, run_dir: str,
                           verbose=2)
             else:
                 model.fit(data)
+            result = evaluate_panel_quantiles(model, data, "test", DEFAULT_QUANTILES)
         except Exception as exc:
             logger_obj.error("Вероятностная модель %s не обучена: %s", name, exc)
+            failures.append({"model": name, "error": f"{type(exc).__name__}: {exc}"})
             continue
 
-        result = evaluate_panel_quantiles(model, data, "test", DEFAULT_QUANTILES)
         result["model"] = name
         result["train_time_sec"] = round(time.time() - t0, 1)
         rows.append(result)
@@ -283,7 +345,8 @@ def run_panel_pipeline(args, logger_obj) -> int:
                 args.uci_path, UCI_URL, UCI_FILENAME)
             return 1
 
-    run_dir = reporting.make_run_dir(Config.OUTPUT_DIR, args.mode, args.scenario, args.seed)
+    run_dir = reporting.make_run_dir(Config.OUTPUT_DIR, args.mode, args.scenario, args.seed,
+                                     dataset=getattr(args, "dataset", "synthetic"))
     Config.PLOTS_DIR = os.path.join(run_dir, "plots")
     Config.MODELS_DIR = os.path.join(run_dir, "models")
     os.makedirs(Config.PLOTS_DIR, exist_ok=True)
@@ -358,6 +421,18 @@ def run_panel_pipeline(args, logger_obj) -> int:
 
     test_metrics = compare_panel_models(trainers, data, "test")
 
+    # Метрики пишутся сразу после оценки: сбой вероятностного блока или
+    # иерархии иначе уничтожал результат обучения. В конце прогона файлы
+    # перезаписываются с полными метаданными.
+    early_meta = {"mode": args.mode, "scenario": args.scenario, "seed": args.seed,
+                  "dataset": dataset, "best_model_by_val": best_name}
+    for target in (run_dir, Config.OUTPUT_DIR):
+        for split, metrics in (("test", test_metrics), ("val", val_metrics)):
+            reporting.export_metrics(
+                {n: {k: v for k, v in m.items() if k != "per_series_MAE"}
+                 for n, m in metrics.items()},
+                target, seed=args.seed, split=split, run_meta=early_meta, append=True)
+
     # ── [5/6] Иерархия ──────────────────────────────────────────────────────
     logger_obj.info("\n[5/6] Городской прогноз суммированием фидеров...")
     hierarchy = bottom_up_city_forecast(
@@ -365,9 +440,15 @@ def run_panel_pipeline(args, logger_obj) -> int:
 
     # ── Вероятностный прогноз (по запросу) ──────────────────────────────────
     quantile_rows: List[Dict[str, Any]] = []
+    failed_quantile: List[Dict[str, str]] = []
+    failed_blocks: List[Dict[str, str]] = []
     if getattr(args, "probabilistic", False):
         logger_obj.info("Вероятностный прогноз: квантили 0.1, 0.5, 0.9")
-        quantile_rows = run_probabilistic_block(data, args, run_dir, logger_obj)
+        quantile_rows = reporting.run_optional_block(
+            "вероятностный прогноз",
+            lambda: run_probabilistic_block(data, args, run_dir, logger_obj,
+                                            failures=failed_quantile),
+            failed_blocks) or []
 
     # ── [6/6] Экспорт ───────────────────────────────────────────────────────
     logger_obj.info("\n[6/6] Экспорт результатов...")
@@ -398,6 +479,8 @@ def run_panel_pipeline(args, logger_obj) -> int:
         "partial_failure": bool(failed),
         "best_model_by_val": best_name,
         "quantile_models": [r["model"] for r in quantile_rows],
+        "failed_quantile_models": failed_quantile,
+        "failed_blocks": failed_blocks,
         "panel_validation_passed": bool(panel_ok),
         "hierarchy_city_MAE": hierarchy["MAE_mean"],
         "hierarchy_city_MAPE": hierarchy["MAPE_mean"],
@@ -426,6 +509,20 @@ def run_panel_pipeline(args, logger_obj) -> int:
     reporting.export_markdown_tables(flat, run_dir)
     reporting.aggregate_seeds(Config.OUTPUT_DIR)
 
+    # Модели сохраняются после метрик: сбой сериализации не должен стоить
+    # уже посчитанных результатов.
+    manifest = reporting.run_optional_block(
+        "сохранение моделей",
+        lambda: save_panel_models(trainers, data, Config.MODELS_DIR, best_name),
+        failed_blocks) or {"models": {}, "failed": {}}
+    if manifest["failed"]:
+        failed_blocks.append({"block": "сохранение моделей",
+                              "error": f"не сохранены: {', '.join(manifest['failed'])}"})
+    run_meta["saved_models"] = sorted(manifest["models"])
+    run_meta["unsaved_models"] = manifest["failed"]
+    run_meta["failed_blocks"] = failed_blocks
+    reporting.write_run_metadata(run_dir, run_meta)
+
     elapsed = (time.time() - t_start) / 60
     if failed:
         logger_obj.error(
@@ -433,6 +530,13 @@ def run_panel_pipeline(args, logger_obj) -> int:
             elapsed, len(failed), len(requested))
         for item in failed:
             logger_obj.error("  не обучена: %s — %s", item["model"], item["error"])
+        return 2
+    if failed_quantile or failed_blocks:
+        logger_obj.error(
+            "Panel-конвейер завершён ЧАСТИЧНО за %.1f мин: не обучены вероятностные "
+            "модели %s, отказали блоки %s. Метрики точечных моделей сохранены.",
+            elapsed, [q["model"] for q in failed_quantile],
+            [b["block"] for b in failed_blocks])
         return 2
 
     logger_obj.info("\n" + "=" * 78)

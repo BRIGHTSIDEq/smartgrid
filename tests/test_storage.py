@@ -257,3 +257,216 @@ def test_compare_strategies_orders_by_depth_of_discharge():
     res = compare_strategies(load, start_hour=0, start_weekday=0, **COMMON)
 
     assert res["Агрессивная"].total_energy_cycled > res["Консервативная"].total_energy_cycled
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ПРАЗДНИКИ В ТАРИФНОМ КАЛЕНДАРЕ
+# ══════════════════════════════════════════════════════════════════════════════
+
+def test_holiday_has_no_peak_zone():
+    """
+    В праздник пиковой зоны нет, как и в выходной.
+
+    Прежде тарифный модуль накопителя праздников не знал: 12 июня получало
+    пиковую зону, и эти часы входили в плату за мощность, хотя генератор и
+    признаки моделей считали день праздничным.
+    """
+    from optimization.storage import build_zone_list
+
+    # Понедельник 00:00, первые сутки — праздник, вторые — обычный рабочий день.
+    holidays = [True] * 24 + [False] * 24
+    zones = build_zone_list(48, start_hour=0, start_weekday=0, holidays=holidays)
+
+    assert "peak" not in zones[:24]
+    assert zones[24 + 8] == "peak" and zones[24 + 18] == "peak"
+    assert zones[:24] == build_zone_list(24, start_hour=0, start_weekday=5)
+
+
+def test_holiday_mask_length_must_match_the_horizon():
+    from optimization.storage import build_zone_list
+
+    with pytest.raises(ValueError, match="Маска праздников"):
+        build_zone_list(48, holidays=[False] * 24)
+
+
+def test_holiday_flags_follow_the_actual_dates():
+    """Признак праздника берётся по фактической дате, в том числе при старте в середине суток."""
+    import pandas as pd
+
+    from data.generator import holiday_flags
+
+    stamps = pd.date_range("2025-06-11 12:00", periods=48, freq="h")
+    flags = holiday_flags(stamps)
+
+    assert not flags[:12].any(), "11 июня — рабочий день"
+    assert flags[12:36].all(), "12 июня — праздник"
+    assert not flags[36:].any()
+
+
+def test_subperiod_keeps_its_own_calendar():
+    """
+    Подпериод получает свою календарную привязку, а не привязку начала ряда.
+
+    Робастный отбор порога делит валидацию на подпериоды, которые начинаются в
+    произвольный час и день недели. С привязкой начала всего ряда их тарифные
+    зоны сдвигались относительно данных.
+    """
+    from optimization.storage import _calendar_slice, build_zone_list
+
+    n = 24 * 20
+    holidays = [False] * n
+    holidays[200:224] = [True] * 24
+    full = build_zone_list(n, start_hour=13, start_weekday=2, holidays=holidays)
+
+    for lo, hi in ((0, 120), (117, 301), (301, n)):
+        kw = _calendar_slice({"start_hour": 13, "start_weekday": 2, "holidays": holidays}, lo, hi)
+        part = build_zone_list(hi - lo, kw["start_hour"], kw["start_weekday"], kw["holidays"])
+        assert part == full[lo:hi], f"подпериод [{lo}:{hi}] сдвинут"
+
+
+def test_robust_threshold_selection_uses_subperiod_calendars():
+    """
+    Робастный отбор порога оценивает каждый подпериод в его собственном календаре.
+
+    Эталон считается вручную: перебор на каждом подпериоде с правильной
+    привязкой и выбор порога с наилучшим наихудшим результатом. Отбор обязан
+    дать тот же порог.
+    """
+    import numpy as np
+    from optimization.storage import (
+        _calendar_slice, select_shaving_threshold, sweep_shaving_threshold,
+    )
+
+    rng = np.random.RandomState(0)
+    n = 24 * 28
+    h = np.arange(n)
+    actual = (1000 + 300 * np.sin(2 * np.pi * ((h + 13) % 24 - 6) / 24)
+              + 400 * (((h + 13) % 24 >= 18) & ((h + 13) % 24 < 21)) + rng.normal(0, 60, n))
+    forecast = actual + rng.normal(0, 120, n)
+    holidays = [False] * n
+    holidays[100:124] = [True] * 24
+
+    kwargs = dict(capacity=800.0, max_power=300.0, battery_cost_rub=8_000_000.0,
+                  start_hour=13, start_weekday=3, holidays=holidays)
+    quantiles = (0.6, 0.7, 0.8, 0.9)
+
+    bounds = np.linspace(0, n, 3).astype(int)
+    worst = {q: [] for q in quantiles}
+    for lo, hi in zip(bounds[:-1], bounds[1:]):
+        for row in sweep_shaving_threshold(forecast[lo:hi], actual[lo:hi], quantiles,
+                                           **_calendar_slice(kwargs, lo, hi)):
+            worst[row["shave_quantile"]].append(row["net_savings"])
+    expected = max(quantiles, key=lambda q: min(worst[q]))
+
+    chosen = select_shaving_threshold(forecast, actual, quantiles, n_subperiods=2, **kwargs)
+    assert chosen == expected
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ВЕРХНЯЯ ГРАНИЦА ЭКОНОМИИ
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _lp_case(seed=0, n_days=21):
+    import numpy as np
+    rng = np.random.RandomState(seed)
+    h = np.arange(n_days * 24)
+    actual = (1000 + 300 * np.sin(2 * np.pi * (h % 24 - 6) / 24)
+              + 400 * ((h % 24 >= 18) & (h % 24 < 21)) + rng.normal(0, 60, len(h)))
+    kwargs = dict(capacity=900.0, max_power=300.0, battery_cost_rub=12_000_000.0,
+                  round_trip_efficiency=0.88, cycle_cost_per_kwh=3.3,
+                  min_soc=0.1, max_soc=0.9, start_hour=0, start_weekday=0)
+    return actual, kwargs, rng
+
+
+def test_perfect_foresight_bounds_every_policy():
+    """
+    Оптимум при известном будущем не хуже ни одного правила управления.
+
+    Прежде границей считался идеальный прогноз с порогом по умолчанию, и строка
+    с настроенным порогом его превосходила: недобор выходил отрицательным.
+    Здесь граница сверяется с десятками вариантов — разные прогнозы, пороги и
+    обе стратегии.
+    """
+    import numpy as np
+    from optimization.storage import perfect_foresight_optimum, simulate_storage
+
+    actual, kw, rng = _lp_case()
+    bound = perfect_foresight_optimum(actual, **kw).net_savings
+
+    for noise in (0.0, 40.0, 150.0):
+        forecast = actual + rng.normal(0, noise, len(actual)) if noise else actual
+        for q in (0.5, 0.6, 0.7, 0.8, 0.9, 0.95):
+            res = simulate_storage(forecast=forecast, actual=actual, policy="peak_shaving",
+                                   shave_quantile=q, **kw)
+            assert res.net_savings <= bound + 1e-6, (noise, q, res.net_savings, bound)
+        res = simulate_storage(forecast=forecast, actual=actual, policy="tariff", **kw)
+        assert res.net_savings <= bound + 1e-6
+
+
+def test_perfect_foresight_schedule_is_physical():
+    """Расписание соблюдает ёмкость, мощность и запрет отдачи в сеть."""
+    import numpy as np
+    from optimization.storage import perfect_foresight_optimum
+
+    actual, kw, _ = _lp_case(seed=1)
+    res = perfect_foresight_optimum(actual, **kw)
+    soc = np.asarray(res.battery_levels[1:])
+    grid = np.asarray(res.energy_from_grid)
+
+    assert soc.min() >= kw["min_soc"] * kw["capacity"] - 1e-6
+    assert soc.max() <= kw["max_soc"] * kw["capacity"] + 1e-6
+    assert grid.min() >= -1e-6, "накопитель отдал энергию в сеть"
+    assert np.abs(np.diff(np.concatenate([[res.battery_levels[0]], soc]))).max() <= kw["max_power"] + 1e-6
+
+
+def test_perfect_foresight_does_not_invent_money():
+    """
+    Если циклировать невыгодно, оптимум — бездействие, и экономия равна минус
+    расходам на обслуживание.
+
+    Начальный заряд ставится на нижнюю границу: иначе оптимум законно разрядит
+    исходные 50% ёмкости и получит энергию без заряда. Симуляция может сделать
+    то же самое, поэтому граница обязана это допускать.
+    """
+    from optimization.storage import perfect_foresight_optimum
+
+    actual, kw, _ = _lp_case(seed=2)
+    kw.update(cycle_cost_per_kwh=1_000.0)
+    res = perfect_foresight_optimum(actual, demand_charge_rub_per_kw_month=0.0,
+                                    initial_soc=kw["min_soc"], **kw)
+
+    assert res.total_energy_cycled < 1e-6
+    assert res.net_savings == pytest.approx(-res.om_cost, abs=1e-6)
+
+
+def test_forecast_comparison_reports_non_negative_shortfall():
+    """В сравнении источников прогноза ни одна строка не превосходит верхнюю границу."""
+    import numpy as np
+    from optimization.storage import UPPER_BOUND_KEY, compare_forecast_sources
+
+    actual, kw, rng = _lp_case(seed=3)
+    kw.pop("min_soc"); kw.pop("max_soc")
+    results = compare_forecast_sources(
+        actual=actual, forecasts={"шумный": actual + rng.normal(0, 120, len(actual))},
+        min_soc=0.1, max_soc=0.9, **kw)
+
+    bound = results[UPPER_BOUND_KEY].net_savings
+    assert all(r.net_savings <= bound + 1e-6 for r in results.values())
+
+
+def test_perfect_foresight_never_exports_even_when_it_would_pay():
+    """
+    Отдача в сеть запрещена и тогда, когда она была бы выгодна.
+
+    Мощный накопитель с дешёвым циклом мог бы заряжаться ночью и продавать
+    энергию в пиковые часы сверх собственной нагрузки. Инвертор этого не
+    умеет, и симуляция этого не допускает — граница тоже не должна.
+    """
+    import numpy as np
+    from optimization.storage import perfect_foresight_optimum
+
+    actual, kw, _ = _lp_case(seed=4)
+    kw.update(capacity=20_000.0, max_power=5_000.0, cycle_cost_per_kwh=0.01)
+    res = perfect_foresight_optimum(actual, **kw)
+
+    assert np.asarray(res.energy_from_grid).min() >= -1e-6

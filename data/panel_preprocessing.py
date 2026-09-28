@@ -46,6 +46,11 @@ logger = logging.getLogger("smart_grid.data.panel_preprocessing")
 # Погодные величины, для которых строится прогноз с ошибкой.
 FORECASTABLE_WEATHER = ("temperature", "humidity", "cloud_cover")
 
+# Физические границы величин. Прогноз с ошибкой может выйти за них, например
+# дать отрицательную облачность, а такого значения не выдаёт ни один реальный
+# поставщик прогноза.
+_PHYSICAL_BOUNDS = {"humidity": (0.0, 100.0), "cloud_cover": (0.0, 1.0)}
+
 
 def make_weather_forecast(
     actual: np.ndarray,
@@ -111,12 +116,19 @@ def build_future_known_frame(
     horizon: int,
     rng: np.random.Generator,
     weather_forecast_sigma: Dict[str, Tuple[float, float]],
+    weather_scalers: Optional[Dict[str, MinMaxScaler]] = None,
 ) -> Dict[str, np.ndarray]:
     """
     Формирует известные заранее признаки целевого окна для одного ряда.
 
     Календарь известен точно: час, день недели, праздник и тарифную зону можно
     вычислить на любую дату вперёд. Погода известна лишь как прогноз.
+
+    Прогноз строится в физических единицах, потому что ошибка задана в
+    градусах и процентах, а затем переводится тем же скалером обучающего
+    отрезка, что и фактическая погода в истории. Без этого в одном входе модели
+    оказывались каналы 0…1 рядом с температурой от −17 до +6 и влажностью от 35
+    до 90, и у Ridge штраф L2 действовал на них по-разному.
     """
     n = len(frame)
     idx = np.clip(np.arange(n)[:, None] + np.arange(1, horizon + 1)[None, :], 0, n - 1)
@@ -147,8 +159,14 @@ def build_future_known_frame(
         if name not in frame.columns:
             continue
         base_sigma, growth = weather_forecast_sigma.get(name, (0.5, 0.05))
-        channels[f"fut_{name}_forecast"] = make_weather_forecast(
+        forecast = make_weather_forecast(
             frame[name].values.astype(np.float64), horizon, rng, base_sigma, growth)
+        if name in _PHYSICAL_BOUNDS:
+            forecast = np.clip(forecast, *_PHYSICAL_BOUNDS[name])
+        if weather_scalers is not None and name in weather_scalers:
+            forecast = weather_scalers[name].transform(
+                forecast.reshape(-1, 1)).reshape(forecast.shape)
+        channels[f"fut_{name}_forecast"] = forecast.astype(np.float32)
     return channels
 
 
@@ -259,6 +277,22 @@ def prepare_panel_data(
         sc.fit(df.loc[train_mask_global, col].values.reshape(-1, 1))
         weather_scalers[col] = sc
 
+    # ── Статические признаки: стандартизация по рядам ──────────────────────
+    # Статика постоянна внутри ряда и выводится из обучающего отрезка (UCI) или
+    # из параметров фидера (синтетика), поэтому стандартизация по рядам не
+    # переносит сведений о тесте. Без неё логарифм числа домохозяйств (около 7)
+    # стоял рядом с чувствительностью к холоду (около 2·10⁻⁴).
+    static_mean = np.zeros(len(static_cols), dtype=np.float64)
+    static_std = np.ones(len(static_cols), dtype=np.float64)
+    if static_cols:
+        per_series = (df.groupby(["city_id", "feeder_id"], sort=True)[static_cols]
+                        .first().to_numpy(np.float64))
+        static_mean = per_series.mean(axis=0)
+        static_std = per_series.std(axis=0)
+        # Признак, одинаковый у всех рядов (например, тип фидера, которого нет в
+        # панели), остаётся нулём, а не делится на ноль.
+        static_std = np.where(static_std > 1e-12, static_std, 1.0)
+
     parts: Dict[str, Dict[str, List[np.ndarray]]] = {
         split: {"X_hist": [], "X_future": [], "X_static": [], "Y": [],
                 "series": [], "anchor": []}
@@ -319,12 +353,13 @@ def prepare_panel_data(
         hist_matrix = np.stack([hist_channels[k] for k in feature_names_hist], axis=-1)
 
         future_channels = build_future_known_frame(
-            grp, forecast_horizon, rng, weather_forecast_sigma)
+            grp, forecast_horizon, rng, weather_forecast_sigma, weather_scalers)
         if not feature_names_future:
             feature_names_future = sorted(future_channels)
 
-        static_vec = grp.iloc[0][static_cols].values.astype(np.float32) if static_cols \
-            else np.zeros(0, dtype=np.float32)
+        static_vec = (((grp.iloc[0][static_cols].to_numpy(np.float64) - static_mean)
+                       / static_std).astype(np.float32) if static_cols
+                      else np.zeros(0, dtype=np.float32))
 
         bounds = {"train": (0, train_end),
                   "val": (train_end, val_end),
@@ -398,6 +433,8 @@ def prepare_panel_data(
         "feature_names_hist": feature_names_hist,
         "feature_names_future": feature_names_future,
         "static_names": static_cols,
+        "static_mean": static_mean,
+        "static_std": static_std,
         "history_length": history_length,
         "forecast_horizon": forecast_horizon,
         "timestamps": timestamps,

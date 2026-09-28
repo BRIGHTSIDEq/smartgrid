@@ -94,6 +94,52 @@ def _build_household_profiles(hour_arr, is_weekend, is_holiday, weekend_scale=0.
     return early.astype(np.float32), standard.astype(np.float32), night.astype(np.float32)
 
 
+# Минимум годового хода температуры сдвинут на 20 суток от 1 января: в
+# московском климате самый холодный период — вторая половина января. Без сдвига
+# годовой максимум потребления уезжал на ноябрь, и январь оказывался ниже апреля.
+# Константа общая для агрегатного и панельного генераторов.
+COLD_PEAK_SHIFT_DAYS = 20.0
+
+
+def holiday_factors(holiday: np.ndarray, new_year: np.ndarray):
+    """
+    Множители бытовой и производственной нагрузки в праздники.
+
+    В праздники останавливается ПРОИЗВОДСТВО, а бытовое потребление слегка
+    растёт: люди дома. Обратная логика давала новогодний провал по городу до
+    24% при фактических для ЕЭС России 8-12%. Функция общая для обоих
+    генераторов: прежде панельный генератор держал собственную копию с
+    перевёрнутой логикой, и исправление в агрегатном до него не дошло.
+
+    Returns
+    -------
+    residential, industrial : np.ndarray
+    """
+    holiday = np.asarray(holiday, np.float32)
+    new_year = np.asarray(new_year, np.float32)
+    other = holiday * (1.0 - new_year)
+    residential = 1.0 + 0.04 * new_year + 0.02 * other
+    industrial = 1.0 - 0.55 * new_year - 0.30 * other
+    return residential.astype(np.float32), industrial.astype(np.float32)
+
+
+def holiday_flags(timestamps) -> np.ndarray:
+    """
+    Признак праздника для каждой метки времени.
+
+    Нужен там, где календарь задан не началом и числом суток, а конкретными
+    метками: например, окно накопителя начинается в середине дня.
+    """
+    stamps = pd.DatetimeIndex(pd.to_datetime(timestamps))
+    if len(stamps) == 0:
+        return np.zeros(0, dtype=bool)
+    start = stamps[0].normalize()
+    days = int((stamps[-1].normalize() - start).days) + 1
+    daily = generate_holiday_mask(days, str(start.date()))
+    offsets = np.asarray((stamps.normalize() - start).days, dtype=int)
+    return daily[offsets] > 0
+
+
 def generate_holiday_mask(days=365, start_date="2024-01-01"):
     holidays = {(1,1),(1,2),(1,3),(1,4),(1,5),(1,6),(1,7),(1,8),
                 (2,23),(3,8),(5,1),(5,9),(6,12),(11,4)}
@@ -176,13 +222,8 @@ def generate_smartgrid_data(
     # ── Температура ──────────────────────────────────────────────────────────
     # Годовой ход задан климатическими нормами: средняя температура января и
     # июля определяют среднее и амплитуду синусоиды.
-    # Минимум сдвинут на 20 суток от 1 января: в московском климате самый
-    # холодный период — вторая половина января, а не самое начало года. Без
-    # сдвига годовой максимум потребления уезжал на ноябрь, и январь
-    # оказывался ниже апреля.
-    _COLD_PEAK_SHIFT_DAYS = 20.0
     temp_annual  = temp_annual_mean + temp_annual_amplitude*np.sin(
-        2*np.pi*(t - _COLD_PEAK_SHIFT_DAYS*24)/(24*365.25) - np.pi/2)
+        2*np.pi*(t - COLD_PEAK_SHIFT_DAYS*24)/(24*365.25) - np.pi/2)
     temp_diurnal = 3.5*np.sin(2*np.pi*(t%24)/24 - np.pi/4)
     tn = np.zeros(hours); tn[0] = rng.normal(0,1.5)
     for i in range(1,hours): tn[i] = 0.97*tn[i-1] + rng.normal(0,0.6)
@@ -264,9 +305,7 @@ def generate_smartgrid_data(
     # растёт: люди дома. Прежняя версия снижала на 35% именно бытовую
     # компоненту, отчего новогодний провал по городу достигал 24% при
     # фактических для ЕЭС России 8-12%, и логика была перевёрнута.
-    holiday_base_reduction = (1.0 + 0.04*ny_mask + 0.02*holiday_mask*(1-ny_mask)).astype(np.float32)
-    holiday_industrial_factor = (
-        1.0 - 0.55*ny_mask - 0.30*holiday_mask*(1-ny_mask)).astype(np.float32)
+    holiday_base_reduction, holiday_industrial_factor = holiday_factors(holiday_mask, ny_mask)
     mid  = (seasonal_winter_boost - seasonal_summer_dip)/2
     amp  = (seasonal_winter_boost + seasonal_summer_dip)/2
     seasonal_drift = (1.0 + mid + amp*np.cos(2*np.pi*day_of_year/365)).astype(np.float32)

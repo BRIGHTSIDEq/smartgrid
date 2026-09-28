@@ -47,9 +47,17 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
-from data.generator import generate_holiday_mask, _build_household_profiles, _sigmoid
+from data.generator import (
+    COLD_PEAK_SHIFT_DAYS, generate_holiday_mask, holiday_factors,
+    _build_household_profiles, _sigmoid,
+)
 
 logger = logging.getLogger("smart_grid.data.panel")
+
+# Среднее равномерного распределения, из которого берётся тренд фидера
+# (U(0.005, 0.030) в _sample_feeder_specs). Нужно для масштабирования под
+# заданный общий тренд.
+_SPEC_TREND_MEAN = 0.0175
 
 # Типы фидеров задают состав потребителей и форму суточного графика.
 FEEDER_TYPES = ("residential", "mixed", "commercial", "industrial")
@@ -181,7 +189,8 @@ def _generate_city_weather(
     climate_shift = rng.normal(0.0, 1.5)
 
     temp_annual = (temp_annual_mean + climate_shift
-                   + temp_annual_amplitude * np.sin(2 * np.pi * t / (24 * 365.25) - np.pi / 2))
+                   + temp_annual_amplitude * np.sin(
+                       2 * np.pi * (t - COLD_PEAK_SHIFT_DAYS * 24) / (24 * 365.25) - np.pi / 2))
     temp_diurnal = 3.5 * np.sin(2 * np.pi * (t % 24) / 24 - np.pi / 4)
 
     # AR(1)-шум погоды: векторизованная реализация через накопление.
@@ -341,6 +350,7 @@ def generate_panel_data(
 
     holiday_daily = generate_holiday_mask(days, start_date)
     holiday = np.repeat(holiday_daily, 24).astype(np.float32)
+    new_year = np.asarray((dates.month == 1) & (dates.day <= 8), dtype=np.float32)
 
     logger.info(
         "Генерация panel-данных: %d городов × %d фидеров × %d дней "
@@ -393,7 +403,7 @@ def generate_panel_data(
             feeder_rng = np.random.default_rng(feeder_seq)
             frames.append(_generate_feeder_series(
                 spec, feeder_rng, dates, t, hour_of_day, weekday, is_weekend,
-                holiday, day_of_year, weather, dsr_active, dsr_strength,
+                holiday, new_year, day_of_year, weather, dsr_active, dsr_strength,
                 temp_setpoint, cooling_setpoint, ev_share_of_households,
                 solar_share_of_households, ev_home_power_kw, solar_panel_peak_kw,
                 annual_trend,
@@ -419,6 +429,7 @@ def _generate_feeder_series(
     weekday: np.ndarray,
     is_weekend: np.ndarray,
     holiday: np.ndarray,
+    new_year: np.ndarray,
     day_of_year: np.ndarray,
     weather: Dict[str, np.ndarray],
     dsr_active: np.ndarray,
@@ -463,15 +474,20 @@ def _generate_feeder_series(
     wind_factor = np.where(temperature < 10.0, 0.05 * np.log1p(wind_speed), 0.0)
 
     # ── Праздники и годовой тренд ───────────────────────────────────────────
-    holiday_factor = 1.0 - 0.18 * holiday
-    trend = 1.0 + spec.annual_trend * (t / (24 * 365.25))
+    residential_holiday, industrial_holiday = holiday_factors(holiday, new_year)
+    # Тренд фидера — его собственная скорость, отмасштабированная так, чтобы
+    # среднее по фидерам совпадало с заданным параметром annual_trend. Прежде
+    # параметр передавался, но не использовался: Config.GEN_ANNUAL_TREND на
+    # панель не влиял.
+    trend_rate = spec.annual_trend * (annual_trend / _SPEC_TREND_MEAN)
+    trend = 1.0 + trend_rate * (t / (24 * 365.25))
 
     # ── Шум ──────────────────────────────────────────────────────────────────
     noise = np.convolve(rng.normal(0.0, spec.noise_sigma, hours + 6),
                         np.ones(6) / 6, mode="same")[:hours] * np.sqrt(6)
 
     shape = (profile * temp_response * (1.0 + humid_factor + wind_factor)
-             * holiday_factor * trend * (1.0 + noise))
+             * residential_holiday * trend * (1.0 + noise))
 
     # ── Масштаб: бытовая нагрузка по фактическому потреблению ───────────────
     hours_per_month = 8766.0 / 12.0
@@ -481,7 +497,8 @@ def _generate_feeder_series(
     # ── Коммерческая и промышленная часть ───────────────────────────────────
     industrial_shape = _vectorized_industrial(rng, hours, hour_of_day, weekday)
     nonres_mean = residential_mean * spec.nonresidential_share
-    industrial = industrial_shape * (nonres_mean / max(industrial_shape.mean(), 1e-9))
+    industrial = (industrial_shape * industrial_holiday
+                  * (nonres_mean / max(industrial_shape.mean(), 1e-9)))
 
     # ── Электротранспорт и микрогенерация ───────────────────────────────────
     ev_load = _vectorized_ev_load(rng, spec, hour_of_day, is_weekend, temperature,

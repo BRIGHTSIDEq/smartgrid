@@ -316,22 +316,33 @@ def test_robust_selection_maximises_the_worst_subperiod():
     лёгкий период.
 
     Выборка составлена из двух разнородных половин: в первой прогноз точен, во
-    второй ошибается.
+    второй сильно зашумлён.
+
+    Прежняя версия теста оценивала каждую половину с календарём всего ряда:
+    вторая половина начиналась с понедельника, хотя на деле попадала на другой
+    день недели. На той ошибке критерии расходились; при верном календаре обе
+    половины при умеренной ошибке имеют один и тот же оптимум 0.80. Поэтому шум
+    во второй половине увеличен до уровня, при котором половины действительно
+    требуют разных порогов.
     """
-    from optimization.storage import select_shaving_threshold, sweep_shaving_threshold
+    from optimization.storage import (
+        _calendar_slice, select_shaving_threshold, sweep_shaving_threshold,
+    )
 
-    h, actual = _peak_load(n_days=40)
+    _, actual = _peak_load(n_days=40)
     half = len(actual) // 2
-    forecast = np.concatenate([actual[:half], _imperfect_forecast(h)[half:]])
+    forecast = actual.copy()
+    forecast[half:] += np.random.RandomState(1).normal(0, 300, len(actual) - half)
+    kwargs = dict(_BATTERY, start_hour=0, start_weekday=0)
 
-    q_mean = select_shaving_threshold(forecast, actual, n_subperiods=1, **_BATTERY)
-    q_robust = select_shaving_threshold(forecast, actual, n_subperiods=2, **_BATTERY)
+    q_mean = select_shaving_threshold(forecast, actual, n_subperiods=1, **kwargs)
+    q_robust = select_shaving_threshold(forecast, actual, n_subperiods=2, **kwargs)
 
     def worst(q):
         halves = ((0, half), (half, len(actual)))
         return min(
-            sweep_shaving_threshold(forecast[a:b], actual[a:b], quantiles=(q,),
-                                    label="", **_BATTERY)[0]["net_savings"]
+            sweep_shaving_threshold(forecast[a:b], actual[a:b], quantiles=(q,), label="",
+                                    **_calendar_slice(kwargs, a, b))[0]["net_savings"]
             for a, b in halves
         )
 

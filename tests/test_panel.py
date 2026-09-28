@@ -19,7 +19,7 @@ import pytest
 
 from data.panel import generate_panel_data, validate_panel, city_totals, FeederSpec
 from data.panel_preprocessing import (
-    prepare_panel_data, inverse_scale_series, make_weather_forecast,
+    prepare_panel_data, inverse_scale_series, make_weather_forecast, build_future_known_frame,
     _tariff_zone_code,
 )
 
@@ -515,3 +515,169 @@ def test_stride_stores_copies_not_views(monkeypatch):
         f"наибольший {max(a.base.nbytes for a in holders)/1e6:.1f} МБ "
         f"при {max(a.nbytes for a in holders)/1e6:.1f} МБ полезных данных"
     )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# РЕАЛИСТИЧНОСТЬ ПАНЕЛЬНОГО ГЕНЕРАТОРА
+# ══════════════════════════════════════════════════════════════════════════════
+
+def test_holidays_cut_industry_and_lift_households():
+    """
+    В праздники падает производство, а бытовое потребление слегка растёт.
+
+    Панельный генератор держал собственную копию с обратной логикой — снижал
+    бытовую нагрузку на 18%, — и исправление в агрегатном генераторе до него
+    не дошло. Теперь оба используют одну функцию.
+    """
+    from data.generator import holiday_factors
+
+    holiday = np.array([0, 1, 1], np.float32)
+    new_year = np.array([0, 0, 1], np.float32)
+    residential, industrial = holiday_factors(holiday, new_year)
+
+    assert residential[0] == industrial[0] == 1.0
+    assert residential[1] > 1.0 and residential[2] > residential[1]
+    assert industrial[2] < industrial[1] < 1.0
+
+
+def test_new_year_dip_of_the_city_is_realistic():
+    """
+    Новогодний провал по городу соответствует фактическому для ЕЭС России.
+
+    Фактическое снижение в новогодние каникулы — порядка 8-12%: останавливается
+    промышленность, а отопление и быт не падают. Прежняя логика давала провал,
+    определяемый снижением быта, а не производства.
+    """
+    df, _ = generate_panel_data(days=400, n_cities=1, feeders_per_city=8, seed=0)
+    stamps = pd.to_datetime(df["timestamp"])
+    city = df.groupby(stamps)["consumption"].sum()
+    january = city[(city.index.month == 1) & (city.index.year == 2025)]
+
+    dip = 1.0 - january[january.index.day <= 8].mean() / january[january.index.day > 8].mean()
+    assert 0.04 < dip < 0.18, f"новогодний провал {dip:.1%}"
+
+
+def test_coldest_point_of_the_year_is_after_new_year():
+    """
+    Минимум годового хода температуры приходится на вторую половину января.
+
+    Без сдвига минимум приходился ровно на 1 января, и годовой максимум
+    потребления уезжал на ноябрь. Фаза определяется подгонкой годовой
+    синусоиды к среднесуточной температуре трёх городов за три года: отдельный
+    самый холодный день слишком зависит от погодного шума.
+    """
+    df, _ = generate_panel_data(days=1095, n_cities=3, feeders_per_city=1, seed=2)
+    daily = (df.groupby(pd.to_datetime(df["timestamp"]).dt.floor("D"))["temperature"]
+               .mean())
+    t = np.arange(len(daily), dtype=np.float64)
+    w = 2 * np.pi / 365.25
+    design = np.column_stack([np.ones_like(t), np.sin(w * t), np.cos(w * t)])
+    _, a, b = np.linalg.lstsq(design, daily.to_numpy(), rcond=None)[0]
+
+    # Минимум a·sin(wt) + b·cos(wt) достигается при wt = atan2(-a, -b).
+    coldest_day = (np.arctan2(-a, -b) / w) % 365.25
+    assert 10 <= coldest_day <= 35, f"минимум на {coldest_day:.0f}-й день года"
+
+
+def test_annual_trend_parameter_changes_the_panel():
+    """
+    Параметр общего тренда действительно влияет на данные.
+
+    Прежде он передавался в генератор фидера, но не использовался: бралась
+    только собственная скорость фидера, и Config.GEN_ANNUAL_TREND на панель не
+    действовал.
+    """
+    def growth(trend):
+        df, _ = generate_panel_data(days=730, n_cities=1, feeders_per_city=4, seed=1,
+                                    annual_trend=trend)
+        city = df.groupby(pd.to_datetime(df["timestamp"]))["consumption"].sum()
+        return city.iloc[8760:].mean() / city.iloc[:8760].mean()
+
+    flat, rising = growth(0.0), growth(0.05)
+    assert abs(flat - 1.0) < 0.01
+    assert rising > flat + 0.01
+
+
+def test_industrial_feeders_dip_more_than_residential_on_new_year():
+    """
+    В новогодние дни промышленные фидеры проседают сильнее жилых.
+
+    Это различает правильную и перевёрнутую логику праздников. Величина
+    провала по городу их не различает: снижение быта на 18% при неизменном
+    производстве тоже даёт около 11% по городу. А вот знак разницы между
+    промышленными и жилыми фидерами при обратной логике меняется.
+    """
+    df, specs = generate_panel_data(days=400, n_cities=2, feeders_per_city=8, seed=4)
+    stamps = pd.to_datetime(df["timestamp"])
+    january = df[(stamps.dt.month == 1) & (stamps.dt.year == 2025)]
+    is_ny = pd.to_datetime(january["timestamp"]).dt.day <= 8
+
+    dips = {}
+    for feeder, grp in january.groupby("feeder_id"):
+        mask = is_ny.loc[grp.index]
+        dips[feeder] = 1.0 - grp.loc[mask, "consumption"].mean() / grp.loc[~mask, "consumption"].mean()
+
+    share = {s.feeder_id: s.nonresidential_share for s in specs}
+    ranked = sorted(dips, key=share.get)
+    half = len(ranked) // 2
+    residential_dip = np.mean([dips[f] for f in ranked[:half]])
+    industrial_dip = np.mean([dips[f] for f in ranked[half:]])
+
+    assert industrial_dip > residential_dip, (
+        f"промышленные {industrial_dip:.1%}, жилые {residential_dip:.1%}"
+    )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# МАСШТАБ ВХОДОВ ПАНЕЛИ
+# ══════════════════════════════════════════════════════════════════════════════
+
+def test_weather_forecast_is_on_the_scale_of_weather_history(prepared):
+    """
+    Прогноз погоды нормируется тем же скалером, что и фактическая погода.
+
+    Прежде прогноз температуры шёл в градусах (от −17 до +6) рядом с каналами
+    0…1, и у Ridge штраф L2 действовал на него иначе, чем на остальные
+    признаки. Проверка сравнивает прогноз на час вперёд с нормированной
+    фактической температурой следующего часа: при одном масштабе они близки.
+    """
+    names_f = prepared["feature_names_future"]
+    names_h = prepared["feature_names_hist"]
+    forecast = prepared["X_future_train"][:, 0, names_f.index("fut_temperature_forecast")]
+    # Последний час истории и следующий за ним час почти совпадают по температуре.
+    last_hist = prepared["X_hist_train"][:, -1, names_h.index("temperature")]
+
+    assert abs(float(np.median(forecast - last_hist))) < 0.1
+    assert float(np.corrcoef(forecast, last_hist)[0, 1]) > 0.9
+
+
+def test_weather_forecast_respects_physical_bounds(panel):
+    """Облачность и влажность в прогнозе не выходят за физические границы."""
+    df, _ = panel
+    frame = df[df["feeder_id"] == df["feeder_id"].iloc[0]].reset_index(drop=True)
+    channels = build_future_known_frame(
+        frame, 24, np.random.default_rng(0),
+        {"humidity": (30.0, 3.0), "cloud_cover": (2.0, 0.2)})
+
+    assert channels["fut_cloud_cover_forecast"].min() >= 0.0
+    assert channels["fut_cloud_cover_forecast"].max() <= 1.0
+    assert channels["fut_humidity_forecast"].min() >= 0.0
+    assert channels["fut_humidity_forecast"].max() <= 100.0
+
+
+def test_static_features_are_standardised_across_series(prepared):
+    """
+    Статические признаки приведены к среднему 0 и разбросу 1 по рядам.
+
+    Прежде логарифм числа домохозяйств (около 7) стоял рядом с
+    чувствительностью к холоду (около 2·10⁻⁴).
+    """
+    per_series = {}
+    for row, sid in zip(prepared["X_static_train"], prepared["series_train"]):
+        per_series[int(sid)] = row
+    table = np.array(list(per_series.values()))
+    varying = table.std(axis=0) > 1e-9
+
+    assert np.allclose(table[:, varying].mean(axis=0), 0.0, atol=1e-5)
+    assert np.allclose(table[:, varying].std(axis=0), 1.0, atol=1e-4)
+    assert np.abs(table).max() < 10.0

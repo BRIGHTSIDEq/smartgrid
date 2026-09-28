@@ -283,6 +283,14 @@ def export_dm_tests(
     return path
 
 
+def _upper_bound(storage_results):
+    """Верхняя граница экономии: оптимум при известном будущем, если он посчитан."""
+    for key in ("Оптимум при известном будущем", "Идеальный прогноз"):
+        if key in storage_results:
+            return storage_results[key]
+    return None
+
+
 def export_storage_results(
     storage_results: Dict[str, Any],
     output_dir: str,
@@ -291,7 +299,10 @@ def export_storage_results(
 ) -> str:
     """Сохраняет экономику накопителя по источникам прогноза."""
     os.makedirs(output_dir, exist_ok=True)
-    oracle = storage_results.get("Идеальный прогноз")
+    # Недобор считается от оптимума при известном будущем: идеальный прогноз с
+    # порогом по умолчанию верхней границей не является, и недобор к нему
+    # получался отрицательным.
+    oracle = _upper_bound(storage_results)
     oracle_savings = oracle.net_savings if oracle is not None else None
 
     rows = []
@@ -365,9 +376,9 @@ def export_markdown_tables(
 
     if storage_results:
         lines.append("## Таблица 3. Экономический эффект накопителя\n")
-        lines.append("| Источник прогноза | Чистая экономия, руб | Недобор к идеалу, руб | Окупаемость, лет |")
+        lines.append("| Источник прогноза | Чистая экономия, руб | Недобор к оптимуму, руб | Окупаемость, лет |")
         lines.append("|---|---|---|---|")
-        oracle = storage_results.get("Идеальный прогноз")
+        oracle = _upper_bound(storage_results)
         oracle_val = oracle.net_savings if oracle is not None else None
         for name, res in sorted(storage_results.items(), key=lambda kv: -kv[1].net_savings):
             short = f"{oracle_val - res.net_savings:,.0f}".replace(",", " ") if oracle_val else "—"

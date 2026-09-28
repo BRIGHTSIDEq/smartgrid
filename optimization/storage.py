@@ -45,7 +45,7 @@ logger = logging.getLogger("smart_grid.optimization.storage")
 # ТАРИФНЫЙ МОДУЛЬ
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _get_zone(hour: int, weekday: int) -> str:
+def _get_zone(hour: int, weekday: int, holiday: bool = False) -> str:
     """
     Тарифная зона по часу и дню недели (порядок, действующий в России).
 
@@ -58,7 +58,7 @@ def _get_zone(hour: int, weekday: int) -> str:
     """
     if hour < 7 or hour >= 23:
         return "night"
-    if weekday >= 5:
+    if weekday >= 5 or holiday:
         return "day"
     if (7 <= hour < 10) or (17 <= hour < 21):
         return "peak"
@@ -72,20 +72,30 @@ def build_price_vector(
     tariff_peak: float = 11.24,
     start_hour: int = 0,
     start_weekday: int = 0,
+    holidays: Optional[Sequence[bool]] = None,
 ) -> np.ndarray:
-    prices = np.empty(n, dtype=np.float64)
     tariff = {"night": tariff_night, "day": tariff_day, "peak": tariff_peak}
-    for i in range(n):
-        h = (start_hour + i) % 24
-        wd = (start_weekday + (start_hour + i) // 24) % 7
-        prices[i] = tariff[_get_zone(h, wd)]
-    return prices
+    return np.array([tariff[z] for z in build_zone_list(n, start_hour, start_weekday, holidays)],
+                    dtype=np.float64)
 
 
-def build_zone_list(n: int, start_hour: int = 0, start_weekday: int = 0) -> List[str]:
+def build_zone_list(n: int, start_hour: int = 0, start_weekday: int = 0,
+                    holidays: Optional[Sequence[bool]] = None) -> List[str]:
+    """
+    Тарифные зоны на горизонте из n часов.
+
+    holidays — признак праздника для каждого часа. Без него праздничные дни
+    считались рабочими: например, 12 июня получало пиковую зону, и эти часы
+    входили в расчёт платы за мощность, хотя генератор и признаки моделей
+    считали день праздничным. Календарь дня недели по-прежнему выводится из
+    start_hour и start_weekday.
+    """
+    if holidays is not None and len(holidays) != n:
+        raise ValueError(f"Маска праздников задана на {len(holidays)} ч, а горизонт — {n} ч")
     return [
         _get_zone((start_hour + i) % 24,
-                  (start_weekday + (start_hour + i) // 24) % 7)
+                  (start_weekday + (start_hour + i) // 24) % 7,
+                  bool(holidays[i]) if holidays is not None else False)
         for i in range(n)
     ]
 
@@ -183,6 +193,7 @@ def simulate_storage(
     tariff_peak: float = 11.24,
     start_hour: int = 0,
     start_weekday: int = 0,
+    holidays: Optional[Sequence[bool]] = None,
     battery_cost_rub: Optional[float] = None,
     demand_charge_rub_per_kw_month: float = 950.0,
     annual_om_share: float = 0.015,
@@ -240,9 +251,9 @@ def simulate_storage(
     one_way_eff = np.sqrt(round_trip_efficiency)
 
     prices = build_price_vector(
-        n, tariff_night, tariff_half_peak, tariff_peak, start_hour, start_weekday
+        n, tariff_night, tariff_half_peak, tariff_peak, start_hour, start_weekday, holidays
     )
-    zones = build_zone_list(n, start_hour, start_weekday)
+    zones = build_zone_list(n, start_hour, start_weekday, holidays)
     thresholds = (_shaving_thresholds(forecast, shave_quantile)
                   if policy == "peak_shaving" else np.zeros(n))
 
@@ -450,6 +461,7 @@ def compare_strategies(
     annual_om_share: float = 0.015,
     start_hour: int = 0,
     start_weekday: int = 0,
+    holidays: Optional[Sequence[bool]] = None,
     actual: Optional[np.ndarray] = None,
     policy: str = "tariff",
     shave_quantile: float = 0.85,
@@ -495,6 +507,7 @@ def compare_strategies(
             annual_om_share=annual_om_share,
             start_hour=start_hour,
             start_weekday=start_weekday,
+            holidays=holidays,
             policy=policy,
             shave_quantile=shave_quantile,
             forecast_source=forecast_source,
@@ -579,6 +592,25 @@ def sweep_shaving_threshold(
     return rows
 
 
+def _calendar_slice(kwargs: Dict, lo: int, hi: int) -> Dict:
+    """
+    Параметры календаря для отрезка [lo, hi) длинного ряда.
+
+    Подпериод начинается не в тот час и не в тот день недели, что весь ряд.
+    Если оставить привязку начала всего ряда, тарифные зоны подпериода
+    сдвигаются относительно данных — ровно та ошибка, что уже исправлялась для
+    валидационного окна целиком. Маска праздников режется тем же отрезком.
+    """
+    out = dict(kwargs)
+    start_hour = int(kwargs.get("start_hour", 0))
+    start_weekday = int(kwargs.get("start_weekday", 0))
+    out["start_hour"] = (start_hour + lo) % 24
+    out["start_weekday"] = (start_weekday + (start_hour + lo) // 24) % 7
+    if kwargs.get("holidays") is not None:
+        out["holidays"] = list(kwargs["holidays"])[lo:hi]
+    return out
+
+
 def select_shaving_threshold(
     forecast_val: np.ndarray,
     actual_val: np.ndarray,
@@ -619,7 +651,7 @@ def select_shaving_threshold(
             continue
         rows = sweep_shaving_threshold(forecast_val[lo:hi], actual_val[lo:hi],
                                        quantiles, label=f"валидация [{lo}:{hi}]",
-                                       **kwargs)
+                                       **_calendar_slice(kwargs, lo, hi))
         for r in rows:
             per_q[r["shave_quantile"]].append(r["net_savings"])
 
@@ -633,6 +665,148 @@ def select_shaving_threshold(
     logger.info("Порог срезки выбран по наихудшему из %d подпериодов: q=%.2f "
                 "(наихудшая экономия %.0f)", n_sub, best_q, scored[best_q])
     return float(best_q)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ВЕРХНЯЯ ГРАНИЦА: ОПТИМУМ ПРИ ИЗВЕСТНОМ БУДУЩЕМ
+# ══════════════════════════════════════════════════════════════════════════════
+
+ORACLE_DEFAULT_KEY = "Идеальный прогноз"
+ORACLE_TUNED_KEY = "Идеальный прогноз, лучший порог"
+UPPER_BOUND_KEY = "Оптимум при известном будущем"
+
+
+def perfect_foresight_optimum(
+    actual: np.ndarray,
+    capacity: float,
+    max_power: float,
+    battery_cost_rub: float,
+    round_trip_efficiency: float = 0.95,
+    cycle_cost_per_kwh: float = 0.06,
+    min_soc: float = 0.10,
+    max_soc: float = 0.90,
+    initial_soc: float = 0.50,
+    tariff_night: float = 4.08,
+    tariff_half_peak: float = 7.87,
+    tariff_peak: float = 11.24,
+    demand_charge_rub_per_kw_month: float = 950.0,
+    annual_om_share: float = 0.015,
+    start_hour: int = 0,
+    start_weekday: int = 0,
+    holidays: Optional[Sequence[bool]] = None,
+    **_ignored,
+) -> StorageResult:
+    """
+    Наилучшее расписание накопителя при точно известной нагрузке.
+
+    Задача линейного программирования в той же модели затрат, что и
+    simulate_storage: КПД √η в каждую сторону, отдача в сеть запрещена, износ
+    считается по заряженной энергии, плата за мощность — по максимуму сетевой
+    нагрузки в пиковых часах. Ограничений на вид правила управления нет,
+    поэтому это верхняя граница экономии для любого контроллера при данном
+    накопителе и тарифе.
+
+    Прежде роль границы играл идеальный прогноз с порогом по умолчанию. Он не
+    был оптимален даже в своём семействе правил, и строка с настроенным
+    порогом его «превосходила» — недобор получался отрицательным.
+
+    Заряд в конце горизонта не фиксируется: симуляция тоже может закончить
+    период с разряженной батареей, и граница обязана быть не строже неё.
+    """
+    from scipy import sparse
+    from scipy.optimize import linprog
+
+    real = np.asarray(actual, dtype=np.float64)
+    n = len(real)
+    eta = float(np.sqrt(round_trip_efficiency))
+    prices = build_price_vector(n, tariff_night, tariff_half_peak, tariff_peak,
+                                start_hour, start_weekday, holidays)
+    zones = build_zone_list(n, start_hour, start_weekday, holidays)
+    peak_idx = np.array([i for i, z in enumerate(zones) if z == "peak"], dtype=int)
+    if peak_idx.size == 0:
+        peak_idx = np.arange(n)
+
+    horizon_days = max(n / 24.0, 1e-9)
+    months = horizon_days / 30.4375
+    dc = demand_charge_rub_per_kw_month * months
+
+    # Переменные: заряд c (кВт·ч в батарею), отдача d (кВт·ч потребителю),
+    # запас s после часа, максимум сетевой нагрузки в пиковые часы P.
+    nc, nd, ns = 0, n, 2 * n
+    nvar = 3 * n + 1
+    cost = np.zeros(nvar)
+    cost[nc:nc + n] = prices / eta + cycle_cost_per_kwh
+    cost[nd:nd + n] = -prices
+    cost[-1] = dc
+
+    rows, cols, vals = [], [], []
+    for i in range(n):
+        rows += [i, i, i]
+        cols += [ns + i, nc + i, nd + i]
+        vals += [1.0, -1.0, 1.0 / eta]
+        if i > 0:
+            rows.append(i)
+            cols.append(ns + i - 1)
+            vals.append(-1.0)
+    a_eq = sparse.csr_matrix((vals, (rows, cols)), shape=(n, nvar))
+    b_eq = np.zeros(n)
+    b_eq[0] = initial_soc * capacity
+
+    m = len(peak_idx)
+    rows, cols, vals = [], [], []
+    for k, i in enumerate(peak_idx):
+        rows += [k, k, k]
+        cols += [nc + i, nd + i, nvar - 1]
+        vals += [1.0 / eta, -1.0, -1.0]
+    a_ub = sparse.csr_matrix((vals, (rows, cols)), shape=(m, nvar))
+    b_ub = -real[peak_idx]
+
+    bounds = ([(0.0, max_power)] * n
+              + [(0.0, float(min(r, max_power * eta))) for r in real]
+              + [(min_soc * capacity, max_soc * capacity)] * n
+              + [(0.0, None)])
+
+    sol = linprog(cost, A_ub=a_ub, b_ub=b_ub, A_eq=a_eq, b_eq=b_eq,
+                  bounds=bounds, method="highs")
+    if not sol.success:
+        raise RuntimeError(f"Оптимум при известном будущем не найден: {sol.message}")
+
+    c = sol.x[nc:nc + n]
+    d = sol.x[nd:nd + n]
+    soc = sol.x[ns:ns + n]
+    grid = real + c / eta - d
+
+    baseline_cost = float(np.dot(real, prices))
+    optimized_cost = float(np.dot(grid, prices))
+    peak_before = float(real[peak_idx].max())
+    peak_after = float(grid[peak_idx].max())
+    demand_charge_savings = max(0.0, (peak_before - peak_after) * dc)
+    gross = (baseline_cost - optimized_cost) + demand_charge_savings
+    total_cycled = float(c.sum())
+    degradation = total_cycled * cycle_cost_per_kwh
+    om_cost = battery_cost_rub * annual_om_share * (horizon_days / 365.25)
+    net = gross - degradation - om_cost
+    annual = net * (8760.0 / n) if n > 0 else 0.0
+
+    logger.info("Оптимум при известном будущем: чистая экономия %.0f руб, пик %.0f → %.0f кВт",
+                net, peak_before, peak_after)
+    return StorageResult(
+        strategy_name=UPPER_BOUND_KEY, policy="perfect_foresight",
+        forecast_source=UPPER_BOUND_KEY,
+        baseline_cost=baseline_cost, optimized_cost=optimized_cost,
+        degradation_cost=degradation, gross_savings=gross, net_savings=net,
+        net_savings_pct=(net / baseline_cost * 100) if baseline_cost > 0 else 0.0,
+        battery_levels=[initial_soc * capacity] + soc.tolist(),
+        actions=["charge" if ci > 1e-6 else ("discharge" if di > 1e-6 else "idle")
+                 for ci, di in zip(c, d)],
+        energy_from_grid=grid.tolist(), prices=prices,
+        hourly_costs=(grid * prices).tolist(), total_energy_cycled=total_cycled,
+        n_charge_hours=int((c > 1e-6).sum()), n_discharge_hours=int((d > 1e-6).sum()),
+        annual_savings_est=annual,
+        payback_years=battery_cost_rub / annual if annual > 0 else float("inf"),
+        demand_charge_savings=demand_charge_savings, om_cost=om_cost,
+        peak_before_kw=peak_before, peak_after_kw=peak_after,
+    )
 
 
 def compare_forecast_sources(
@@ -652,6 +826,7 @@ def compare_forecast_sources(
     annual_om_share: float = 0.015,
     start_hour: int = 0,
     start_weekday: int = 0,
+    holidays: Optional[Sequence[bool]] = None,
     shave_quantile: float = 0.85,
 ) -> Dict[str, StorageResult]:
     """
@@ -684,11 +859,11 @@ def compare_forecast_sources(
         tariff_peak=tariff_peak,
         demand_charge_rub_per_kw_month=demand_charge_rub_per_kw_month,
         annual_om_share=annual_om_share,
-        start_hour=start_hour, start_weekday=start_weekday,
+        start_hour=start_hour, start_weekday=start_weekday, holidays=holidays,
         policy="peak_shaving", shave_quantile=shave_quantile,
     )
 
-    sources: Dict[str, np.ndarray] = {"Идеальный прогноз": np.asarray(actual, dtype=np.float64)}
+    sources: Dict[str, np.ndarray] = {ORACLE_DEFAULT_KEY: np.asarray(actual, dtype=np.float64)}
     for name, f in forecasts.items():
         sources[name] = np.asarray(f, dtype=np.float64)
 
@@ -699,8 +874,22 @@ def compare_forecast_sources(
             strategy_name=f"Peak shaving по прогнозу: {name}", **common,
         )
 
+    # Две границы. Идеальный прогноз с лучшим порогом — предел для пороговых
+    # правил; оптимум при известном будущем — предел для любого правила. Обе
+    # недостижимы: порог выбирается по той же выборке, будущее неизвестно.
+    tuned = max(
+        (simulate_storage(forecast=actual, actual=actual, forecast_source=ORACLE_TUNED_KEY,
+                          strategy_name=f"{ORACLE_TUNED_KEY} (q={q:.2f})",
+                          **{**common, "shave_quantile": q})
+         for q in (0.60, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95)),
+        key=lambda r: r.net_savings)
+    results[ORACLE_TUNED_KEY] = tuned
+    sources[ORACLE_TUNED_KEY] = sources[ORACLE_DEFAULT_KEY]
+    results[UPPER_BOUND_KEY] = perfect_foresight_optimum(actual, **common)
+    sources[UPPER_BOUND_KEY] = sources[ORACLE_DEFAULT_KEY]
+
     # ── Сводная таблица ───────────────────────────────────────────────────────
-    oracle = results["Идеальный прогноз"].net_savings
+    oracle = results[UPPER_BOUND_KEY].net_savings
     logger.info("═" * 86)
     logger.info("ЦЕНА ОШИБКИ ПРОГНОЗА (стратегия peak shaving, SOC %.0f%%→%.0f%%)",
                 min_soc * 100, max_soc * 100)
@@ -709,7 +898,7 @@ def compare_forecast_sources(
                 "Источник прогноза", "MAE", "Чистая экон.", "Недобор", "Реализовано")
     logger.info("─" * 86)
     for name, res in sorted(results.items(), key=lambda kv: -kv[1].net_savings):
-        if name == "Идеальный прогноз":
+        if name in (ORACLE_DEFAULT_KEY, ORACLE_TUNED_KEY, UPPER_BOUND_KEY):
             mae = 0.0
         else:
             mae = float(np.mean(np.abs(np.asarray(actual, dtype=np.float64) - sources[name])))

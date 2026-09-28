@@ -701,6 +701,8 @@ def _run_storage_block(
          умолчанию (понедельник 00:00) сдвинули бы «ночь» на середину дня.
       2. Решения принимаются по прогнозу, а стоимость считается по факту.
     """
+    from data.generator import holiday_flags
+
     horizon = int(Config.FORECAST_HORIZON)
 
     # Прогнозный ряд «день вперёд»: стыкуем непересекающиеся горизонты.
@@ -733,6 +735,10 @@ def _run_storage_block(
         demand_charge_rub_per_kw_month=Config.DEMAND_CHARGE_RUB_PER_KW_MONTH,
         annual_om_share=Config.BATTERY_OM_SHARE,
         start_hour=start_hour, start_weekday=start_weekday,
+        # Праздники по фактическим датам окна: без них праздничные дни
+        # тарифицировались как рабочие и получали пиковую зону.
+        holidays=holiday_flags(pd.to_datetime(data["timestamps"])[
+            data["test_start_idx"]: data["test_start_idx"] + n_hours]),
     )
 
     # Сравнение стратегий по глубине разряда (календарное управление).
@@ -804,6 +810,9 @@ def _run_storage_block(
             val_kwargs = dict(sweep_kwargs)
             val_kwargs["start_hour"] = int(ts_val.hour)
             val_kwargs["start_weekday"] = int(ts_val.dayofweek)
+            val_start = data["train_end_idx"] + hist
+            val_kwargs["holidays"] = holiday_flags(
+                pd.to_datetime(data["timestamps"])[val_start: val_start + n_val])
             logger.info("Валидационный период для подбора порога: начало %s "
                         "(час=%d, день недели=%d)", ts_val, ts_val.hour,
                         ts_val.dayofweek)

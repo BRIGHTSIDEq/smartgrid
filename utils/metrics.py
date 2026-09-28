@@ -279,6 +279,52 @@ def diebold_mariano(
     return float(dm_stat), p_value
 
 
+def hln_correction(dm_stat: float, n: int, h: int) -> Tuple[float, float]:
+    """
+    Поправка Харви–Лейбурна–Ньюболда (1997) к статистике Диболда–Мариано.
+
+    Нормальное приближение на малых выборках завышает значимость, и тем
+    сильнее, чем больше горизонт. После прореживания до непересекающихся суток
+    независимых наблюдений здесь около сотни, поэтому поправка существенна.
+    Статистика умножается на sqrt((n + 1 − 2h + h(h−1)/n) / n), p-value
+    берётся из распределения Стьюдента с n − 1 степенями свободы.
+    """
+    from scipy import stats
+
+    if not np.isfinite(dm_stat) or n < 2:
+        return float("nan"), float("nan")
+    factor = (n + 1 - 2 * h + h * (h - 1) / n) / n
+    if factor <= 0:
+        return float("nan"), float("nan")
+    corrected = float(dm_stat * np.sqrt(factor))
+    p_value = float(2.0 * stats.t.sf(abs(corrected), df=n - 1))
+    return corrected, p_value
+
+
+def holm_adjust(p_values: List[float]) -> List[float]:
+    """
+    Поправка Холма на множественные сравнения.
+
+    При k попарных сравнениях вероятность хотя бы одной ложной значимости
+    без поправки растёт до 1 − 0.95^k: для восьми моделей это 28 пар и почти
+    гарантированная ложная находка. Поправка Холма контролирует эту
+    вероятность и строго мощнее поправки Бонферрони. Пропуски (NaN) в число
+    сравнений не входят и остаются пропусками.
+    """
+    p = np.asarray(p_values, dtype=np.float64)
+    out = np.full(p.shape, np.nan)
+    valid = np.where(np.isfinite(p))[0]
+    m = len(valid)
+    if m == 0:
+        return out.tolist()
+    order = valid[np.argsort(p[valid], kind="stable")]
+    running = 0.0
+    for rank, idx in enumerate(order):
+        running = max(running, min(1.0, (m - rank) * p[idx]))
+        out[idx] = running
+    return out.tolist()
+
+
 def to_non_overlapping(array: np.ndarray, horizon: int) -> np.ndarray:
     """
     Оставляет от матрицы окон (N, H) только непересекающиеся: каждое H-е.
@@ -312,9 +358,16 @@ def pairwise_dm_table(
     Ньюи–Уэста на лаги 1..h−1 после прореживания снимает остаточную
     зависимость между соседними сутками.
 
+    Кроме исходной статистики выводятся поправка Харви–Лейбурна–Ньюболда
+    (DM_HLN, p_HLN) и поправка Холма на число пар (p_holm). Вывод о
+    значимости с учётом обеих поправок — в колонке better_holm. Исходные
+    колонки сохранены, чтобы новые таблицы оставались сопоставимыми со
+    старыми прогонами.
+
     Returns
     -------
-    Список словарей {"model_a", "model_b", "DM", "p_value", "better"}.
+    Список словарей {"model_a", "model_b", "DM", "p_value", "better",
+    "DM_HLN", "p_HLN", "p_holm", "better_holm", "n_obs"}.
     """
     y_true = to_non_overlapping(y_true, h)
     predictions = {k: to_non_overlapping(v, h) for k, v in predictions.items()}
@@ -324,12 +377,24 @@ def pairwise_dm_table(
         for j in range(i + 1, len(names)):
             a, b = names[i], names[j]
             dm, p = diebold_mariano(y_true, predictions[a], predictions[b], h=h)
-            if np.isnan(dm):
-                better = "н/д"
-            elif p >= 0.05:
-                better = "различие незначимо"
-            else:
-                better = a if dm < 0 else b
+            n_obs = int(np.size(y_true))
+            dm_hln, p_hln = hln_correction(dm, n_obs, h)
             rows.append({"model_a": a, "model_b": b,
-                         "DM": round(dm, 4), "p_value": round(p, 6), "better": better})
+                         "DM": round(dm, 4), "p_value": round(p, 6),
+                         "better": _dm_verdict(a, b, dm, p),
+                         "DM_HLN": round(dm_hln, 4), "p_HLN": round(p_hln, 6),
+                         "n_obs": n_obs})
+
+    for row, p_holm in zip(rows, holm_adjust([r["p_HLN"] for r in rows])):
+        row["p_holm"] = round(p_holm, 6)
+        row["better_holm"] = _dm_verdict(row["model_a"], row["model_b"],
+                                         row["DM_HLN"], p_holm)
     return rows
+
+
+def _dm_verdict(a: str, b: str, dm: float, p: float, alpha: float = 0.05) -> str:
+    if not np.isfinite(dm) or not np.isfinite(p):
+        return "н/д"
+    if p >= alpha:
+        return "различие незначимо"
+    return a if dm < 0 else b

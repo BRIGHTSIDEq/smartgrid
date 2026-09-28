@@ -193,7 +193,12 @@ class PanelTrainer:
             mae = mean_absolute_error(y_true[mask], y_pred[mask])
             per_series[key] = mae
             maes.append(mae)
-            mapes.append(mean_absolute_percentage_error(y_true[mask], y_pred[mask]))
+            # Та же защита от нулевых фактов, что у micro-MAPE: без неё один
+            # ряд UCI с нулевыми показаниями давал MAPE_macro порядка 2·10^8.
+            pos = positive[mask]
+            if pos.any():
+                mapes.append(mean_absolute_percentage_error(y_true[mask][pos],
+                                                            y_pred[mask][pos]))
 
             denom = scale.get(key, 0.0)
             if np.isfinite(denom) and denom > 0:
@@ -213,7 +218,7 @@ class PanelTrainer:
             "MAPE": micro["MAPE"], "MAPE_coverage": micro["MAPE_coverage"],
             "sMAPE": micro["sMAPE"], "R2": micro["R2"],
             "MAE_macro": float(np.mean(maes)),
-            "MAPE_macro": float(np.mean(mapes)),
+            "MAPE_macro": float(np.mean(mapes)) if mapes else float("nan"),
             "MAE_worst_series": float(per_series[worst_key]),
             "worst_series": worst_key,
             "MASE": mase_macro,
@@ -290,14 +295,23 @@ def bottom_up_city_forecast(
 
 
 def compare_panel_models(trainers: List[PanelTrainer], data: Dict[str, Any],
-                         split: str = "test") -> Dict[str, Dict[str, Any]]:
-    """Сводная таблица по всем моделям панели."""
+                         split: str = "test",
+                         failures: Optional[List[Dict[str, str]]] = None,
+                         ) -> Dict[str, Dict[str, Any]]:
+    """
+    Сводная таблица по всем моделям панели.
+
+    Ошибка оценки дописывается в failures как отказ модели, а не только в лог.
+    """
     results: Dict[str, Dict[str, Any]] = {}
     for tr in trainers:
         try:
             results[tr.name] = tr.evaluate(data, split)
         except Exception as exc:
             logger.error("Ошибка оценки %s: %s", tr.name, exc)
+            if failures is not None:
+                failures.append({"model": tr.name,
+                                 "error": f"оценка ({split}): {type(exc).__name__}: {exc}"})
 
     if not results:
         return results

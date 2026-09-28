@@ -22,7 +22,8 @@ from utils import reporting
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # Запуск конвейера с перенаправленным каталогом результатов. sabotage
-# подменяет блок накопителя падающим, чтобы проверить частичный отказ.
+# подменяет блок накопителя падающим и ломает обучение наивной модели, чтобы
+# проверить оба вида частичного отказа.
 _RUNNER = r'''
 import sys
 sys.path.insert(0, {root!r})
@@ -33,6 +34,14 @@ if {sabotage!r}:
     def _broken(*args, **kwargs):
         raise RuntimeError("накопитель сломан намеренно")
     main._run_storage_block = _broken
+
+    import models.baseline as baseline
+
+    class _BrokenModel:
+        def fit(self, *args, **kwargs):
+            raise RuntimeError("модель сломана намеренно")
+
+    baseline.build_persistence_24 = lambda: _BrokenModel()
 from utils.reporting import run_with_status
 sys.exit(run_with_status(main.main, ["--mode", "smoke", "--models", "naive24,ridge",
                                      "--skip-eda", "--skip-attention", "--seed", "0"]))
@@ -118,7 +127,8 @@ def test_failed_optional_block_keeps_metrics(sabotaged_run):
     _, out, run_dir = sabotaged_run
     df = pd.read_csv(os.path.join(run_dir, "metrics.csv"), encoding="utf-8-sig")
     assert set(df["split"]) == {"test", "val"}
-    assert {"Naive24 (сутки)", "LinearRegression"} <= set(df["model"])
+    assert "LinearRegression" in set(df["model"])
+    assert "Naive24 (сутки)" not in set(df["model"]), "упавшая модель не попадает в таблицу"
     assert os.path.exists(os.path.join(run_dir, "metrics_by_horizon.csv"))
     assert os.path.exists(os.path.join(run_dir, "diebold_mariano.csv"))
 
@@ -131,6 +141,55 @@ def test_failed_optional_block_makes_the_run_partial(sabotaged_run):
     assert meta["status"] == "partial"
     assert [b["block"] for b in meta["failed_blocks"]] == ["экономика накопителя"]
     assert "накопитель сломан намеренно" in meta["failed_blocks"][0]["error"]
+
+
+def test_failed_model_is_listed_and_not_reported_as_success(sabotaged_run):
+    """
+    Упавшая модель перечислена в метаданных, прогон частичный, в логе нет
+    сообщения об успешном завершении.
+
+    Прежде упавшая модель молча исключалась из сравнения, а программа
+    возвращала 0. Поведение раньше проверялось по тексту исходника main().
+    """
+    proc, _, run_dir = sabotaged_run
+    meta = _meta(run_dir)
+    assert meta["requested_models"] == ["Naive24 (сутки)", "LinearRegression"]
+    assert meta["trained_models"] == ["LinearRegression"]
+    assert [m["model"] for m in meta["failed_models"]] == ["Naive24 (сутки)"]
+    assert meta["partial_failure"] is True
+    log = proc.stdout + proc.stderr
+    assert "ЧАСТИЧНО" in log
+    assert "Пайплайн завершён за" not in log
+
+
+def test_successful_run_returns_zero_and_writes_plots_into_the_run(smoke_run):
+    """
+    Успешный прогон завершается кодом 0, а графики пишутся прямо в каталог
+    прогона, не в общий results/plots.
+
+    Прежде общий каталог копировался в отчёт целиком, вместе с изображениями
+    чужих прогонов.
+    """
+    out, run_dir = smoke_run
+    plots = os.listdir(os.path.join(run_dir, "plots"))
+    assert any(p.endswith(".png") for p in plots)
+    shared = os.path.join(out, "plots")
+    assert not os.path.isdir(shared) or not os.listdir(shared)
+
+
+def test_battery_is_driven_by_the_model_forecast(smoke_run):
+    """
+    Накопитель управляется прогнозом модели, а не фактом.
+
+    Прежде в оптимизатор подавался сам тестовый ряд, и качество прогноза на
+    экономику не влияло. Раньше проверялось по тексту исходника.
+    """
+    _, run_dir = smoke_run
+    series = pd.read_csv(os.path.join(run_dir, "forecast_series_test.csv"), encoding="utf-8-sig")
+    assert (series["LinearRegression"] - series["__actual__"]).abs().mean() > 0
+    value = pd.read_csv(os.path.join(run_dir, "storage_forecast_value.csv"), encoding="utf-8-sig")
+    row = value[value["forecast_source"] == "LinearRegression"].iloc[0]
+    assert row["forecast_MAE"] > 0
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -224,3 +283,42 @@ def test_probabilistic_model_failure_is_reported(tmp_path, monkeypatch):
     assert [f["model"] for f in failures] == ["QuantileXGBoost"]
     assert "квантили не сошлись" in failures[0]["error"]
     assert "QuantileXGBoost" not in [r["model"] for r in rows]
+
+
+def test_run_has_economics_for_price_category_four(smoke_run):
+    """Экономика по категории 4 считается по сохранённым рядам прогона."""
+    _, run_dir = smoke_run
+    out = os.path.join(run_dir, "economics_ru_cat4")
+    for name in ("summary.csv", "daily.csv", "sensitivity.csv", "report.md"):
+        assert os.path.exists(os.path.join(out, name)), name
+    summary = pd.read_csv(os.path.join(out, "summary.csv"), encoding="utf-8-sig")
+    assert "Оптимум при известном будущем" in set(summary["source"])
+
+
+def test_run_has_a_self_contained_dashboard(smoke_run):
+    """Сводка открывается без сервера: изображения встроены, внешних ссылок нет."""
+    _, run_dir = smoke_run
+    page = open(os.path.join(run_dir, "dashboard.html"), encoding="utf-8").read()
+    assert "Метрики на тесте" in page and "completed" in page
+    assert "data:image/png;base64," in page
+    assert "http://" not in page and "https://" not in page
+
+
+def test_dashboard_shows_failures(tmp_path):
+    from utils.dashboard import build_dashboard
+
+    reporting.write_run_metadata(str(tmp_path), {
+        "mode": "smoke", "status": "partial",
+        "failed_blocks": [{"block": "экономика накопителя", "error": "RuntimeError: x"}]})
+    page = open(build_dashboard(str(tmp_path)), encoding="utf-8").read()
+    assert "Отказы" in page and "экономика накопителя" in page and "partial" in page
+
+
+def test_dashboard_marks_a_run_with_failures_as_partial(tmp_path):
+    from utils.dashboard import build_dashboard
+
+    reporting.write_run_metadata(str(tmp_path), {
+        "mode": "smoke", "status": "completed",
+        "failed_models": [{"model": "LSTM", "error": "NaN"}]})
+    page = open(build_dashboard(str(tmp_path)), encoding="utf-8").read()
+    assert 'class="status partial"' in page

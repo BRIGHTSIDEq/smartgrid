@@ -10,8 +10,10 @@ main.py — Точка входа пайплайна Smart Grid.
     python main.py --mode optimal
     python main.py --mode smoke                    # проверка работоспособности
     python main.py --mode fast --seed 0            # другой сид
-    python main.py --mode fast --models naive,ridge,xgboost   # подмножество
+    python main.py --mode fast --models naive24,ridge,xgboost # подмножество
     python main.py --mode optimal --rolling-origin 4          # walk-forward
+    python main.py --mode panel-fast --dataset uci            # реальные данные
+    python main.py --mode panel-fast --probabilistic          # квантили P10/P50/P90
 
 МЕТОДИЧЕСКИЕ ПРИНЦИПЫ, заложенные в порядок шагов:
 
@@ -22,8 +24,8 @@ main.py — Точка входа пайплайна Smart Grid.
     MASE. Модель, не превзошедшая «повторить прошлые сутки», прогностической
     ценности не имеет независимо от абсолютного MAE.
   * Накопитель управляется по ПРОГНОЗУ модели, а счёт выставляется по ФАКТУ.
-    Дополнительно считается идеальный прогноз — разница показывает денежную
-    цену ошибки прогнозирования.
+    Верхняя граница — оптимум при известном будущем: разница показывает, сколько
+    теряется на ошибке прогноза и сколько на правиле управления.
 """
 
 import argparse
@@ -46,13 +48,28 @@ MODEL_REGISTRY = {
     "naive24":     "Naive24 (сутки)",
     "naive168":    "Naive168 (неделя)",
     "profile":     "HourlyProfile",
+    "ets":         "ETS",
     "ridge":       "LinearRegression",
     "xgboost":     "XGBoost",
     "lstm":        "LSTM",
     "transformer": "VanillaTransformer",
     "patchtst":    "PatchTST",
+    "ensemble":    "Ensemble",
 }
 NAIVE_KEYS = ("naive24", "naive168", "profile")
+# Модели, которые участвуют в таблицах, но не в отборе лучшей по валидации.
+# Веса ансамбля подобраны по той же валидации, и его оценка там смещена.
+NOT_SELECTABLE_KEYS = NAIVE_KEYS + ("ensemble",)
+
+# Модели многорядного режима: ключ CLI → имя в таблицах.
+PANEL_MODEL_REGISTRY = {
+    "naive24": "Naive24",
+    "profile": "HourlyProfile",
+    "ridge":   "Ridge",
+    "xgboost": "XGBoost",
+    "dlinear": "DLinear",
+}
+DEFAULT_UCI_PATH = "data/raw/LD2011_2014.txt"
 
 
 def parse_args(argv=None) -> argparse.Namespace:
@@ -76,12 +93,18 @@ def parse_args(argv=None) -> argparse.Namespace:
                              "ElectricityLoadDiagrams20112014 (370 клиентов "
                              "Португалии). Внешний набор проверяет выводы на "
                              "данных, которых проект не создавал")
-    parser.add_argument("--uci-path", type=str, default="data/raw/LD2011_2014.txt",
+    parser.add_argument("--feature-set", choices=["full", "uci"], default="full",
+                        help="Набор признаков синтетической панели: full — все "
+                             "каналы генератора, uci — только те, что есть в наборе "
+                             "UCI (без погоды, электромобилей, микрогенерации). "
+                             "Отделяет влияние природы данных от числа признаков")
+    parser.add_argument("--uci-path", type=str, default=DEFAULT_UCI_PATH,
                         metavar="ПУТЬ",
                         help="Файл набора UCI. Не скачивается автоматически")
     parser.add_argument("--models", type=str, default="all",
-                        help="Список моделей через запятую: "
-                             + ",".join(MODEL_REGISTRY) + " либо all")
+                        help="Список моделей через запятую либо all. Агрегатные "
+                             "режимы: " + ",".join(MODEL_REGISTRY) + ". Режимы "
+                             "panel-*: " + ",".join(PANEL_MODEL_REGISTRY))
     parser.add_argument("--scenario", choices=["current", "forward"], default="current",
                         help="Сценарий проникновения технологий Smart Grid: "
                              "current — фактическое состояние на 2025 год, "
@@ -96,9 +119,10 @@ def parse_args(argv=None) -> argparse.Namespace:
                         help="Пропустить блок оптимизации накопителя")
     parser.add_argument("--skip-attention", action="store_true",
                         help="Пропустить визуализацию весов внимания")
-    parser.add_argument("--rolling-origin", type=int, default=0, metavar="N",
-                        help="Число origin-ов walk-forward бэктестинга "
-                             "(0 = не запускать; процедура переобучает модель N раз)")
+    parser.add_argument("--rolling-origin", type=int, default=None, metavar="N",
+                        help="Число origin-ов walk-forward бэктестинга (0 = не "
+                             "запускать; процедура переобучает модель N раз). "
+                             "По умолчанию: 4 в режиме full, 0 в остальных")
     parser.add_argument("--deterministic", action="store_true",
                         help="Включить детерминированные операции TensorFlow "
                              "(медленнее, но результат воспроизводим побитово)")
@@ -142,18 +166,82 @@ def setup_environment(args: argparse.Namespace) -> Any:
     return logger
 
 
-def resolve_models(spec: str) -> List[str]:
+def resolve_models(spec: str, registry: Optional[Dict[str, str]] = None) -> List[str]:
     """Разбирает значение --models в список ключей реестра."""
+    registry = MODEL_REGISTRY if registry is None else registry
     if spec.strip().lower() == "all":
-        return list(MODEL_REGISTRY)
+        return list(registry)
     keys = [k.strip().lower() for k in spec.split(",") if k.strip()]
-    unknown = [k for k in keys if k not in MODEL_REGISTRY]
+    unknown = [k for k in keys if k not in registry]
     if unknown:
         raise SystemExit(
             f"Неизвестные модели: {', '.join(unknown)}. "
-            f"Доступны: {', '.join(MODEL_REGISTRY)}"
+            f"Доступны: {', '.join(registry)}"
         )
+    if not keys:
+        raise SystemExit("Список моделей пуст.")
     return keys
+
+
+def validate_cli(args: argparse.Namespace) -> None:
+    """
+    Отклоняет ключи, которые в выбранном режиме не действуют.
+
+    Прежде они молча игнорировались: panel-smoke --models foo обучал
+    стандартный набор, smoke --dataset uci учился на синтетике, и по
+    результату нельзя было понять, что запрошенное не выполнено.
+    """
+    panel = args.mode.startswith("panel-")
+    problems: List[str] = []
+
+    if panel:
+        resolve_models(args.models, PANEL_MODEL_REGISTRY)
+        for flag, value in (("--skip-eda", args.skip_eda),
+                            ("--skip-storage", args.skip_storage),
+                            ("--skip-attention", args.skip_attention),
+                            ("--rolling-origin", args.rolling_origin is not None)):
+            if value:
+                problems.append(f"{flag} относится только к агрегатным режимам")
+        if args.feature_set != "full" and args.dataset != "synthetic":
+            problems.append("--feature-set относится к синтетической панели; у UCI "
+                            "набор признаков и так свой")
+        if args.dataset == "uci" and args.scenario != "current":
+            problems.append("--scenario меняет состав синтетической нагрузки и "
+                            "к реальным данным UCI неприменим")
+    else:
+        resolve_models(args.models)
+        if args.dataset != "synthetic":
+            problems.append("--dataset действует только в режимах panel-*: "
+                            "агрегатный ряд строится генератором")
+        if args.probabilistic:
+            problems.append("--probabilistic действует только в режимах panel-*")
+        if args.feature_set != "full":
+            problems.append("--feature-set действует только в режимах panel-*")
+
+    if args.uci_path != DEFAULT_UCI_PATH and args.dataset != "uci":
+        problems.append("--uci-path задан, но --dataset не uci")
+
+    if problems:
+        raise SystemExit("Недопустимое сочетание ключей для режима "
+                         f"{args.mode}:\n  " + "\n  ".join(problems))
+
+
+def check_models_fit_history(keys: List[str], explicit: bool) -> List[str]:
+    """
+    Проверяет, что недельный базлайн вообще может работать при текущей истории.
+
+    При истории короче недели недельный лаг не попадает в окно, и Naive168
+    совпал бы с Naive24. Явный запрос такой модели — ошибка; при --models all
+    она просто исключается из состава.
+    """
+    if "naive168" not in keys or Config.HISTORY_LENGTH >= 168:
+        return keys
+    if explicit:
+        raise SystemExit(
+            f"naive168 требует истории не короче 168 ч, в этом режиме "
+            f"HISTORY_LENGTH={Config.HISTORY_LENGTH}. Уберите модель из --models "
+            "или выберите режим с недельной историей (optimal, full).")
+    return [k for k in keys if k != "naive168"]
 
 
 def build_models(keys: List[str], logger, n_train_windows: int = 0) -> List[tuple]:
@@ -187,7 +275,9 @@ def build_models(keys: List[str], logger, n_train_windows: int = 0) -> List[tupl
     # Наивные базлайны идут первыми: они задают точку отсчёта для всех остальных.
     add("naive24", build_persistence_24)
     # Недельный базлайн требует, чтобы окно истории покрывало целую неделю,
-    # иначе он вырождается в суточный и дублирует предыдущую строку таблицы.
+    # иначе он вырождается в суточный. Явный запрос при короткой истории
+    # отклоняется ещё в check_models_fit_history; здесь — страховка для
+    # вызовов в обход CLI, например из walk-forward.
     if "naive168" in keys:
         if Config.HISTORY_LENGTH >= 168:
             add("naive168", build_seasonal_naive_168)
@@ -198,6 +288,9 @@ def build_models(keys: List[str], logger, n_train_windows: int = 0) -> List[tupl
                 Config.HISTORY_LENGTH,
             )
     add("profile", build_hourly_profile)
+
+    from models.statistical import build_ets
+    add("ets", build_ets)
 
     add("ridge", build_linear_regression)
     add("xgboost", lambda: build_xgboost(
@@ -285,6 +378,7 @@ def _select_patch_len(history_length: int) -> int:
 
 def main(argv=None) -> int:
     args = parse_args(argv)
+    validate_cli(args)
     logger = setup_environment(args)
 
     # Многорядный конвейер отличается структурой данных, составом моделей и
@@ -323,7 +417,8 @@ def main(argv=None) -> int:
     from utils.deployment import export_model_bundle
     from utils import reporting
 
-    model_keys = resolve_models(args.models)
+    model_keys = check_models_fit_history(
+        resolve_models(args.models), explicit=args.models.strip().lower() != "all")
 
     # Каталог прогона создаётся ДО первого артефакта, и все выходные пути
     # перенаправляются внутрь него. Копирование общего каталога графиков после
@@ -442,13 +537,43 @@ def main(argv=None) -> int:
         logger.error("Ни одна модель не обучена — дальнейшие шаги невозможны.")
         return 1
 
+    # Ансамбль собирается из уже обученных моделей, кроме наивных.
+    if "ensemble" in model_keys:
+        from models.statistical import ValidationWeightedEnsemble
+        members = [(t.model_name, t) for t in trainers
+                   if t.model_name not in (MODEL_REGISTRY[k] for k in NAIVE_KEYS)]
+        name = MODEL_REGISTRY["ensemble"]
+        requested_models.append(name)
+        if len(members) < 2:
+            logger.warning("Ансамбль не собран: обучено меньше двух ненаивных моделей.")
+            failed_models.append({"model": name,
+                                  "error": "меньше двух ненаивных моделей для ансамбля"})
+        else:
+            trainer = ModelTrainer(ValidationWeightedEnsemble(members), name,
+                                   Config.MODELS_DIR, Config.PLOTS_DIR)
+            try:
+                trainer.train(data)
+                trainers.append(trainer)
+                trained_models.append(name)
+            except Exception as exc:
+                logger.error("Ансамбль не собран: %s", exc)
+                failed_models.append({"model": name,
+                                      "error": f"{type(exc).__name__}: {exc}"})
+
     # ── [6/10] Отбор лучшей модели ПО ВАЛИДАЦИИ ──────────────────────────────
     # Тест на этом шаге не используется: иначе итоговая оценка победителя
     # окажется смещённой (мы бы выбрали модель, случайно удачную на тесте).
     logger.info("\n[6/10] Отбор лучшей модели по ВАЛИДАЦИОННОЙ выборке...")
-    val_metrics = compare_trainers(trainers, data, split="val")
+    val_metrics = compare_trainers(trainers, data, split="val",
+                                   failures=failed_models)
+    # Модель без валидационной оценки не участвует ни в отборе, ни в тесте.
+    trainers = [t for t in trainers if t.model_name in val_metrics]
+    trained_models = [n for n in trained_models if n in val_metrics]
+    if not trainers:
+        logger.error("Ни одну модель не удалось оценить на валидации.")
+        return 1
     trainable = {n: m for n, m in val_metrics.items()
-                 if n not in (MODEL_REGISTRY[k] for k in NAIVE_KEYS)}
+                 if n not in (MODEL_REGISTRY[k] for k in NOT_SELECTABLE_KEYS)}
     pool = trainable or val_metrics
     best_name = min(pool, key=lambda k: pool[k]["MAE"])
     best_trainer = next(t for t in trainers if t.model_name == best_name)
@@ -457,7 +582,13 @@ def main(argv=None) -> int:
 
     # ── [7/10] Итоговая оценка на тесте ──────────────────────────────────────
     logger.info("\n[7/10] Итоговая оценка на ТЕСТОВОЙ выборке...")
-    test_metrics = compare_trainers(trainers, data, split="test")
+    test_metrics = compare_trainers(trainers, data, split="test",
+                                    failures=failed_models)
+    trainers = [t for t in trainers if t.model_name in test_metrics]
+    trained_models = [n for n in trained_models if n in test_metrics]
+    if best_name not in test_metrics:
+        logger.error("Лучшая по валидации модель %s не оценена на тесте.", best_name)
+        return 1
 
     scaler = data["scaler"]
     y_true = inverse_scale(scaler, data["Y_test"])
@@ -523,17 +654,19 @@ def main(argv=None) -> int:
         failed_blocks)
 
     walk_forward_summary: Optional[Dict[str, Any]] = None
-    if args.rolling_origin > 0:
+    n_origins = (args.rolling_origin if args.rolling_origin is not None
+                 else Config.ROLLING_ORIGINS)
+    if n_origins > 0:
         best_key = next((k for k, v in MODEL_REGISTRY.items() if v == best_name), None)
         if best_key:
             logger.info("Запуск walk-forward бэктестинга (%d origin-ов)...",
-                        args.rolling_origin)
+                        n_origins)
 
             def _walk_forward():
                 results = run_rolling_origin_backtest(
                     build_fn=lambda: build_models([best_key], logger,
                                                   n_train_windows=len(data["X_train"]))[0][0],
-                    df=df, model_name=best_name, n_origins=args.rolling_origin,
+                    df=df, model_name=best_name, n_origins=n_origins,
                     history_length=Config.HISTORY_LENGTH,
                     forecast_horizon=Config.FORECAST_HORIZON,
                     epochs=Config.EPOCHS, batch_size=Config.BATCH_SIZE,
@@ -562,6 +695,15 @@ def main(argv=None) -> int:
             failed_blocks)
         if storage_out is not None:
             storage_results, storage_forecasts = storage_out
+
+            # Экономика для потребителя 3–6 ценовой категории: мощность как
+            # среднее по рабочим дням, суточный MPC и оптимум при известном
+            # будущем. Считается по сохранённым рядам и цифры выше не меняет.
+            from analysis.economics import write_report
+            reporting.run_optional_block(
+                "экономика по ценовой категории 4",
+                lambda: write_report(run_dir, category=4, sensitivity_source=best_name),
+                failed_blocks)
 
     # ── Экспорт результатов ──────────────────────────────────────────────────
     logger.info("\nЭкспорт результатов...")
@@ -639,6 +781,10 @@ def main(argv=None) -> int:
     run_meta["bundle_dir"] = bundle_dir
     run_meta["failed_blocks"] = failed_blocks
     reporting.write_run_metadata(run_dir, run_meta)
+
+    from utils.dashboard import build_dashboard
+    reporting.run_optional_block("сводка dashboard.html",
+                                 lambda: build_dashboard(run_dir), failed_blocks)
 
     logger.info("\n" + "=" * 78)
     elapsed_min = (time.time() - t_start) / 60

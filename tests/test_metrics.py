@@ -150,4 +150,5 @@ def test_pairwise_dm_table_structure():
     rows = pairwise_dm_table(y_true, preds, h=1)
     assert len(rows) == 3            # C(3,2) пар
     for r in rows:
-        assert set(r) == {"model_a", "model_b", "DM", "p_value", "better"}
+        assert {"model_a", "model_b", "DM", "p_value", "better",
+                "DM_HLN", "p_HLN", "p_holm", "better_holm"} <= set(r)

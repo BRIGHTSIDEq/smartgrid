@@ -47,6 +47,8 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
+from utils.tariffs import peak_clock_hours
+
 from data.generator import (
     COLD_PEAK_SHIFT_DAYS, generate_holiday_mask, holiday_factors,
     _build_household_profiles, _sigmoid,
@@ -376,10 +378,9 @@ def generate_panel_data(
         # назначает сетевая компания, а не отдельный фидер.
         dsr_active = np.zeros(hours, np.float32)
         dsr_strength = np.zeros(hours, np.float32)
-        peak_hours_idx = np.where(
-            (((hour_of_day >= 7) & (hour_of_day < 10))
-             | ((hour_of_day >= 17) & (hour_of_day < 21))) & (is_weekend == 0)
-        )[0]
+        # Праздники не исключены по той же причине, что в агрегатном
+        # генераторе: это изменило бы все сгенерированные ряды.
+        peak_hours_idx = np.where(peak_clock_hours(hour_of_day) & (is_weekend == 0))[0]
         n_dsr = max(2, int(days / 365 * dsr_events_per_year))
         if len(peak_hours_idx):
             for start in city_rng.choice(peak_hours_idx,

@@ -10,7 +10,7 @@ models/transformer.py — Сравнительное исследование а
 1. VanillaTransformer  — Encoder-only с Pre-LN и Sinusoidal/Time2Vec PE
 2. PatchTST            — Nie et al., 2023: патч-токенизация вместо отдельных точек
 
-НОВЫЕ КОМПОНЕНТЫ v4
+ОБЩИЕ КОМПОНЕНТЫ
 ─────────────────────────────────────────────────────────────────────────────
 • RevIN (Reversible Instance Normalization) — Kim et al., 2022
     Нормализует каждое входное окно ДО кодирования (устраняет distribution
@@ -78,7 +78,7 @@ def count_parameters(model: tf.keras.Model) -> int:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# НОВЫЕ КОМПОНЕНТЫ v4
+# ОБЩИЕ КОМПОНЕНТЫ
 # ══════════════════════════════════════════════════════════════════════════════
 
 class RevINNorm(tf.keras.layers.Layer):
@@ -530,14 +530,13 @@ class ProbSparseAttention(tf.keras.layers.Layer):
 
 class PreLNEncoderBlock(tf.keras.layers.Layer):
     """
-    Encoder-блок с Pre-Layer Normalization + StochasticDepth v4.
+    Encoder-блок с Pre-Layer Normalization и StochasticDepth.
 
     Порядок Pre-LN:
         x → LN → MHA → DropPath(rate) → residual
         x → LN → FFN → DropPath(rate) → residual
 
-    НОВОЕ v4: StochasticDepth (DropPath) заменяет обычный Dropout
-    в residual-ветке:
+    StochasticDepth (DropPath) вместо обычного Dropout в residual-ветке:
       Вместо случайного зануления отдельных нейронов — зануляется
       ВСЯ residual-ветка блока (Attention или FFN целиком).
       Эффект: неявный ensemble сетей разной глубины.
@@ -557,7 +556,7 @@ class PreLNEncoderBlock(tf.keras.layers.Layer):
         num_heads: int,
         dff: int,
         dropout: float = 0.1,
-        stochastic_depth_rate: float = 0.0,   # ← НОВЫЙ параметр v4
+        stochastic_depth_rate: float = 0.0,
         use_prob_sparse: bool = False,
         **kwargs,
     ) -> None:
@@ -651,10 +650,10 @@ def build_vanilla_transformer(
     huber_delta: float = 0.05,
 ) -> tf.keras.Model:
     """
-    Encoder-only Transformer v4 с StochasticDepth + LearnedQueryPooling.
+    Encoder-only Transformer со StochasticDepth и LearnedQueryPooling.
 
-    НОВОЕ v4:
-    ─────────
+    Устройство:
+    ───────────
     1. StochasticDepth (DropPath) в каждом блоке с линейно нарастающей rate:
        rate_i = (i / num_layers) × stochastic_depth_rate
        Интерпретация: неявный ensemble сетей глубиной 1..num_layers.
@@ -778,14 +777,14 @@ def build_patchtst(
     huber_delta: float = 0.10,
 ) -> tf.keras.Model:
     """
-    PatchTST v4 [Nie et al., ICLR 2023] + RevIN + StochasticDepth.
+    PatchTST [Nie et al., ICLR 2023] с RevIN и StochasticDepth.
 
     КЛЮЧЕВЫЕ ИДЕИ PatchTST (оригинал):
     - Патч-токены: ряд разбивается на перекрывающиеся подпоследовательности.
       patch=8, stride=4, T=48 → N_patches=11. O(11²) vs O(48²) — 19x экономия.
     - Каждый патч = «суточный переход» — семантически осмысленный токен.
 
-    НОВОЕ v4:
+    Дополнения к исходной архитектуре:
     ──────────────────────────────────────────────────────────────────────────
     1. RevIN (Reversible Instance Normalization) [Kim et al., ICLR 2022]:
        Нормализует КАЖДОЕ входное окно на собственные mean/std ДО кодирования.
@@ -808,7 +807,7 @@ def build_patchtst(
     assert d_model % num_heads == 0
     n_patches = (history_length - patch_len) // stride + 1
     logger.info(
-        "PatchTST v4: history=%d patch=%d stride=%d → %d patches | RevIN=%s",
+        "PatchTST: history=%d patch=%d stride=%d → %d patches | RevIN=%s",
         history_length, patch_len, stride, n_patches, use_revin,
     )
 
@@ -880,7 +879,7 @@ def build_patchtst(
         metrics=["mae", "mape"],
     )
     logger.info(
-        "PatchTST v4 patch=%d stride=%d n_p=%d d=%d h=%d L=%d sdrop=%.2f RevIN=%s | %d params",
+        "PatchTST patch=%d stride=%d n_p=%d d=%d h=%d L=%d sdrop=%.2f RevIN=%s | %d params",
         patch_len, stride, n_patches, d_model, num_heads, num_layers,
         stochastic_depth_rate, use_revin, count_parameters(model),
     )

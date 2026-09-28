@@ -54,15 +54,11 @@ def _get_zone(hour: int, weekday: int, holiday: bool = False) -> str:
         ночная      23:00–07:00
 
     В выходные и праздничные дни пиковая зона не применяется: сутки делятся
-    только на ночную и полупиковую («дневную») зоны.
+    только на ночную и полупиковую («дневную») зоны. Границы зон берутся из
+    utils.tariffs — общего календаря для всех модулей.
     """
-    if hour < 7 or hour >= 23:
-        return "night"
-    if weekday >= 5 or holiday:
-        return "day"
-    if (7 <= hour < 10) or (17 <= hour < 21):
-        return "peak"
-    return "day"
+    from utils.tariffs import zone_of
+    return zone_of(hour, weekday, holiday)
 
 
 def build_price_vector(
@@ -90,14 +86,15 @@ def build_zone_list(n: int, start_hour: int = 0, start_weekday: int = 0,
     считали день праздничным. Календарь дня недели по-прежнему выводится из
     start_hour и start_weekday.
     """
+    from utils.tariffs import zone_names
+
     if holidays is not None and len(holidays) != n:
         raise ValueError(f"Маска праздников задана на {len(holidays)} ч, а горизонт — {n} ч")
-    return [
-        _get_zone((start_hour + i) % 24,
-                  (start_weekday + (start_hour + i) // 24) % 7,
-                  bool(holidays[i]) if holidays is not None else False)
-        for i in range(n)
-    ]
+    steps = start_hour + np.arange(n)
+    holiday = (np.asarray(holidays, dtype=np.float32) if holidays is not None
+               else np.zeros(n, dtype=np.float32))
+    return [str(z) for z in zone_names(steps % 24, (start_weekday + steps // 24) % 7,
+                                       holiday)]
 
 
 # ══════════════════════════════════════════════════════════════════════════════

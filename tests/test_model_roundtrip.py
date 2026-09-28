@@ -141,7 +141,7 @@ def test_inference_reproduces_training_preprocessing(model_name, tiny_data, tmp_
     )
     bundle = load_model_bundle(bundle_dir)
 
-    recent = df.tail(200)
+    recent = df.tail(300)
     forecast = predict_from_bundle(bundle, recent)
 
     features = _build_feature_matrix(
@@ -185,15 +185,13 @@ def test_single_channel_input_is_rejected(model_name, tiny_data, tmp_path):
     )
     bundle = load_model_bundle(bundle_dir)
 
-    # DataFrame только с потреблением: остальных ковариат нет.
-    crippled = df.tail(200)[["timestamp", "consumption", "hour", "weekday",
+    # DataFrame только с потреблением: остальных ковариат нет. Прежде
+    # препроцессинг подставлял вместо них нули и выдавал правдоподобный, но
+    # бессмысленный прогноз; теперь это отказ.
+    crippled = df.tail(300)[["timestamp", "consumption", "hour", "weekday",
                              "is_weekend", "is_holiday"]].copy()
-
-    # Препроцессинг подставит нули вместо отсутствующих ковариат, но ширина
-    # матрицы обязана остаться равной N_FEATURES — иначе модель молча съест
-    # неверный вход.
-    forecast = predict_from_bundle(bundle, crippled)
-    assert forecast.shape == (HORIZON,)
+    with pytest.raises(ValueError, match="нет колонок"):
+        predict_from_bundle(bundle, crippled)
 
     # Одноканальный тензор обязан быть отвергнут проверкой формы.
     # Сам Keras его пропускает: PatchTST транслирует последнюю размерность и
@@ -270,3 +268,50 @@ def test_sinusoidal_pe_deserializes():
     assert np.allclose(out_before, out_after, atol=1e-6), (
         "позиционное кодирование изменилось после восстановления из конфига"
     )
+
+
+def test_inference_matches_the_training_window(tiny_data, tmp_path):
+    """
+    Прогноз по сохранённой модели совпадает с прогнозом по окну из обучения.
+
+    Прежний тест сравнивал predict_from_bundle с копией её же кода и потому не
+    видел, что при инференсе лаг 168 ч и скользящее СКО равны нулю. Здесь
+    эталон — окно X_test[0], собранное штатным препроцессингом по всему ряду,
+    а на вход инференса идут только сырые наблюдения до конца этого окна.
+    Календарные колонки и скользящие статистики удалены: инференс обязан
+    вывести их сам.
+    """
+    from data.preprocessing import inverse_scale
+
+    df, data = tiny_data
+    model = _build("LSTM")
+    bundle_dir = export_model_bundle(
+        model, data,
+        {"HISTORY_LENGTH": HISTORY, "FORECAST_HORIZON": HORIZON,
+         "N_FEATURES": N_FEATURES, "model_name": "LSTM"},
+        export_dir=str(tmp_path), model_name="LSTM",
+    )
+    bundle = load_model_bundle(bundle_dir)
+
+    end = data["val_end_idx"] + HISTORY
+    raw = df.iloc[end - 300:end].drop(columns=[
+        "hour", "weekday", "is_weekend", "is_holiday", "day_of_year", "tariff_zone",
+        "is_peak_hour", "is_night_hour", "rolling_mean_24h", "rolling_std_24h"])
+
+    forecast = predict_from_bundle(bundle, raw)
+    expected = inverse_scale(data["scaler"],
+                             model.predict(data["X_test"][:1], verbose=0))[0]
+    np.testing.assert_allclose(forecast, expected, rtol=1e-4, atol=1e-2)
+
+
+def test_inference_rejects_gaps_in_time(tiny_data, tmp_path):
+    df, data = tiny_data
+    model = _build("LSTM")
+    bundle = load_model_bundle(export_model_bundle(
+        model, data,
+        {"HISTORY_LENGTH": HISTORY, "FORECAST_HORIZON": HORIZON,
+         "N_FEATURES": N_FEATURES, "model_name": "LSTM"},
+        export_dir=str(tmp_path), model_name="LSTM"))
+    gapped = df.tail(300).drop(df.tail(300).index[100])
+    with pytest.raises(ValueError, match="шагом 1 ч"):
+        predict_from_bundle(bundle, gapped)

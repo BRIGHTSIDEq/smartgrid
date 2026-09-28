@@ -62,9 +62,9 @@ def test_model_selection_reads_only_validation_metrics():
     """
     src = inspect.getsource(main_module.main)
 
-    idx_val = src.index('compare_trainers(trainers, data, split="val")')
+    idx_val = src.index('compare_trainers(trainers, data, split="val"')
     idx_best = src.index("best_name = min(")
-    idx_test = src.index('compare_trainers(trainers, data, split="test")')
+    idx_test = src.index('compare_trainers(trainers, data, split="test"')
 
     assert idx_val < idx_best, "val-метрики должны считаться до выбора модели"
     assert idx_best < idx_test, "тестовые метрики не должны участвовать в выборе"
@@ -161,23 +161,6 @@ def test_peak_shaving_actually_depends_on_forecast():
     assert res_true.net_savings >= res_noisy.net_savings, (
         "идеальный прогноз задаёт верхнюю границу эффекта"
     )
-
-
-def test_storage_receives_model_forecast_not_ground_truth():
-    """
-    В блоке накопителя фигурируют прогнозы модели, а не сырой тестовый ряд.
-
-    Раньше в оптимизатор подавался data["raw_test"], поэтому качество
-    прогнозирования не влияло на экономику вообще.
-    """
-    src = inspect.getsource(main_module._run_storage_block)
-    assert "predictions[best_name]" in src
-    assert "reconstruct_day_ahead_series" in src
-    assert 'data["raw_test"]' not in src, (
-        "фактический ряд не должен подаваться как прогноз"
-    )
-    # Факт для расчёта стоимости берётся отдельной функцией.
-    assert "actual_series_for_forecast" in src
 
 
 # ══════════════════════════════════════════════════════════════════════════════

@@ -1,26 +1,21 @@
 # -*- coding: utf-8 -*-
-"""models/lstm.py — TCN-BiLSTM-Attention v9 (Keras 3 compatible).
+"""models/lstm.py — TCN-BiLSTM-Attention (Keras 3).
 
-ИСПРАВЛЕНИЯ v9 относительно v8:
-═══════════════════════════════════════════════════════════════════════════════
+Два решения, от которых зависит работоспособность модели:
 
-БАГ #1 (КРИТИЧЕСКИЙ): SeasonalSkip использовал RevIN-нормализованный baseline.
-  БЫЛО:  naive_slice = cons_norm[:, -24:, 0]  ← RevIN-нормализован ≈ N(0,1)
-         final_out = alpha * neural_out + (1-alpha) * naive_slice
-         Поскольку naive_slice ≈ 0 (RevIN mean), skip практически не работал.
-         Математически: naive вклад ≈ (1-0.35)*0 = 0 → модель учила всё сама.
-  СТАЛО: naive_slice = inp[:, -24:, 0]  ← raw MinMaxScaler [0,1] channel
-         Теперь baseline = реальное "вчера в это же время" в правильном масштабе.
-         При инициализации: final_out = 0.35*neural + 0.65*naive ∈ [0,1] = Y_train.
+  Сезонный скип берёт «вчера в это же время» из исходного канала потребления
+  в масштабе MinMax, а не из нормированного RevIN. После RevIN окно имеет
+  нулевое среднее, и скип добавлял бы к прогнозу почти ноль: модель учила бы
+  всё сама. В масштабе MinMax наивная часть с первой эпохи даёт прогноз в
+  пространстве целевой переменной.
 
-БАГ #2 (КРИТИЧЕСКИЙ): Overfitting — 945K параметров на 6K сэмплов.
-  БЫЛО:  BiLSTM=128, TCN_filters=64, Dense=256/128 → 945K params
-         train_mae=0.019 vs val_mae=0.045 → gap 2.4× = сильный overfitting
-  СТАЛО: BiLSTM=64 per direction, TCN_filters=32, Dense=128/64 → ~150K params
-         Правило: ≥40 сэмплов на параметр при dropout 0.20
+  Размер ограничен (~150 тыс. параметров вместо прежних 945 тыс.): на шести
+  тысячах окон большая модель переобучалась, разрыв MAE train/val был
+  двух с половиной кратным. Ориентир — не меньше 40 окон на параметр при
+  dropout 0.20. История правок — в CHANGELOG.md.
 
 ═══════════════════════════════════════════════════════════════════════════════
-АРХИТЕКТУРА v9 (параметры по умолчанию для optimal_mode):
+АРХИТЕКТУРА (параметры по умолчанию для optimal_mode):
   Input(48, 26)
     │
     ├─ RevIN нормализация consumption-канала (per-window mean/std)
@@ -160,9 +155,9 @@ class SeasonalSkipConnection(tf.keras.layers.Layer):
     """
     Learnable blend: final = sigmoid(logit) * neural + (1-sigmoid(logit)) * naive.
 
-    v9 FIX: оба входа теперь в [0,1] MinMaxScaler пространстве.
-    БЫЛО: naive_slice из RevIN-нормализованного cons_norm ≈ N(0,1) → baseline ≈ 0.
-    СТАЛО: naive_slice из raw inp[:,-24:,0] ∈ [0,1] → реальный seasonal naive.
+    Оба входа — в пространстве MinMax [0, 1]: наивная часть берётся из
+    исходного канала потребления, а не из нормированного RevIN, где её среднее
+    равно нулю и скип ничего бы не добавлял.
     """
 
     def __init__(self, init_neural_weight=0.35, **kwargs):
@@ -193,27 +188,25 @@ def build_lstm_model(
     history_length=48,
     forecast_horizon=24,
     n_features=26,
-    lstm_units_1=64,          # v9: 128→64 (per BiLSTM direction)
+    lstm_units_1=64,          # на направление BiLSTM
     lstm_units_2=64,          # compat
     lstm_units_3=64,          # compat
     dropout_rate=0.20,
     learning_rate=2e-4,
-    attn_heads=4,             # v9: 8→4
+    attn_heads=4,
     use_cosine_decay=False,   # compat
     total_steps=37_000,       # compat
     mc_dropout=False,
     huber_delta=0.05,
-    tcn_filters=32,           # v9: 64→32
+    tcn_filters=32,
     use_seasonal_skip=True,
     seasonal_blend_init=0.35,
     use_autoregressive_shortcut=True,
 ):
     """
-    TCN-BiLSTM-Attention v9.
+    TCN-BiLSTM-Attention с сезонным скипом.
 
-    Ключевые исправления vs v8:
-      ★ SeasonalSkip использует inp[:,-24:,0] (MinMaxScaler) вместо cons_norm (RevIN)
-      ★ Размер модели сокращён с 945K до ~150K (BiLSTM 64, TCN 32, Dense 128/64)
+    Устройство и выбор размеров — в docstring модуля.
     """
     del lstm_units_2, lstm_units_3, use_cosine_decay, total_steps
     training_flag: Optional[bool] = True if mc_dropout else None
@@ -287,15 +280,11 @@ def build_lstm_model(
         neural_out = tf.keras.layers.Add(name="neural_plus_ar")(add_terms)
     # neural_out предсказывает в [0,1] MinMaxScaler пространстве
 
-    # ── SeasonalSkip (v9 FIX) ───────────────────────────────────────────────
-    # БЫЛО (v8 БАГ):
-    #   naive_slice = cons_norm[:, -forecast_horizon:, 0]  ← RevIN ≈ N(0,1)
-    #   Blend: 0.35*neural + 0.65*RevIN_naive ≈ 0.35*neural + 0 → skip бесполезен
-    #
-    # СТАЛО (v9 FIX):
-    #   naive_slice = inp[:, -forecast_horizon:, 0]  ← raw MinMaxScaler ∈ [0,1]
-    #   Blend: 0.35*neural + 0.65*minmax_naive → оба ∈ [0,1] = пространство Y_train
-    #   Инициализация хорошая: 65% "вчера в это время" = сильный baseline
+    # ── Сезонный скип ───────────────────────────────────────────────────────
+    # Наивная часть — исходный канал в масштабе MinMax, как и целевая
+    # переменная. Смесь 0.35·нейросеть + 0.65·«вчера в это время» при
+    # инициализации сразу даёт сильный базовый прогноз; из нормированного
+    # RevIN канала та же смесь свелась бы к 0.35·нейросеть.
     if use_seasonal_skip and history_length >= forecast_horizon:
         # raw MinMaxScaler consumption channel — hours t-23..t → "вчера в это время"
         naive_slice_minmax = inp[:, -forecast_horizon:, 0]    # (B, 24) ∈ [0,1]

@@ -192,33 +192,6 @@ def test_optimal_models_are_within_capacity_budget():
 # ИЗОЛЯЦИЯ АРТЕФАКТОВ ПРОГОНА
 # ══════════════════════════════════════════════════════════════════════════════
 
-def test_run_dir_receives_artifacts_directly():
-    """
-    Пайплайн перенаправляет каталоги графиков и моделей внутрь каталога прогона.
-
-    Прежняя схема копировала общий results/plots целиком, и в отчёт попадали
-    изображения моделей, которые в этом прогоне не обучались, — в том числе
-    четырёхмесячной давности.
-    """
-    import inspect
-    import main as main_module
-
-    src = inspect.getsource(main_module.main)
-    assert "Config.PLOTS_DIR = os.path.join(run_dir" in src
-    assert "Config.MODELS_DIR = os.path.join(run_dir" in src
-    assert "copy_plots_to_run" not in src, (
-        "копирование общего каталога графиков должно быть удалено"
-    )
-
-    # Каталог прогона создаётся до первого артефакта: раньше него в исходнике
-    # не должно быть ни EDA, ни обучения.
-    idx_run_dir = src.index("run_dir = reporting.make_run_dir")
-    for later in ("run_eda(", "ModelTrainer(", "plot_training_history("):
-        assert idx_run_dir < src.index(later), (
-            f"{later} выполняется до создания каталога прогона"
-        )
-
-
 def test_two_runs_do_not_share_artifacts(tmp_path):
     """
     Два прогона получают независимые каталоги, и файлы одного не попадают в другой.

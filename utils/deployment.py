@@ -227,6 +227,70 @@ def assert_input_matches_model(
         )
 
 
+# Измеряемые величины: их нельзя вывести из календаря, и подстановка нулей
+# даёт правдоподобный, но бессмысленный прогноз.
+MEASURED_COLUMNS = ("consumption", "temperature", "humidity", "wind_speed",
+                    "cloud_cover", "ev_load_kw", "solar_gen_kw", "dsr_active")
+# Самый длинный лаг признаков: история должна покрывать его для каждой точки
+# окна, иначе лаг заполняется нулём, чего при обучении не было.
+MAX_LAG_HOURS = 168
+
+
+def prepare_inference_frame(recent_df: pd.DataFrame, history: int) -> pd.DataFrame:
+    """
+    Приводит последние наблюдения к тому виду, в котором их видело обучение.
+
+    Прежний инференс брал только последние history строк: лаг 168 ч для них
+    равнялся нулю, скользящее СКО по неполному окну — тоже, а недостающие
+    колонки молча заменялись нулями. Модель получала признаки, которых при
+    обучении не было, и тест этого не замечал, потому что сравнивал функцию с
+    копией её же кода. Теперь:
+
+    * требуется не меньше history + 168 строк, и лаги считаются по полной истории;
+    * скользящие среднее и СКО за 24 ч пересчитываются так же, как в генераторе;
+    * календарь, праздники и тарифные зоны выводятся из отметок времени;
+    * отсутствие измеряемой величины — ошибка, а не нули.
+    """
+    from data.generator import holiday_flags
+    from data.preprocessing import _add_lag_columns
+    from utils.tariffs import zone_names
+
+    missing = [c for c in MEASURED_COLUMNS + ("timestamp",) if c not in recent_df.columns]
+    if missing:
+        raise ValueError(
+            f"Во входных данных нет колонок: {', '.join(missing)}. Модель обучена "
+            "на этих признаках, и подставлять вместо них нули нельзя.")
+
+    need = history + MAX_LAG_HOURS
+    if len(recent_df) < need:
+        raise ValueError(
+            f"Нужно не меньше {need} часов истории (окно {history} ч и лаг "
+            f"{MAX_LAG_HOURS} ч), получено {len(recent_df)}")
+
+    df = recent_df.copy().reset_index(drop=True)
+    ts = pd.to_datetime(df["timestamp"])
+    step = ts.diff().dropna()
+    if len(step) and not (step == pd.Timedelta(hours=1)).all():
+        raise ValueError("Отметки времени должны идти подряд с шагом 1 ч без пропусков")
+    if df[list(MEASURED_COLUMNS)].isna().any().any():
+        raise ValueError("Во входных данных есть пропуски")
+
+    df["hour"] = ts.dt.hour.astype(int)
+    df["weekday"] = ts.dt.dayofweek.astype(int)
+    df["is_weekend"] = (df["weekday"] >= 5).astype(np.int8)
+    df["day_of_year"] = ts.dt.dayofyear.astype(np.int16)
+    df["is_holiday"] = holiday_flags(ts).astype(np.int8)
+    zones = zone_names(df["hour"].to_numpy(), df["weekday"].to_numpy(),
+                       df["is_holiday"].to_numpy())
+    df["tariff_zone"] = zones
+    df["is_peak_hour"] = (zones == "peak").astype(np.int8)
+    df["is_night_hour"] = (zones == "night").astype(np.int8)
+    df["rolling_mean_24h"] = df["consumption"].rolling(24, min_periods=1).mean()
+    df["rolling_std_24h"] = df["consumption"].rolling(24, min_periods=2).std().fillna(0.0)
+
+    return _add_lag_columns(df).iloc[-history:]
+
+
 def predict_from_bundle(
     bundle: Dict[str, Any],
     recent_df: pd.DataFrame,
@@ -239,18 +303,16 @@ def predict_from_bundle(
     bundle : dict
         Результат load_model_bundle().
     recent_df : pd.DataFrame
-        Последние HISTORY_LENGTH часов наблюдений. Набор колонок — тот же, что
-        отдаёт data.generator.generate_smartgrid_data: consumption, temperature,
-        humidity, wind_speed, cloud_cover, ev_load_kw, solar_gen_kw, dsr_active,
-        hour, weekday, is_weekend, is_holiday, is_peak_hour, is_night_hour,
-        tariff_zone, day_of_year, timestamp.
-        Отсутствующие ковариаты заменяются нулями с предупреждением в лог.
+        Не меньше HISTORY_LENGTH + 168 последних часов подряд. Обязательные
+        колонки: timestamp и измеряемые величины MEASURED_COLUMNS. Календарные
+        признаки, праздники, тарифные зоны и скользящие статистики
+        пересчитываются из них, как при обучении.
 
     Returns
     -------
     np.ndarray shape=(FORECAST_HORIZON,) — прогноз в кВт·ч.
     """
-    from data.preprocessing import _add_lag_columns, _build_feature_matrix, inverse_scale
+    from data.preprocessing import _build_feature_matrix, inverse_scale
 
     model: tf.keras.Model = bundle["model"]
     scalers: Dict[str, Any] = bundle["scalers"]
@@ -259,13 +321,7 @@ def predict_from_bundle(
     history = int(config.get("HISTORY_LENGTH", 48))
     n_features = int(config.get("N_FEATURES", 26))
 
-    if len(recent_df) < history:
-        raise ValueError(
-            f"recent_df должен содержать не менее {history} строк "
-            f"(HISTORY_LENGTH), получено {len(recent_df)}"
-        )
-
-    df = _add_lag_columns(recent_df.copy()).iloc[-history:]
+    df = prepare_inference_frame(recent_df, history)
 
     features = _build_feature_matrix(
         df,

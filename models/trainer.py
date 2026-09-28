@@ -565,9 +565,13 @@ def compare_trainers(
     trainers: List[ModelTrainer],
     data: Dict[str, Any],
     split: str = "test",
+    failures: Optional[List[Dict[str, str]]] = None,
 ) -> Dict[str, Dict[str, float]]:
     """
     Оценивает все модели на одном split-е и печатает сводную таблицу.
+
+    Ошибка оценки — это отказ модели: она дописывается в failures. Прежде
+    модель молча выпадала из таблицы, а прогон считался полностью успешным.
 
     Колонка MASE — ключевая: значение >= 1 означает, что модель не превзошла
     сезонно-наивный прогноз и практической ценности не имеет.
@@ -584,6 +588,9 @@ def compare_trainers(
             )
         except Exception as exc:
             logger.error("Ошибка оценки %s: %s", trainer.model_name, exc)
+            if failures is not None:
+                failures.append({"model": trainer.model_name,
+                                 "error": f"оценка ({split}): {type(exc).__name__}: {exc}"})
 
     if not results:
         return results

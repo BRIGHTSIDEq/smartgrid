@@ -101,14 +101,10 @@ def _tariff_zone_code(hour: np.ndarray, weekday: np.ndarray,
 
     Порядок соответствует действующему в России: пик 07–10 и 17–21,
     полупик 10–17 и 21–23, ночь 23–07. В выходные и праздники пика нет.
+    Границы зон — из общего календаря utils.tariffs.
     """
-    # np.full по shape, а не по длине: функция вызывается и для одномерного
-    # ряда истории, и для двумерной матрицы (момент × шаг горизонта).
-    code = np.full(np.shape(hour), 0.5, dtype=np.float32)
-    code[(hour < 7) | (hour >= 23)] = 0.0
-    is_peak = (((hour >= 7) & (hour < 10)) | ((hour >= 17) & (hour < 21)))
-    code[is_peak & (weekday < 5) & (holiday < 0.5)] = 1.0
-    return code
+    from utils.tariffs import zone_codes
+    return zone_codes(hour, weekday, holiday)
 
 
 def build_future_known_frame(
@@ -207,6 +203,86 @@ def _make_series_windows(
             "X_future": X_future.astype(np.float32),
             "Y": Y.astype(np.float32),
             "anchor": anchors}
+
+
+def history_channels(grp: pd.DataFrame, cons_scaled: np.ndarray,
+                     weather_scalers: Dict[str, MinMaxScaler],
+                     hist_numeric: List[str]) -> Dict[str, np.ndarray]:
+    """
+    Исторические каналы одного ряда: потребление, календарь, погода, лаги.
+
+    Вынесено из prepare_panel_data, чтобы прогноз по сохранённой модели
+    строил признаки тем же кодом, что обучение, а не его копией.
+    """
+    hour = grp["hour"].values.astype(np.float32)
+    weekday = grp["weekday"].values.astype(np.float32)
+    holiday = grp["is_holiday"].values.astype(np.float32)
+    doy = grp["day_of_year"].values.astype(np.float32)
+
+    hs, hc = _cyclical(hour, 24.0)
+    ds, dc = _cyclical(weekday, 7.0)
+    ms, mc = _cyclical(doy, 365.0)
+
+    channels: Dict[str, np.ndarray] = {
+        "consumption": cons_scaled,
+        "hour_sin": hs, "hour_cos": hc,
+        "dow_sin": ds, "dow_cos": dc,
+        "month_sin": ms, "month_cos": mc,
+        "is_weekend": (weekday >= 5).astype(np.float32),
+        "is_holiday": holiday,
+        "tariff_zone": _tariff_zone_code(hour, weekday, holiday),
+    }
+    for col in hist_numeric:
+        channels[col] = weather_scalers[col].transform(
+            grp[col].values.reshape(-1, 1)).flatten().astype(np.float32)
+    # Лаги потребления в масштабе самого ряда.
+    for lag in (24, 168):
+        lagged = np.concatenate([np.full(lag, cons_scaled[0], dtype=np.float32),
+                                 cons_scaled[:-lag]])
+        channels[f"lag_{lag}h"] = lagged
+    return channels
+
+
+def future_channels_from_forecast(future: pd.DataFrame,
+                                  weather_scalers: Dict[str, MinMaxScaler]
+                                  ) -> Dict[str, np.ndarray]:
+    """
+    Известные заранее каналы одного целевого окна по готовому прогнозу погоды.
+
+    При обучении прогноз погоды имитируется шумом поверх факта
+    (build_future_known_frame); при эксплуатации он приходит от поставщика
+    прогноза. Календарь и нормировка те же, что при обучении. Возвращаются
+    массивы формы (1, horizon).
+    """
+    hour = future["hour"].values.astype(np.float32)[None, :]
+    weekday = future["weekday"].values.astype(np.float32)[None, :]
+    holiday = future["is_holiday"].values.astype(np.float32)[None, :]
+    doy = future["day_of_year"].values.astype(np.float32)[None, :]
+
+    hour_sin, hour_cos = _cyclical(hour, 24.0)
+    dow_sin, dow_cos = _cyclical(weekday, 7.0)
+    month_sin, month_cos = _cyclical(doy, 365.0)
+    tariff = _tariff_zone_code(hour, weekday, holiday)
+    channels: Dict[str, np.ndarray] = {
+        "fut_hour_sin": hour_sin, "fut_hour_cos": hour_cos,
+        "fut_dow_sin": dow_sin, "fut_dow_cos": dow_cos,
+        "fut_month_sin": month_sin, "fut_month_cos": month_cos,
+        "fut_is_weekend": (weekday >= 5).astype(np.float32), "fut_is_holiday": holiday,
+        "fut_tariff_zone": tariff,
+        "fut_is_peak": (tariff >= 0.99).astype(np.float32),
+        "fut_is_night": (tariff <= 0.01).astype(np.float32),
+    }
+    for name in FORECASTABLE_WEATHER:
+        if name not in future.columns:
+            continue
+        forecast = future[name].values.astype(np.float64)[None, :]
+        if name in _PHYSICAL_BOUNDS:
+            forecast = np.clip(forecast, *_PHYSICAL_BOUNDS[name])
+        if name in weather_scalers:
+            forecast = weather_scalers[name].transform(
+                forecast.reshape(-1, 1)).reshape(forecast.shape)
+        channels[f"fut_{name}_forecast"] = forecast.astype(np.float32)
+    return channels
 
 
 def prepare_panel_data(
@@ -316,32 +392,7 @@ def prepare_panel_data(
         series_scalers[series_key] = sc
         cons_scaled = sc.transform(cons).flatten().astype(np.float32)
 
-        hour = grp["hour"].values.astype(np.float32)
-        weekday = grp["weekday"].values.astype(np.float32)
-        holiday = grp["is_holiday"].values.astype(np.float32)
-        doy = grp["day_of_year"].values.astype(np.float32)
-
-        hs, hc = _cyclical(hour, 24.0)
-        ds, dc = _cyclical(weekday, 7.0)
-        ms, mc = _cyclical(doy, 365.0)
-
-        hist_channels: Dict[str, np.ndarray] = {
-            "consumption": cons_scaled,
-            "hour_sin": hs, "hour_cos": hc,
-            "dow_sin": ds, "dow_cos": dc,
-            "month_sin": ms, "month_cos": mc,
-            "is_weekend": (weekday >= 5).astype(np.float32),
-            "is_holiday": holiday,
-            "tariff_zone": _tariff_zone_code(hour, weekday, holiday),
-        }
-        for col in hist_numeric:
-            hist_channels[col] = weather_scalers[col].transform(
-                grp[col].values.reshape(-1, 1)).flatten().astype(np.float32)
-        # Лаги потребления в масштабе самого ряда.
-        for lag in (24, 168):
-            lagged = np.concatenate([np.full(lag, cons_scaled[0], dtype=np.float32),
-                                     cons_scaled[:-lag]])
-            hist_channels[f"lag_{lag}h"] = lagged
+        hist_channels = history_channels(grp, cons_scaled, weather_scalers, hist_numeric)
 
         if not feature_names_hist:
             # Потребление ОБЯЗАНО быть нулевым каналом: модели обращаются к
@@ -435,6 +486,7 @@ def prepare_panel_data(
         "static_names": static_cols,
         "static_mean": static_mean,
         "static_std": static_std,
+        "hist_numeric": hist_numeric,
         "history_length": history_length,
         "forecast_horizon": forecast_horizon,
         "timestamps": timestamps,

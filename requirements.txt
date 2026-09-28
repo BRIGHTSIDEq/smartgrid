@@ -25,3 +25,11 @@ seaborn>=0.12
 
 # Tests
 pytest>=7.4
+
+# Конфигурация клиента (utils/client_config.py)
+pyyaml>=6.0
+
+# REST API (service/api.py). Для исследовательского конвейера не нужны.
+fastapi>=0.110
+uvicorn>=0.29
+httpx>=0.27          # тестовый клиент FastAPI

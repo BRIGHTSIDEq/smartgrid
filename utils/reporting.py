@@ -252,6 +252,11 @@ def write_run_metadata(run_dir: str, meta: Dict[str, Any]) -> str:
     payload.setdefault("status", "completed")
     payload["schema_version"] = SCHEMA_VERSION
     payload["environment"] = collect_environment()
+    # Полный снимок параметров: метаданные перечисляли только часть, и
+    # воспроизвести прогон после смены значений по умолчанию было нельзя.
+    from config import Config
+    payload.setdefault("config", {k: v for k, v in Config.snapshot().items()
+                                  if not k.endswith("_DIR")})
     path = os.path.join(run_dir, "run_metadata.json")
     dump_strict_json(payload, path)
     logger.info("Метаданные прогона: %s", path)
@@ -503,12 +508,14 @@ def export_markdown_tables(
 
     if dm_rows:
         lines.append("## Таблица 2. Тест Диболда–Мариано (значимость различий)\n")
-        lines.append("| Модель A | Модель B | DM | p-value | Вывод |")
-        lines.append("|---|---|---|---|---|")
+        lines.append("| Модель A | Модель B | DM | p-value | p (HLN + Холм) | Вывод с поправками |")
+        lines.append("|---|---|---|---|---|---|")
         for r in dm_rows:
             lines.append(f"| {r['model_a']} | {r['model_b']} | {r['DM']:.3f} "
-                         f"| {r['p_value']:.4f} | {r['better']} |")
-        lines.append("")
+                         f"| {r['p_value']:.4f} | {r.get('p_holm', float('nan')):.4f} "
+                         f"| {r.get('better_holm', r['better'])} |")
+        lines.append("\n*Поправка Харви–Лейбурна–Ньюболда учитывает малую выборку, поправка "
+                     "Холма — число попарных сравнений.*\n")
 
     if storage_results:
         lines.append("## Таблица 3. Экономический эффект накопителя\n")

@@ -161,9 +161,9 @@ def test_selection_excludes_naive_from_best_model():
     src = inspect.getsource(panel_pipeline.run_panel_pipeline)
     assert '"Naive24", "HourlyProfile"' in src
     # Отбор идёт по валидации, тест используется после.
-    idx_val = src.index('compare_panel_models(trainers, data, "val")')
+    idx_val = src.index('compare_panel_models(trainers, data, "val"')
     idx_best = src.index("best_name = min(")
-    idx_test = src.index('compare_panel_models(trainers, data, "test")')
+    idx_test = src.index('compare_panel_models(trainers, data, "test"')
     assert idx_val < idx_best < idx_test
 
 

@@ -44,9 +44,10 @@ N_FEATURES: int = 26
 
 
 def _encode_tariff_zone(df):
+    from utils.tariffs import ZONE_CODE, zone_codes
+
     if "tariff_zone" in df.columns:
-        mapping = {"night": 0.0, "day": 0.5, "peak": 1.0}
-        return df["tariff_zone"].map(mapping).fillna(0.5).values.astype(np.float32)
+        return df["tariff_zone"].map(ZONE_CODE).fillna(ZONE_CODE["day"]).values.astype(np.float32)
     # Запасная ветка обязана давать ТУ ЖЕ кодировку, что и колонка tariff_zone.
     # Прежняя версия присваивала пик часам 10-17 и 21-23, то есть ровно
     # полупиковым, а настоящий пик 7-10 и 17-21 получал 0.5 — зоны были
@@ -57,10 +58,9 @@ def _encode_tariff_zone(df):
     holiday = (df["is_holiday"].values if "is_holiday" in df.columns
                else np.zeros(len(df)))
 
-    from data.panel_preprocessing import _tariff_zone_code
-    return _tariff_zone_code(np.asarray(hours, np.float32),
-                             np.asarray(weekday, np.float32),
-                             np.asarray(holiday, np.float32))
+    return zone_codes(np.asarray(hours, np.float32),
+                      np.asarray(weekday, np.float32),
+                      np.asarray(holiday, np.float32))
 
 
 def _add_lag_columns(df):
@@ -189,7 +189,7 @@ def _make_multivariate_windows(features, history, horizon):
 
 def prepare_data(df, history_length=48, forecast_horizon=24,
                  train_ratio=0.70, val_ratio=0.15):
-    """Полный пайплайн подготовки данных v7 (26 признаков)."""
+    """Подготовка агрегатного ряда: 26 признаков, окна, скалеры только на train."""
     df = _add_lag_columns(df)
     logger.info("Лаговые колонки добавлены: load_lag_24h, load_lag_48h, load_lag_168h")
 
@@ -285,7 +285,7 @@ def validate_data_integrity(data):
 
     О диапазоне Y. Скалер обучен на train, поэтому Y_train лежит в [0, 1], а
     val/test могут выходить за верхнюю границу: в данных есть годовой тренд
-    (+5%/год), и зимние пики второго года выше максимума первого. Это не ошибка,
+    (около 1.5% в год), и зимние пики второго года выше максимума первого. Это не ошибка,
     поэтому превышение до 1.50 даёт предупреждение, а не исключение. Значения
     выше 1.50 означают уже реальную проблему масштабирования и прерывают работу.
     """

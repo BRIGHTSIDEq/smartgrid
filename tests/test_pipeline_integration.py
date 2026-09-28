@@ -131,7 +131,7 @@ def test_model_bundle_roundtrip(tiny_data, tmp_path):
     assert bundle["scalers"]["scaler"] is not None
     assert bundle["config"]["N_FEATURES"] == data["n_features"]
 
-    recent = df.tail(200)
+    recent = df.tail(300)
     forecast = predict_from_bundle(bundle, recent)
 
     assert forecast.shape == (24,)
@@ -177,5 +177,5 @@ def test_predict_from_bundle_rejects_short_history(tiny_data, tmp_path):
     )
     bundle = load_model_bundle(bundle_dir)
 
-    with pytest.raises(ValueError, match="не менее 48"):
+    with pytest.raises(ValueError, match="не меньше 216"):
         predict_from_bundle(bundle, df.head(10))

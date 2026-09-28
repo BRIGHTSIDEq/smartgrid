@@ -171,6 +171,10 @@ class Config:
 
     EPOCHS: int = 240
     BATCH_SIZE: int = 32
+    # Число точек отсечения walk-forward, если --rolling-origin не задан.
+    # В полном режиме процедура включена: без неё вывод о лучшей модели
+    # держится на одном тестовом периоде.
+    ROLLING_ORIGINS: int = 0
     PATIENCE: int = 25
     LR_PATIENCE: int = 10
     LR_FACTOR: float = 0.5
@@ -260,7 +264,7 @@ class Config:
 
     # ── Накопитель энергии ──────────────────────────────────────────────────
     BATTERY_CAPACITY: float = 4_500.0
-    BATTERY_MAX_POWER: float = 2_250.0            # 0.5C — типично для сетевых BESS
+    BATTERY_MAX_POWER: float = 2_250.0            # пересчитывается в _derive_battery_economics
     BATTERY_EFFICIENCY: float = RealWorldReference.BATTERY_ROUND_TRIP_EFF
     BATTERY_OM_SHARE: float = 0.015
     DEMAND_CHARGE_RUB_PER_KW_MONTH: float = 950.0
@@ -289,6 +293,37 @@ class Config:
     LOG_LEVEL: int = logging.INFO
     LOG_FORMAT: str = "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"
     LOG_DATE_FMT: str = "%Y-%m-%d %H:%M:%S"
+
+    # Пути не сбрасываются: их перенаправляют тесты и каталог прогона, а
+    # режим к ним отношения не имеет.
+    _RESET_KEEP = ("BASE_DIR", "OUTPUT_DIR", "MODELS_DIR", "PLOTS_DIR", "LOGS_DIR")
+
+    @classmethod
+    def snapshot(cls) -> dict:
+        """Все параметры конфигурации: верхний регистр, не методы."""
+        import copy
+        return {k: copy.deepcopy(v) for k, v in vars(cls).items()
+                if k.isupper() and not k.startswith("_") and not callable(v)
+                and not isinstance(v, (classmethod, staticmethod))}
+
+    @classmethod
+    def restore(cls, values: dict) -> None:
+        import copy
+        for k, v in values.items():
+            setattr(cls, k, copy.deepcopy(v))
+
+    @classmethod
+    def reset(cls):
+        """
+        Возвращает параметры к значениям по умолчанию перед установкой режима.
+
+        Режимы задают только часть параметров, остальное наследовалось от
+        предыдущего вызова: после set_smoke_mode режим optimal получал размер
+        батча 64 вместо 32, а сценарий forward «залипал» для следующего
+        прогона в том же процессе. Порядок вызовов определял результат.
+        """
+        cls.restore({k: v for k, v in cls._DEFAULTS.items() if k not in cls._RESET_KEEP})
+        return cls
 
     @classmethod
     def create_dirs(cls):
@@ -354,8 +389,8 @@ class Config:
 
             cycle_cost = CAPEX / (ёмкость × глубина разряда × ресурс в циклах)
 
-        При 25 000 руб/кВт·ч, DoD 80% и 6000 циклах получается около
-        5.2 руб/кВт·ч — величина, сопоставимая с тарифным спредом. Занижение
+        При 16 000 руб/кВт·ч, DoD 80% и 6000 циклах получается около
+        3.3 руб/кВт·ч — величина, сопоставимая с тарифным спредом. Занижение
         этого параметра делает арбитраж искусственно выгодным.
         """
         ref = RealWorldReference
@@ -434,6 +469,7 @@ class Config:
     @classmethod
     def set_panel_smoke_mode(cls):
         """Минимальная панель для проверки работоспособности конвейера."""
+        cls.reset()
         cls.PANEL_CITIES = 1; cls.PANEL_FEEDERS_PER_CITY = 4; cls.PANEL_DAYS = 90
         cls.PANEL_EPOCHS = 20; cls.PANEL_PATIENCE = 6
         cls.PANEL_HISTORY = 48; cls.PANEL_XGB_ESTIMATORS = 60
@@ -446,6 +482,7 @@ class Config:
     @classmethod
     def set_panel_fast_mode(cls):
         """Рабочая панель: несколько городов, год истории."""
+        cls.reset()
         cls.PANEL_CITIES = 2; cls.PANEL_FEEDERS_PER_CITY = 8; cls.PANEL_DAYS = 365
         cls.PANEL_EPOCHS = 60; cls.PANEL_PATIENCE = 10
         cls.PANEL_HISTORY = 48; cls.PANEL_XGB_ESTIMATORS = 200
@@ -480,6 +517,7 @@ class Config:
         Это осознанное упрощение, а не полноценная потоковая подача: она нужна,
         чтобы обучаться на всех окнах без прореживания.
         """
+        cls.reset()
         cls.PANEL_CITIES = 4; cls.PANEL_FEEDERS_PER_CITY = 24
         cls.PANEL_DAYS = 365 * 3
         cls.PANEL_EPOCHS = 120; cls.PANEL_PATIENCE = 15
@@ -500,6 +538,7 @@ class Config:
         совместимы по формам данных. Метрики в этом режиме интерпретации
         не подлежат: 30 дней данных и 2 эпохи обучения.
         """
+        cls.reset()
         cls.DAYS = 40; cls.HOUSEHOLDS = 60; cls.EPOCHS = 2
         cls.PATIENCE = 2; cls.LR_PATIENCE = 1
         cls.HISTORY_LENGTH = 48; cls.FORECAST_HORIZON = 24
@@ -522,6 +561,7 @@ class Config:
 
     @classmethod
     def set_fast_mode(cls):
+        cls.reset()
         cls.DAYS = 365; cls.HOUSEHOLDS = 250; cls.EPOCHS = 120
         cls.PATIENCE = 20; cls.LR_PATIENCE = 8
         cls.HISTORY_LENGTH = 48; cls.STORAGE_HORIZON = 720; cls.N_FEATURES = 26
@@ -544,6 +584,7 @@ class Config:
 
     @classmethod
     def set_optimal_mode(cls):
+        cls.reset()
         # Усиленный режим для достижения более высокого R² у seq-моделей.
         cls.DAYS = 730; cls.HOUSEHOLDS = 2500; cls.EPOCHS = 240
         cls.PATIENCE = 25; cls.LR_PATIENCE = 10
@@ -582,8 +623,10 @@ class Config:
     @classmethod
     def set_full_mode(cls):
         """Максимальное качество (full mode): больше данных + более ёмкие seq-модели."""
+        cls.reset()
         cls.DAYS = 730; cls.HOUSEHOLDS = 2500; cls.EPOCHS = 320
         cls.PATIENCE = 35; cls.LR_PATIENCE = 12
+        cls.ROLLING_ORIGINS = 4
         cls.HISTORY_LENGTH = 192; cls.STORAGE_HORIZON = 720; cls.N_FEATURES = 26
         cls.BATCH_SIZE = 8
         # На 730 днях и большом количестве окон можно использовать более ёмкий LSTM.
@@ -650,3 +693,8 @@ class Config:
         log.info("  Экономика:   CAPEX %.1f млн руб, деградация %.2f руб/кВт·ч оборота",
                  cls.BATTERY_COST_RUB/1e6, cls.BATTERY_CYCLE_COST)
         log.info("─" * 50)
+
+
+# Значения по умолчанию фиксируются сразу после определения класса, до
+# любой установки режима.
+Config._DEFAULTS = Config.snapshot()

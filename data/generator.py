@@ -35,6 +35,8 @@ from typing import Tuple
 import numpy as np
 import pandas as pd
 
+from utils.tariffs import peak_clock_hours, zone_names
+
 logger = logging.getLogger("smart_grid.data.generator")
 
 
@@ -346,7 +348,7 @@ def generate_smartgrid_data(
         anomaly_factor[i:i+int(rng.integers(1,4))] *= rng.uniform(0.70,0.85)
 
     # AR шум GARCH
-    pm = ((hour_of_day>=7)&(hour_of_day<10)|(hour_of_day>=17)&(hour_of_day<21)).astype(float)
+    pm = peak_clock_hours(hour_of_day).astype(float)
     te = (np.abs(temperature-temp_setpoint)>15).astype(float)
     sigma_t = ar_sigma*(1.0+0.7*pm+0.5*te)
     ar = np.zeros(hours); ar[0]=rng.normal(0,ar_sigma)
@@ -374,7 +376,7 @@ def generate_smartgrid_data(
                 residential_mean_kw, kwh_per_household_month)
 
     # ══════════════════════════════════════════════════════════════════════
-    # EV ЗАРЯДКА (v6: исправлен time-wrap баг + увеличена мощность)
+    # ЗАРЯДКА ЭЛЕКТРОМОБИЛЕЙ
     # ══════════════════════════════════════════════════════════════════════
     n_ev = int(households * ev_penetration)
     ev_load_raw = np.zeros(hours, np.float64)
@@ -413,7 +415,7 @@ def generate_smartgrid_data(
             session_kwh = rng.uniform(8.0, 26.0)
             duration = int(np.clip(round(session_kwh / max(power, 1e-6)), 1, 9))
 
-            # ── ИСПРАВЛЕНИЕ v6 (КРИТИЧЕСКОЕ) ─────────────────────────────
+            # ── Сессия, переходящая через полночь ─────────────────────────
             # БЫЛО: abs_h = day_idx*24 + (base_h + h) % 24
             #   При base_h=22, h=2: (22+2)%24=0 → hour 0 ТЕКУЩЕГО дня!
             #   Все ночные сессии накладывались на midnight того же дня.
@@ -479,11 +481,10 @@ def generate_smartgrid_data(
     dsr_active   = np.zeros(hours, np.float32)
     dsr_strength = np.zeros(hours, np.float32)
     n_dsr = max(2, int(days/365*dsr_events_per_year))
-    # События назначаются в пиковые тарифные часы: 07–10 и 17–21 в будни.
-    peak_wd = np.where(
-        (((hour_of_day>=7)&(hour_of_day<10)) | ((hour_of_day>=17)&(hour_of_day<21)))
-        &(is_weekend==0)
-    )[0]
+    # События назначаются в пиковые часы будней. Праздники здесь намеренно не
+    # исключены: иначе изменился бы порядок случайных розыгрышей и все
+    # сгенерированные ряды (см. этап 2 в docs/ROADMAP.md).
+    peak_wd = np.where(peak_clock_hours(hour_of_day) & (is_weekend == 0))[0]
     used_h = set()
     for _ in range(n_dsr):
         if len(peak_wd) == 0: break
@@ -561,7 +562,7 @@ def generate_smartgrid_data(
         industrial_shape * (nonres_mean_kw / max(industrial_shape.mean(), 1e-9))
     ).astype(np.float32)
 
-    # ── DEMAND CASCADE (v6 новое) ─────────────────────────────────────────
+    # ── DEMAND CASCADE ─────────────────────────────────────────
     # После аномально высокого часа нагрузка продолжает быть высокой (инерция).
     # Это требует от модели понимать "состояние" нагрузки, а не только текущие признаки.
     # LinReg с flat features не может уловить этот нелинейный decay-эффект.
@@ -576,7 +577,7 @@ def generate_smartgrid_data(
             cascade_state = max(cascade_state - 0.04, 0.0)
         cascade_factor[h] = 1.0 + cascade_state
 
-    # ── НЕЛИНЕЙНОЕ "СОСТОЯНИЕ СЕТИ" (v7): память + пороги + взаимодействия ──
+    # ── НЕЛИНЕЙНОЕ «СОСТОЯНИЕ СЕТИ»: память, пороги, взаимодействия ──────
     # Цель: сделать задачу менее линейной, но физически правдоподобной.
     # Компонент зависит от:
     #   1) экстремальной температуры,
@@ -586,7 +587,7 @@ def generate_smartgrid_data(
     grid_stress = np.zeros(hours, np.float32)
     ev_norm_proxy = ev_load_raw / (float(ev_load_raw.max()) + 1e-6)
     temp_extreme = np.clip(np.abs(temperature - temp_setpoint) / 22.0, 0.0, 1.4).astype(np.float32)
-    peak_hours = (((hour_of_day >= 7) & (hour_of_day < 10)) | ((hour_of_day >= 17) & (hour_of_day < 21))).astype(np.float32)
+    peak_hours = peak_clock_hours(hour_of_day).astype(np.float32)
     stress_state = 0.0
     for h in range(hours):
         trigger = (
@@ -604,7 +605,7 @@ def generate_smartgrid_data(
         + 0.03 * (grid_stress ** 2)
     ).astype(np.float32)
 
-    # ── DSR rebound (v7): после снятия ограничения часть спроса возвращается ──
+    # ── Отскок после события управления спросом: часть спроса возвращается ──
     dsr_rebound = np.zeros(hours, np.float32)
     for h in range(1, hours):
         if dsr_active[h - 1] > 0 and dsr_active[h] == 0:
@@ -645,8 +646,8 @@ def generate_smartgrid_data(
     bc_mean = float(base_consumption.mean())
     logger.info("Сгенерировано %d записей. Потребление: min=%.1f, mean=%.1f, max=%.1f кВт·ч",
                 len(consumption), float(consumption.min()), float(consumption.mean()), float(consumption.max()))
-    logger.info("  EV нагрузка: mean=%.1f кВт (%.1f%% базовой)  [v5 был: ~%.1f%% — был time-wrap баг]",
-                ev_mean, 100*ev_mean/max(bc_mean,1), 1.2)
+    logger.info("  EV нагрузка: mean=%.1f кВт (%.1f%% базовой)",
+                ev_mean, 100*ev_mean/max(bc_mean,1))
     logger.info("  Solar: mean=%.1f кВт, max=%.1f кВт", float(solar_gen_raw.mean()), float(solar_gen_raw.max()))
     logger.info("  DSR событий активно: %d ч | Industrial: %d заводов | Cascade max=%.2f",
                 int(dsr_active.sum()), industrial_loads, float(cascade_factor.max()))
@@ -665,13 +666,7 @@ def generate_smartgrid_data(
     # Тарифные зоны по действующему в РФ порядку: пиковая 07–10 и 17–21,
     # полупиковая 10–17 и 21–23, ночная 23–07. В выходные и праздники
     # пиковая зона не применяется.
-    tariff_arr = np.empty(hours, dtype=object)
-    for i in range(hours):
-        h, wd, ih = int(hour_of_day[i]), int(weekday[i]), bool(holiday_mask[i])
-        if h<7 or h>=23: tariff_arr[i]="night"
-        elif wd>=5 or ih: tariff_arr[i]="day"
-        elif (7<=h<10) or (17<=h<21): tariff_arr[i]="peak"
-        else: tariff_arr[i]="day"
+    tariff_arr = zone_names(hour_of_day, weekday, holiday_mask)
     is_peak_hour  = (tariff_arr=="peak").astype(np.int8)
     is_night_hour = (tariff_arr=="night").astype(np.int8)
 

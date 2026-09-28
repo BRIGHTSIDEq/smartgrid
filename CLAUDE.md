@@ -46,6 +46,14 @@ python main.py --mode panel-smoke --dataset uci --seed 0
 | `panel-optimal` | 24–57 мин на сид |
 | `full` | несколько часов |
 
+Инструменты поверх каталогов прогонов (модели не переобучаются):
+
+```bash
+python -m analysis.economics results/runs/<прогон> --category 4 --sensitivity-source <модель>
+python forecast.py --models results/runs/<прогон>/models --history h.csv --weather w.csv --out f.csv
+python -m utils.dashboard results/runs/<прогон>
+```
+
 ## Git
 
 - Push только через порт 443, порт 22 закрыт:

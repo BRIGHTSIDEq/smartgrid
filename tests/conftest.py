@@ -11,6 +11,22 @@ import pandas as pd
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _isolate_config():
+    """
+    Возвращает Config в исходное состояние после каждого теста.
+
+    Тесты переключают режимы и подменяют параметры. Без восстановления
+    результат теста зависел от того, какие тесты шли перед ним.
+    """
+    from config import Config
+    saved = Config.snapshot()
+    yield
+    for key in [k for k in Config.snapshot() if k not in saved]:
+        delattr(Config, key)
+    Config.restore(saved)
+
+
 def write_uci_file(path, start="2013-01-01 00:15:00", periods=35_040,
                    connect_date="2013-07-01"):
     """

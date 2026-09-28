@@ -48,6 +48,39 @@ def estimate_windows(n_series: int, days: int, history: int, horizon: int,
     return n_series * (per_series // max(stride, 1))
 
 
+UCI_LIKE_DROP = ("temperature", "humidity", "wind_speed", "cloud_cover",
+                 "ev_load_kw", "solar_gen_kw", "dsr_active")
+
+
+def to_uci_feature_set(df: "pd.DataFrame", train_ratio: float) -> "pd.DataFrame":
+    """
+    Синтетическая панель с тем же набором признаков, что у UCI.
+
+    В таблице 2×2 синтетика и UCI различались не только природой данных, но и
+    числом признаков: 19 исторических каналов против 12 и семь статических
+    признаков генератора против семи профильных. Сравнение «синтетика против
+    реальности» тем самым смешивалось со сравнением «много признаков против
+    мало». Здесь у синтетики убираются погода, электромобили, микрогенерация и
+    события управления спросом, а статические признаки считаются той же
+    функцией и по тому же обучающему отрезку, что у UCI.
+    """
+    import pandas as pd
+    from data.uci import build_static_features
+
+    base = df.drop(columns=[c for c in df.columns
+                            if c in UCI_LIKE_DROP or c.startswith("static_")])
+    n_hours = df["timestamp"].nunique()
+    train_end = int(n_hours * train_ratio)
+    frames = []
+    for _, grp in base.groupby(["city_id", "feeder_id"], sort=True):
+        grp = grp.sort_values("timestamp")
+        series = pd.Series(grp["consumption"].to_numpy(),
+                           index=pd.DatetimeIndex(grp["timestamp"]))
+        static = build_static_features(series, train_end)
+        frames.append(grp.assign(**static))
+    return pd.concat(frames, ignore_index=True)
+
+
 def load_panel_dataset(args, logger_obj) -> Tuple[Any, Any, Dict[str, Any]]:
     """
     Отдаёт панель либо от собственного генератора, либо из набора UCI.
@@ -102,10 +135,30 @@ def load_panel_dataset(args, logger_obj) -> Tuple[Any, Any, Dict[str, Any]]:
         dsr_events_per_year=Config.GEN_DSR_EVENTS_PER_YEAR,
         dsr_strength_range=Config.GEN_DSR_STRENGTH,
     )
+    if getattr(args, "feature_set", "full") == "uci":
+        df = to_uci_feature_set(df, Config.TRAIN_RATIO)
+        logger_obj.info("Синтетика с набором признаков UCI: без погоды, электромобилей, "
+                        "микрогенерации и событий; статика по обучающему отрезку")
+        return df, specs, {"источник": "synthetic", "набор признаков": "uci",
+                           "рядов отобрано": len(specs)}
     return df, specs, {"источник": "synthetic", "рядов отобрано": len(specs)}
 
 
-def build_panel_models(data: Dict[str, Any], seed: int) -> List[Tuple[Any, str]]:
+def dataset_label(args) -> str:
+    """
+    Источник данных для ключа сводных таблиц и имени каталога.
+
+    Синтетика с урезанным набором признаков — отдельный источник: смешивать
+    её сиды с полной синтетикой при агрегации нельзя.
+    """
+    dataset = getattr(args, "dataset", "synthetic")
+    if dataset == "synthetic" and getattr(args, "feature_set", "full") == "uci":
+        return "synthetic-ucifeat"
+    return dataset
+
+
+def build_panel_models(data: Dict[str, Any], seed: int,
+                       keys: Optional[List[str]] = None) -> List[Tuple[Any, str]]:
     """
     Собирает состав моделей для панели.
 
@@ -135,26 +188,31 @@ def build_panel_models(data: Dict[str, Any], seed: int) -> List[Tuple[Any, str]]
         lr_warmup_fraction=Config.TRANSFORMER_WARMUP_FRACTION,
     )
 
-    return [
-        (PanelNaive24(), "Naive24"),
-        (PanelHourlyProfile(), "HourlyProfile"),
-        (build_panel_ridge(), "Ridge"),
-        (build_panel_xgboost(n_estimators=Config.PANEL_XGB_ESTIMATORS, seed=seed),
+    models = [
+        ("naive24", PanelNaive24(), "Naive24"),
+        ("profile", PanelHourlyProfile(), "HourlyProfile"),
+        ("ridge", build_panel_ridge(), "Ridge"),
+        ("xgboost", build_panel_xgboost(n_estimators=Config.PANEL_XGB_ESTIMATORS, seed=seed),
          "XGBoost"),
-        (dlinear, "DLinear"),
+        ("dlinear", dlinear, "DLinear"),
     ]
+    # Ключ --models прежде в panel-режимах не читался вовсе: запрос
+    # «--models ridge» обучал все пять моделей.
+    return [(model, name) for key, model, name in models
+            if keys is None or key in keys]
 
 
 PREPROCESSING_KEYS = (
     "series_index", "series_scalers", "weather_scalers",
     "feature_names_hist", "feature_names_future", "static_names",
     "static_mean", "static_std", "history_length", "forecast_horizon",
-    "consumption_channel",
+    "consumption_channel", "hist_numeric",
 )
 
 
 def save_panel_models(trainers: List[Any], data: Dict[str, Any], models_dir: str,
-                      best_name: str) -> Dict[str, Any]:
+                      best_name: str,
+                      quantile_models: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """
     Сохраняет обученные панельные модели и состояние предобработки.
 
@@ -172,7 +230,7 @@ def save_panel_models(trainers: List[Any], data: Dict[str, Any], models_dir: str
 
     os.makedirs(models_dir, exist_ok=True)
     manifest: Dict[str, Any] = {"best_model_by_val": best_name, "models": {},
-                                "failed": {}}
+                                "failed": {}, "quantile_models": {}}
     for trainer in trainers:
         try:
             if trainer._is_keras():
@@ -187,6 +245,26 @@ def save_panel_models(trainers: List[Any], data: Dict[str, Any], models_dir: str
             logger.warning("Модель %s не сохранена: %s", trainer.name, exc)
             manifest["failed"][trainer.name] = f"{type(exc).__name__}: {exc}"
 
+    # Вероятностные модели сохраняются отдельно: у них другой выход
+    # (горизонт × уровни), и в отбор точечной модели они не входят.
+    for name, model in (quantile_models or {}).items():
+        try:
+            import tensorflow as tf
+            if isinstance(model, tf.keras.Model):
+                fname = f"quantile_{name}.keras"
+                model.save(os.path.join(models_dir, fname))
+            else:
+                fname = f"quantile_{name}.pkl"
+                with open(os.path.join(models_dir, fname), "wb") as f:
+                    pickle.dump(model, f)
+            manifest["quantile_models"][name] = fname
+        except Exception as exc:
+            logger.warning("Вероятностная модель %s не сохранена: %s", name, exc)
+            manifest["failed"][name] = f"{type(exc).__name__}: {exc}"
+    if quantile_models:
+        from models.quantile_models import DEFAULT_QUANTILES
+        manifest["quantiles"] = list(DEFAULT_QUANTILES)
+
     with open(os.path.join(models_dir, "preprocessing.pkl"), "wb") as f:
         pickle.dump({k: data[k] for k in PREPROCESSING_KEYS if k in data}, f)
     manifest["preprocessing"] = "preprocessing.pkl"
@@ -198,9 +276,60 @@ def save_panel_models(trainers: List[Any], data: Dict[str, Any], models_dir: str
     return manifest
 
 
+def export_panel_forecast_series(trainer: Any, data: Dict[str, Any], run_dir: str,
+                                 split: str = "test") -> Optional[str]:
+    """
+    Сохраняет прогноз «на сутки вперёд» по каждому ряду в длинном формате.
+
+    Берутся окна, чей целевой отрезок начинается в полночь: они стыкуются в
+    непрерывный ряд без перекрытий, как заявка на следующие сутки. По этим
+    рядам офлайн считается экономика для каждого клиента панели
+    (analysis/economics.py), не переобучая модели.
+
+    При прореживании окон (panel-optimal) полуночные окна идут не каждые
+    сутки, ряд получился бы с дырами, и файл не пишется.
+    """
+    from data.panel_preprocessing import inverse_scale_series
+
+    if int(data.get("window_stride", 1)) != 1:
+        logger.info("Ряды прогнозов по клиентам не сохранены: окна прорежены шагом %d",
+                    data["window_stride"])
+        return None
+
+    series = data[f"series_{split}"]
+    anchors = data[f"anchor_{split}"]
+    history = int(data["history_length"])
+    horizon = int(data["forecast_horizon"])
+    stamps = pd.DatetimeIndex(pd.to_datetime(data["timestamps"]))
+
+    starts = anchors + history
+    midnight = stamps[np.minimum(starts, len(stamps) - 1)].hour == 0
+    pred = inverse_scale_series(data, trainer.predict(data, split), series)
+    true = inverse_scale_series(data, data[f"Y_{split}"], series)
+
+    frames = []
+    for sid in np.unique(series):
+        rows = np.where((series == sid) & midnight)[0]
+        rows = rows[np.argsort(starts[rows])]
+        for r in rows:
+            t = stamps[starts[r]: starts[r] + horizon]
+            if len(t) < horizon:
+                continue
+            frames.append(pd.DataFrame({
+                "series": data["series_index"][int(sid)], "timestamp": t,
+                "forecast": pred[r], "actual": true[r]}))
+    if not frames:
+        return None
+    path = os.path.join(run_dir, f"forecast_series_panel_{split}.csv")
+    pd.concat(frames, ignore_index=True).to_csv(path, index=False, encoding="utf-8-sig")
+    logger.info("Ряды прогнозов по клиентам: %s", path)
+    return path
+
+
 def run_probabilistic_block(data: Dict[str, Any], args, run_dir: str,
                            logger_obj,
                            failures: Optional[List[Dict[str, str]]] = None,
+                           trained: Optional[Dict[str, Any]] = None,
                            ) -> List[Dict[str, Any]]:
     """
     Обучает и оценивает вероятностные модели на той же панели.
@@ -280,6 +409,8 @@ def run_probabilistic_block(data: Dict[str, Any], args, run_dir: str,
         result["model"] = name
         result["train_time_sec"] = round(time.time() - t0, 1)
         rows.append(result)
+        if trained is not None:
+            trained[name] = model
 
         logger_obj.info(
             "%-16s pinball=%9.3f | покрытие %.3f при номинале %.2f | "
@@ -346,14 +477,14 @@ def run_panel_pipeline(args, logger_obj) -> int:
             return 1
 
     run_dir = reporting.make_run_dir(Config.OUTPUT_DIR, args.mode, args.scenario, args.seed,
-                                     dataset=getattr(args, "dataset", "synthetic"))
+                                     dataset=dataset_label(args))
     Config.PLOTS_DIR = os.path.join(run_dir, "plots")
     Config.MODELS_DIR = os.path.join(run_dir, "models")
     os.makedirs(Config.PLOTS_DIR, exist_ok=True)
     os.makedirs(Config.MODELS_DIR, exist_ok=True)
 
     # ── [1/6] Данные ────────────────────────────────────────────────────────
-    dataset = getattr(args, "dataset", "synthetic")
+    dataset = dataset_label(args)
     logger_obj.info("\n[1/6] Подготовка панели (источник: %s)...", dataset)
     df, specs, source_report = load_panel_dataset(args, logger_obj)
 
@@ -371,7 +502,11 @@ def run_panel_pipeline(args, logger_obj) -> int:
 
     # ── [3/6] Обучение ──────────────────────────────────────────────────────
     logger_obj.info("\n[3/6] Обучение глобальных моделей...")
-    to_train = build_panel_models(data, args.seed)
+    model_spec = getattr(args, "models", "all")
+    keys = None
+    if model_spec.strip().lower() != "all":
+        keys = [k.strip().lower() for k in model_spec.split(",") if k.strip()]
+    to_train = build_panel_models(data, args.seed, keys)
     requested = [name for _, name in to_train]
     trained: List[str] = []
     failed: List[Dict[str, str]] = []
@@ -396,7 +531,12 @@ def run_panel_pipeline(args, logger_obj) -> int:
 
     # ── [4/6] Отбор по валидации и оценка на тесте ──────────────────────────
     logger_obj.info("\n[4/6] Отбор по ВАЛИДАЦИИ, затем оценка на тесте...")
-    val_metrics = compare_panel_models(trainers, data, "val")
+    val_metrics = compare_panel_models(trainers, data, "val", failures=failed)
+    trainers = [t for t in trainers if t.name in val_metrics]
+    trained = [n for n in trained if n in val_metrics]
+    if not trainers:
+        logger_obj.error("Ни одну модель не удалось оценить на валидации.")
+        return 1
     learned = {n: m for n, m in val_metrics.items()
                if n not in ("Naive24", "HourlyProfile")}
     pool = learned or val_metrics
@@ -419,7 +559,12 @@ def run_panel_pipeline(args, logger_obj) -> int:
         best_name, pool[best_name].get("MASE", float("nan")),
         pool[best_name]["MAE_macro"])
 
-    test_metrics = compare_panel_models(trainers, data, "test")
+    test_metrics = compare_panel_models(trainers, data, "test", failures=failed)
+    trainers = [t for t in trainers if t.name in test_metrics]
+    trained = [n for n in trained if n in test_metrics]
+    if best_name not in test_metrics:
+        logger_obj.error("Лучшая по валидации модель %s не оценена на тесте.", best_name)
+        return 1
 
     # Метрики пишутся сразу после оценки: сбой вероятностного блока или
     # иерархии иначе уничтожал результат обучения. В конце прогона файлы
@@ -442,12 +587,14 @@ def run_panel_pipeline(args, logger_obj) -> int:
     quantile_rows: List[Dict[str, Any]] = []
     failed_quantile: List[Dict[str, str]] = []
     failed_blocks: List[Dict[str, str]] = []
+    quantile_trained: Dict[str, Any] = {}
     if getattr(args, "probabilistic", False):
         logger_obj.info("Вероятностный прогноз: квантили 0.1, 0.5, 0.9")
         quantile_rows = reporting.run_optional_block(
             "вероятностный прогноз",
             lambda: run_probabilistic_block(data, args, run_dir, logger_obj,
-                                            failures=failed_quantile),
+                                            failures=failed_quantile,
+                                            trained=quantile_trained),
             failed_blocks) or []
 
     # ── [6/6] Экспорт ───────────────────────────────────────────────────────
@@ -509,11 +656,22 @@ def run_panel_pipeline(args, logger_obj) -> int:
     reporting.export_markdown_tables(flat, run_dir)
     reporting.aggregate_seeds(Config.OUTPUT_DIR)
 
+    series_path = reporting.run_optional_block(
+        "ряды прогнозов по клиентам",
+        lambda: export_panel_forecast_series(best_trainer, data, run_dir),
+        failed_blocks)
+    if series_path:
+        from analysis.economics import write_panel_report
+        reporting.run_optional_block(
+            "экономика по клиентам, категория 4",
+            lambda: write_panel_report(run_dir, category=4), failed_blocks)
+
     # Модели сохраняются после метрик: сбой сериализации не должен стоить
     # уже посчитанных результатов.
     manifest = reporting.run_optional_block(
         "сохранение моделей",
-        lambda: save_panel_models(trainers, data, Config.MODELS_DIR, best_name),
+        lambda: save_panel_models(trainers, data, Config.MODELS_DIR, best_name,
+                                  quantile_models=quantile_trained),
         failed_blocks) or {"models": {}, "failed": {}}
     if manifest["failed"]:
         failed_blocks.append({"block": "сохранение моделей",
@@ -522,6 +680,10 @@ def run_panel_pipeline(args, logger_obj) -> int:
     run_meta["unsaved_models"] = manifest["failed"]
     run_meta["failed_blocks"] = failed_blocks
     reporting.write_run_metadata(run_dir, run_meta)
+
+    from utils.dashboard import build_dashboard
+    reporting.run_optional_block("сводка dashboard.html",
+                                 lambda: build_dashboard(run_dir), failed_blocks)
 
     elapsed = (time.time() - t_start) / 60
     if failed:
